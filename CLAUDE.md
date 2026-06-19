@@ -47,7 +47,33 @@ cargo install cargo-watch
 cargo watch -x run
 ```
 
-## Project layout (planned)
+## Current status
+
+**Phase 1 complete** (garboard → main). **Phase 2 in progress** (telltale branch).
+
+| Phase | Branch | Status |
+|---|---|---|
+| 1 — Foundation | garboard → main | ✅ complete |
+| 2 — Transparent proxy | telltale | 🔨 in progress |
+| 3 — Circuit breaker + health | — | pending |
+| 4 — Fallback chain + session affinity | — | pending |
+| 5 — VRAM accounting + priority queues | — | pending |
+| 6 — Async job dispatch | — | pending |
+| 7 — Advanced compute + full metrics | — | pending |
+
+## Project layout
+
+**What exists now (Phase 1):**
+
+```
+src/
+  main.rs       — tokio::main, build_router(), init_tracing()
+  config.rs     — Config from PORT, LOG_LEVEL, LOG_FORMAT env vars
+  error.rs      — FairleadError enum with IntoResponse impl
+  health.rs     — GET /health → {"status":"ok"}
+```
+
+**Planned layout (Phases 2–7):**
 
 ```
 src/
