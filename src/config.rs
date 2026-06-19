@@ -12,6 +12,12 @@ pub struct Config {
     /// Ordered list of backend base URLs (e.g. ["http://loki:8000/v1"]).
     /// Parsed from BACKENDS env var (comma-separated). Empty means no backends.
     pub backends: Vec<String>,
+    /// Consecutive failures required to open a circuit. Default: 3.
+    pub circuit_failure_threshold: u32,
+    /// Seconds to wait in Open state before probing again (Half-open). Default: 30.
+    pub circuit_cooldown_secs: u64,
+    /// Seconds between background health probes per backend. Default: 10.
+    pub health_probe_interval_secs: u64,
 }
 
 impl Config {
@@ -44,6 +50,21 @@ impl Config {
                         .collect()
                 })
                 .unwrap_or_default(),
+
+            circuit_failure_threshold: get("CIRCUIT_FAILURE_THRESHOLD")
+                .unwrap_or_else(|_| "3".to_string())
+                .parse()
+                .map_err(|e| anyhow!("invalid CIRCUIT_FAILURE_THRESHOLD: {}", e))?,
+
+            circuit_cooldown_secs: get("CIRCUIT_COOLDOWN_SECS")
+                .unwrap_or_else(|_| "30".to_string())
+                .parse()
+                .map_err(|e| anyhow!("invalid CIRCUIT_COOLDOWN_SECS: {}", e))?,
+
+            health_probe_interval_secs: get("HEALTH_PROBE_INTERVAL_SECS")
+                .unwrap_or_else(|_| "10".to_string())
+                .parse()
+                .map_err(|e| anyhow!("invalid HEALTH_PROBE_INTERVAL_SECS: {}", e))?,
         })
     }
 }
@@ -105,6 +126,27 @@ mod tests {
     fn backends_empty_by_default() {
         let cfg = Config::from_lookup(env(&[])).unwrap();
         assert!(cfg.backends.is_empty());
+    }
+
+    #[test]
+    fn circuit_defaults() {
+        let cfg = Config::from_lookup(env(&[])).unwrap();
+        assert_eq!(cfg.circuit_failure_threshold, 3);
+        assert_eq!(cfg.circuit_cooldown_secs, 30);
+        assert_eq!(cfg.health_probe_interval_secs, 10);
+    }
+
+    #[test]
+    fn circuit_env_overrides() {
+        let cfg = Config::from_lookup(env(&[
+            ("CIRCUIT_FAILURE_THRESHOLD", "5"),
+            ("CIRCUIT_COOLDOWN_SECS", "60"),
+            ("HEALTH_PROBE_INTERVAL_SECS", "15"),
+        ]))
+        .unwrap();
+        assert_eq!(cfg.circuit_failure_threshold, 5);
+        assert_eq!(cfg.circuit_cooldown_secs, 60);
+        assert_eq!(cfg.health_probe_interval_secs, 15);
     }
 
     #[test]
