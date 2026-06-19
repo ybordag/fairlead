@@ -41,3 +41,32 @@ fn init_tracing(cfg: &config::Config) {
             .init();
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Bind a real TCP listener on a random port and confirm the server accepts
+    /// connections and returns a valid health response. This is the only test
+    /// that exercises the full TCP path rather than the in-process oneshot harness.
+    #[tokio::test]
+    async fn server_binds_and_serves_health() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        tokio::spawn(async move {
+            axum::serve(listener, build_router()).await.unwrap();
+        });
+
+        let resp = reqwest::get(format!("http://{addr}/health"))
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), 200);
+
+        let json: serde_json::Value = resp.json().await.unwrap();
+        assert_eq!(json["status"], "ok");
+    }
+}
