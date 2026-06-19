@@ -49,12 +49,12 @@ cargo watch -x run
 
 ## Current status
 
-**Phase 1 complete** (garboard → main). **Phase 2 in progress** (telltale branch).
+**Phase 2 complete** (telltale → main). **Phase 3 pending.**
 
 | Phase | Branch | Status |
 |---|---|---|
 | 1 — Foundation | garboard → main | ✅ complete |
-| 2 — Transparent proxy | telltale | 🔨 in progress |
+| 2 — Transparent proxy | telltale → main | ✅ complete |
 | 3 — Circuit breaker + health | — | pending |
 | 4 — Fallback chain + session affinity | — | pending |
 | 5 — VRAM accounting + priority queues | — | pending |
@@ -63,17 +63,20 @@ cargo watch -x run
 
 ## Project layout
 
-**What exists now (Phase 1):**
+**What exists now (Phases 1–2):**
 
 ```
 src/
-  main.rs       — tokio::main, build_router(), init_tracing()
-  config.rs     — Config from PORT, LOG_LEVEL, LOG_FORMAT env vars
-  error.rs      — FairleadError enum with IntoResponse impl
-  health.rs     — GET /health → {"status":"ok"}
+  main.rs           — tokio::main, AppState, build_router(), init_tracing()
+  config.rs         — Config from PORT, LOG_LEVEL, LOG_FORMAT, BACKENDS env vars
+  error.rs          — FairleadError enum with IntoResponse impl
+  health.rs         — GET /health → {"status":"ok"}
+  proxy/
+    mod.rs          — POST /v1/chat/completions, POST /v1/embeddings (transparent forward)
+    types.rs        — OpenAI-compatible request/response serde structs
 ```
 
-**Planned layout (Phases 2–7):**
+**Planned layout (Phases 3–7):**
 
 ```
 src/

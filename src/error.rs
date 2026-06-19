@@ -1,7 +1,10 @@
 use axum::{http::StatusCode, response::{IntoResponse, Response}};
 use thiserror::Error;
 
-#[expect(dead_code, reason = "variants used from Phase 3 once routing handlers are live")]
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "variants wired into routing handlers from Phase 3 onward")
+)]
 #[derive(Debug, Error)]
 pub enum FairleadError {
     #[error("no backend available (all circuits open or insufficient VRAM)")]
