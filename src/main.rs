@@ -13,19 +13,20 @@ use std::{net::SocketAddr, time::Duration};
 use tracing::info;
 use tracing_subscriber::EnvFilter;
 
-use router::{BackendState, spawn_health_probe};
+use router::{spawn_health_probe, BackendState, SessionAffinity};
 
 /// Shared state cloned into every handler by Axum's `State` extractor.
-/// Cloning is shallow: `BackendState` clones its `Arc`, so all handler
-/// copies share the same circuit-breaker state.
+/// Cloning is shallow — `BackendState` and `SessionAffinity` both wrap
+/// `Arc`, so all handler copies share the same circuit breakers and
+/// affinity map.
 #[derive(Clone)]
 pub struct AppState {
     /// Reusable HTTP client for forwarding requests upstream.
     pub client: reqwest::Client,
     /// Ordered list of configured backends with their circuit breakers.
-    /// Phase 2: always picks `backends[0]`.
-    /// Phase 4: circuit-aware fallback chain.
     pub backends: Vec<BackendState>,
+    /// Thread-ID → backend-index affinity map.
+    pub affinity: SessionAffinity,
 }
 
 #[tokio::main]
@@ -58,7 +59,11 @@ async fn main() -> anyhow::Result<()> {
         );
     }
 
-    let state = AppState { client, backends };
+    let state = AppState {
+        client,
+        backends,
+        affinity: SessionAffinity::default(),
+    };
     let app = build_router(state);
 
     let addr: SocketAddr = format!("0.0.0.0:{}", cfg.port).parse()?;
@@ -100,6 +105,7 @@ mod tests {
         let state = AppState {
             client: reqwest::Client::new(),
             backends: vec![],
+            affinity: SessionAffinity::default(),
         };
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
