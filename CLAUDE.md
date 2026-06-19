@@ -49,14 +49,14 @@ cargo watch -x run
 
 ## Current status
 
-**Phase 3 complete** (batten → main). **Phase 4 pending.**
+**Phase 3 complete** (batten → main). **Phase 4 in progress** (spinnaker branch).
 
 | Phase | Branch | Status |
 |---|---|---|
 | 1 — Foundation | garboard → main | ✅ complete |
 | 2 — Transparent proxy | telltale → main | ✅ complete |
 | 3 — Circuit breaker + health | batten → main | ✅ complete |
-| 4 — Fallback chain + session affinity | — | pending |
+| 4 — Fallback chain + session affinity | spinnaker | 🔨 in progress |
 | 5 — VRAM accounting + priority queues | — | pending |
 | 6 — Async job dispatch | — | pending |
 | 7 — Advanced compute + full metrics | — | pending |
