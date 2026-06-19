@@ -44,6 +44,7 @@ mod tests {
         let state = AppState {
             client: reqwest::Client::new(),
             backends,
+            affinity: crate::router::SessionAffinity::default(),
         };
         Router::new()
             .route("/metrics", get(metrics))

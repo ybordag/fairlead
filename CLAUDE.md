@@ -49,21 +49,21 @@ cargo watch -x run
 
 ## Current status
 
-**Phase 3 complete** (batten → main). **Phase 4 in progress** (spinnaker branch).
+**Phase 4 complete** (spinnaker → main). **Phase 5 pending.**
 
 | Phase | Branch | Status |
 |---|---|---|
 | 1 — Foundation | garboard → main | ✅ complete |
 | 2 — Transparent proxy | telltale → main | ✅ complete |
 | 3 — Circuit breaker + health | batten → main | ✅ complete |
-| 4 — Fallback chain + session affinity | spinnaker | 🔨 in progress |
+| 4 — Fallback chain + session affinity | spinnaker → main | ✅ complete |
 | 5 — VRAM accounting + priority queues | — | pending |
 | 6 — Async job dispatch | — | pending |
 | 7 — Advanced compute + full metrics | — | pending |
 
 ## Project layout
 
-**What exists now (Phases 1–3):**
+**What exists now (Phases 1–4):**
 
 ```
 src/
@@ -76,26 +76,22 @@ src/
     mod.rs          — module entry point
     circuit.rs      — CircuitBreaker: Closed/Open/HalfOpen state machine
     backend.rs      — BackendState (url + Arc<RwLock<CircuitBreaker>>), spawn_health_probe()
+    fallback.rs     — select_backend(): ordered fallback chain with soft affinity
+    affinity.rs     — SessionAffinity: thread_id → backend_index map
   proxy/
-    mod.rs          — POST /v1/chat/completions, POST /v1/embeddings; circuit check + record
+    mod.rs          — POST /v1/chat/completions, POST /v1/embeddings; circuit + affinity + fallback
     types.rs        — OpenAI-compatible request/response serde structs
 ```
 
-**Planned layout (Phases 4–7):**
+**Planned layout (Phases 5–7):**
 
 ```
 src/
-  ...  (Phases 1–3 files as above)
+  ...  (Phases 1–4 files as above)
 
   router/
-    ...  (circuit.rs, backend.rs as above)
-    affinity.rs        — session affinity (thread_id → preferred backend)
-    fallback.rs        — ordered fallback chain: try next on failure / circuit-open
+    ...  (circuit.rs, backend.rs, fallback.rs, affinity.rs as above)
     priority.rs        — priority-aware request scheduling (realtime/batch/background)
-
-  proxy/
-    mod.rs             — forward request to selected backend, stream response back
-    types.rs           — OpenAI-compatible request/response structs (serde)
 
   jobs/
     mod.rs             — async job API: submit, query, dispatch
