@@ -49,13 +49,13 @@ cargo watch -x run
 
 ## Current status
 
-**Phase 2 complete** (telltale → main). **Phase 3 pending.**
+**Phase 2 complete** (telltale → main). **Phase 3 in progress** (batten branch).
 
 | Phase | Branch | Status |
 |---|---|---|
 | 1 — Foundation | garboard → main | ✅ complete |
 | 2 — Transparent proxy | telltale → main | ✅ complete |
-| 3 — Circuit breaker + health | — | pending |
+| 3 — Circuit breaker + health | batten | 🔨 in progress |
 | 4 — Fallback chain + session affinity | — | pending |
 | 5 — VRAM accounting + priority queues | — | pending |
 | 6 — Async job dispatch | — | pending |
