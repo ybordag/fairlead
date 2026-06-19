@@ -1,22 +1,31 @@
 mod config;
 mod error;
 mod health;
+mod metrics;
 mod proxy;
+mod router;
 
-use axum::{routing::{get, post}, Router};
-use std::net::SocketAddr;
+use axum::{
+    routing::{get, post},
+    Router,
+};
+use std::{net::SocketAddr, time::Duration};
 use tracing::info;
 use tracing_subscriber::EnvFilter;
 
-/// Shared state injected into every handler via Axum's `State` extractor.
-/// All fields must be `Clone` — Axum clones state once per request.
+use router::{BackendState, spawn_health_probe};
+
+/// Shared state cloned into every handler by Axum's `State` extractor.
+/// Cloning is shallow: `BackendState` clones its `Arc`, so all handler
+/// copies share the same circuit-breaker state.
 #[derive(Clone)]
 pub struct AppState {
-    /// Reusable HTTP client for forwarding requests to backends.
+    /// Reusable HTTP client for forwarding requests upstream.
     pub client: reqwest::Client,
-    /// Ordered list of backend base URLs (e.g. "http://loki:8000/v1").
-    /// Phase 2: first entry is always used. Phase 3+ adds circuit-breaker selection.
-    pub backends: Vec<String>,
+    /// Ordered list of configured backends with their circuit breakers.
+    /// Phase 2: always picks `backends[0]`.
+    /// Phase 4: circuit-aware fallback chain.
+    pub backends: Vec<BackendState>,
 }
 
 #[tokio::main]
@@ -25,11 +34,31 @@ async fn main() -> anyhow::Result<()> {
 
     init_tracing(&cfg);
 
-    let state = AppState {
-        client: reqwest::Client::new(),
-        backends: cfg.backends.clone(),
-    };
+    let client = reqwest::Client::new();
 
+    let backends: Vec<BackendState> = cfg
+        .backends
+        .iter()
+        .map(|url| {
+            BackendState::new(
+                url.clone(),
+                cfg.circuit_failure_threshold,
+                Duration::from_secs(cfg.circuit_cooldown_secs),
+            )
+        })
+        .collect();
+
+    // Spawn a background health-probe task for each backend.
+    for b in &backends {
+        spawn_health_probe(
+            b.circuit.clone(),
+            b.url.clone(),
+            client.clone(),
+            Duration::from_secs(cfg.health_probe_interval_secs),
+        );
+    }
+
+    let state = AppState { client, backends };
     let app = build_router(state);
 
     let addr: SocketAddr = format!("0.0.0.0:{}", cfg.port).parse()?;
@@ -44,6 +73,7 @@ async fn main() -> anyhow::Result<()> {
 pub(crate) fn build_router(state: AppState) -> Router {
     Router::new()
         .route("/health", get(health::health))
+        .route("/metrics", get(metrics::metrics))
         .route("/v1/chat/completions", post(proxy::chat_completions))
         .route("/v1/embeddings", post(proxy::embeddings))
         .with_state(state)
@@ -57,9 +87,7 @@ fn init_tracing(cfg: &config::Config) {
             .with_env_filter(filter)
             .init();
     } else {
-        tracing_subscriber::fmt()
-            .with_env_filter(filter)
-            .init();
+        tracing_subscriber::fmt().with_env_filter(filter).init();
     }
 }
 
@@ -85,7 +113,6 @@ mod tests {
         let resp = reqwest::get(format!("http://{addr}/health"))
             .await
             .unwrap();
-
         assert_eq!(resp.status(), 200);
 
         let json: serde_json::Value = resp.json().await.unwrap();

@@ -49,13 +49,13 @@ cargo watch -x run
 
 ## Current status
 
-**Phase 2 complete** (telltale → main). **Phase 3 pending.**
+**Phase 3 complete** (batten → main). **Phase 4 pending.**
 
 | Phase | Branch | Status |
 |---|---|---|
 | 1 — Foundation | garboard → main | ✅ complete |
 | 2 — Transparent proxy | telltale → main | ✅ complete |
-| 3 — Circuit breaker + health | — | pending |
+| 3 — Circuit breaker + health | batten → main | ✅ complete |
 | 4 — Fallback chain + session affinity | — | pending |
 | 5 — VRAM accounting + priority queues | — | pending |
 | 6 — Async job dispatch | — | pending |
@@ -63,31 +63,32 @@ cargo watch -x run
 
 ## Project layout
 
-**What exists now (Phases 1–2):**
+**What exists now (Phases 1–3):**
 
 ```
 src/
-  main.rs           — tokio::main, AppState, build_router(), init_tracing()
-  config.rs         — Config from PORT, LOG_LEVEL, LOG_FORMAT, BACKENDS env vars
+  main.rs           — tokio::main, AppState, build_router(), health probe startup
+  config.rs         — Config from env (PORT, BACKENDS, CIRCUIT_*, HEALTH_PROBE_INTERVAL_SECS)
   error.rs          — FairleadError enum with IntoResponse impl
   health.rs         — GET /health → {"status":"ok"}
+  metrics.rs        — GET /metrics → Prometheus circuit_state gauge per backend
+  router/
+    mod.rs          — module entry point
+    circuit.rs      — CircuitBreaker: Closed/Open/HalfOpen state machine
+    backend.rs      — BackendState (url + Arc<RwLock<CircuitBreaker>>), spawn_health_probe()
   proxy/
-    mod.rs          — POST /v1/chat/completions, POST /v1/embeddings (transparent forward)
+    mod.rs          — POST /v1/chat/completions, POST /v1/embeddings; circuit check + record
     types.rs        — OpenAI-compatible request/response serde structs
 ```
 
-**Planned layout (Phases 3–7):**
+**Planned layout (Phases 4–7):**
 
 ```
 src/
-  main.rs              — entry point: parse config, init tracing, start server
-  config.rs            — all configuration from environment variables
-  error.rs             — error types (thiserror)
+  ...  (Phases 1–3 files as above)
 
   router/
-    mod.rs             — select backend for a synchronous inference request
-    backend.rs         — backend: URL, health state, VRAM headroom, active count
-    circuit.rs         — per-backend circuit breaker (Closed / Open / Half-open)
+    ...  (circuit.rs, backend.rs as above)
     affinity.rs        — session affinity (thread_id → preferred backend)
     fallback.rs        — ordered fallback chain: try next on failure / circuit-open
     priority.rs        — priority-aware request scheduling (realtime/batch/background)

@@ -23,7 +23,12 @@ async fn forward(state: &AppState, path: &str, body: Bytes) -> Response {
         return (StatusCode::SERVICE_UNAVAILABLE, "no backends configured").into_response();
     };
 
-    let url = format!("{}/{}", backend.trim_end_matches('/'), path);
+    // Reject immediately if the circuit is open (don't touch the backend at all).
+    if !backend.circuit.write().await.is_available() {
+        return (StatusCode::SERVICE_UNAVAILABLE, "circuit open").into_response();
+    }
+
+    let url = format!("{}/{}", backend.url.trim_end_matches('/'), path);
 
     let upstream = match state
         .client
@@ -34,10 +39,21 @@ async fn forward(state: &AppState, path: &str, body: Bytes) -> Response {
         .await
     {
         Ok(r) => r,
-        Err(_) => return StatusCode::BAD_GATEWAY.into_response(),
+        Err(_) => {
+            backend.circuit.write().await.record_failure();
+            return StatusCode::BAD_GATEWAY.into_response();
+        }
     };
 
     let status = upstream.status();
+
+    // 5xx → backend is broken; 2xx/3xx/4xx → backend is alive.
+    if status.is_server_error() {
+        backend.circuit.write().await.record_failure();
+    } else {
+        backend.circuit.write().await.record_success();
+    }
+
     let content_type = upstream.headers().get(CONTENT_TYPE).cloned();
     let is_sse = content_type
         .as_ref()
@@ -63,12 +79,14 @@ async fn forward(state: &AppState, path: &str, body: Bytes) -> Response {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::build_router;
+    use crate::{build_router, router::BackendState};
     use axum::{http::StatusCode, routing::post, Router};
     use serde_json::json;
+    use std::{
+        sync::{atomic::{AtomicBool, Ordering}, Arc},
+        time::Duration,
+    };
 
-    /// Start a mock backend Axum app. Returns its base URL including the `/v1` prefix
-    /// so callers can append paths like `/v1/chat/completions` directly.
     async fn start_mock(app: Router) -> String {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
@@ -80,12 +98,22 @@ mod tests {
         format!("http://{}/v1", addr)
     }
 
-    /// Start a Fairlead instance configured with the given backend URLs.
-    /// Pass an empty slice to test the no-backends code path.
-    async fn start_fairlead(backends: &[&str]) -> String {
+    /// Start Fairlead with the given raw backend URLs, using high circuit thresholds
+    /// so existing proxy tests don't accidentally trip the circuit.
+    async fn start_fairlead(backend_urls: &[&str]) -> String {
+        start_fairlead_with_backends(
+            backend_urls
+                .iter()
+                .map(|u| BackendState::new(u.to_string(), 10, Duration::from_secs(60)))
+                .collect(),
+        )
+        .await
+    }
+
+    async fn start_fairlead_with_backends(backends: Vec<BackendState>) -> String {
         let state = AppState {
             client: reqwest::Client::new(),
-            backends: backends.iter().map(|s| s.to_string()).collect(),
+            backends,
         };
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
@@ -97,7 +125,7 @@ mod tests {
         format!("http://{}", addr)
     }
 
-    // ── existing coverage ────────────────────────────────────────────────────
+    // ── existing proxy coverage ──────────────────────────────────────────────
 
     #[tokio::test]
     async fn no_backends_returns_503() {
@@ -185,7 +213,6 @@ mod tests {
 
     #[tokio::test]
     async fn backend_unreachable_returns_502() {
-        // Grab a free port then release it — nothing will be listening there.
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .unwrap();
@@ -235,10 +262,6 @@ mod tests {
         assert_eq!(received["data"][0]["embedding"][0], 0.1);
     }
 
-    // ── gap coverage ─────────────────────────────────────────────────────────
-
-    /// Backend error codes (400, 429, 500) must pass through unchanged.
-    /// Fairlead is a transparent proxy — it must not swallow or remap upstream errors.
     #[tokio::test]
     async fn backend_error_status_forwarded() {
         for status_code in [400u16, 429, 500] {
@@ -264,11 +287,8 @@ mod tests {
         }
     }
 
-    /// Extra fields beyond the typed structs (temperature, max_tokens, etc.) must
-    /// reach the backend verbatim. Fairlead forwards raw bytes, not re-serialized structs.
     #[tokio::test]
     async fn request_body_forwarded_verbatim() {
-        // Echo handler: reflect whatever bytes arrived back to the caller.
         let mock = Router::new().route(
             "/v1/chat/completions",
             post(|body: Bytes| async move {
@@ -300,7 +320,6 @@ mod tests {
         assert_eq!(echoed["max_tokens"], 256);
     }
 
-    /// The embeddings endpoint must also return 503 when no backends are configured.
     #[tokio::test]
     async fn embeddings_no_backends_returns_503() {
         let fairlead = start_fairlead(&[]).await;
@@ -313,8 +332,6 @@ mod tests {
         assert_eq!(resp.status(), 503);
     }
 
-    /// When multiple backends are configured, requests go to the first one.
-    /// Phase 4 will add circuit-breaker-aware selection; for now first-wins is correct.
     #[tokio::test]
     async fn uses_first_backend_when_multiple_configured() {
         let first = Router::new().route(
@@ -338,5 +355,178 @@ mod tests {
 
         let body: serde_json::Value = resp.json().await.unwrap();
         assert_eq!(body["source"], "first");
+    }
+
+    // ── circuit breaker integration ──────────────────────────────────────────
+
+    /// After `failure_threshold` consecutive 5xx responses the circuit opens
+    /// and subsequent requests get 503 without touching the backend.
+    #[tokio::test]
+    async fn circuit_opens_on_repeated_5xx() {
+        let mock = Router::new().route(
+            "/v1/chat/completions",
+            post(|| async { StatusCode::INTERNAL_SERVER_ERROR }),
+        );
+        let backend_url = start_mock(mock).await;
+
+        // threshold=2 so two 5xx responses trip the circuit.
+        let backend = BackendState::new(backend_url, 2, Duration::from_secs(60));
+        let fairlead = start_fairlead_with_backends(vec![backend]).await;
+
+        let client = reqwest::Client::new();
+        let url = format!("{}/v1/chat/completions", fairlead);
+        let body = json!({"model":"m","messages":[]});
+
+        // Request 1 & 2: forwarded, both 500, circuit trips on the second.
+        let r1 = client.post(&url).json(&body).send().await.unwrap();
+        assert_eq!(r1.status(), 500);
+        let r2 = client.post(&url).json(&body).send().await.unwrap();
+        assert_eq!(r2.status(), 500);
+
+        // Request 3: circuit is open → 503 immediately, backend never called.
+        let r3 = client.post(&url).json(&body).send().await.unwrap();
+        assert_eq!(r3.status(), 503);
+    }
+
+    /// 4xx responses from the backend must NOT trip the circuit — the backend
+    /// is alive and functioning; the request was simply invalid.
+    #[tokio::test]
+    async fn circuit_stays_closed_on_4xx() {
+        let mock = Router::new().route(
+            "/v1/chat/completions",
+            post(|| async { StatusCode::BAD_REQUEST }),
+        );
+        let backend_url = start_mock(mock).await;
+
+        // threshold=1 — one failure would trip immediately.
+        let backend = BackendState::new(backend_url, 1, Duration::from_secs(60));
+        let fairlead = start_fairlead_with_backends(vec![backend]).await;
+
+        let client = reqwest::Client::new();
+        let url = format!("{}/v1/chat/completions", fairlead);
+        let body = json!({"model":"m","messages":[]});
+
+        // Three 400s in a row — circuit should stay closed.
+        for _ in 0..3 {
+            let r = client.post(&url).json(&body).send().await.unwrap();
+            assert_eq!(r.status(), 400, "4xx must be forwarded, circuit must stay closed");
+        }
+    }
+
+    /// Connection errors (502 path) must also trip the circuit — not just 5xx responses.
+    #[tokio::test]
+    async fn connection_failure_trips_circuit() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .unwrap();
+        let addr = listener.local_addr().unwrap();
+        drop(listener); // nothing listening on this port
+
+        let backend_url = format!("http://{}/v1", addr);
+        // threshold=2: two connection failures should open the circuit.
+        let backend = BackendState::new(backend_url, 2, Duration::from_secs(60));
+        let fairlead = start_fairlead_with_backends(vec![backend]).await;
+
+        let client = reqwest::Client::new();
+        let url = format!("{}/v1/chat/completions", fairlead);
+        let body = json!({"model":"m","messages":[]});
+
+        let r1 = client.post(&url).json(&body).send().await.unwrap();
+        assert_eq!(r1.status(), 502, "first connection failure → 502");
+
+        let r2 = client.post(&url).json(&body).send().await.unwrap();
+        assert_eq!(r2.status(), 502, "second connection failure → 502");
+
+        // Circuit is now open — should return 503 without attempting the backend.
+        let r3 = client.post(&url).json(&body).send().await.unwrap();
+        assert_eq!(r3.status(), 503, "circuit should be open after two connection failures");
+    }
+
+    /// If the half-open probe also fails the circuit must re-open, not stay
+    /// half-open or close.
+    #[tokio::test]
+    async fn half_open_failure_reopens_circuit() {
+        let mock = Router::new().route(
+            "/v1/chat/completions",
+            post(|| async { StatusCode::INTERNAL_SERVER_ERROR }),
+        );
+        let backend_url = start_mock(mock).await;
+
+        let backend = BackendState::new(backend_url, 1, Duration::from_millis(50));
+        let fairlead = start_fairlead_with_backends(vec![backend]).await;
+
+        let client = reqwest::Client::new();
+        let url = format!("{}/v1/chat/completions", fairlead);
+        let body = json!({"model":"m","messages":[]});
+
+        // Trip the circuit.
+        let r1 = client.post(&url).json(&body).send().await.unwrap();
+        assert_eq!(r1.status(), 500);
+
+        let r2 = client.post(&url).json(&body).send().await.unwrap();
+        assert_eq!(r2.status(), 503, "circuit should be open");
+
+        // Wait for cooldown → half-open.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // Half-open probe reaches backend, still gets 500 → circuit re-opens.
+        let r3 = client.post(&url).json(&body).send().await.unwrap();
+        assert_eq!(r3.status(), 500, "half-open probe should reach backend");
+
+        let r4 = client.post(&url).json(&body).send().await.unwrap();
+        assert_eq!(r4.status(), 503, "circuit should be open again after half-open failure");
+    }
+
+    /// After the cooldown the circuit enters Half-open, one successful request
+    /// closes it, and subsequent requests flow normally again.
+    #[tokio::test]
+    async fn circuit_recovers_after_cooldown() {
+        let should_fail = Arc::new(AtomicBool::new(true));
+        let sf = should_fail.clone();
+
+        let mock = Router::new().route(
+            "/v1/chat/completions",
+            post(move || {
+                let flag = sf.clone();
+                async move {
+                    if flag.load(Ordering::SeqCst) {
+                        StatusCode::INTERNAL_SERVER_ERROR.into_response()
+                    } else {
+                        axum::Json(json!({"recovered": true})).into_response()
+                    }
+                }
+            }),
+        );
+        let backend_url = start_mock(mock).await;
+
+        // threshold=1, cooldown=50ms for a fast test.
+        let backend = BackendState::new(backend_url, 1, Duration::from_millis(50));
+        let fairlead = start_fairlead_with_backends(vec![backend]).await;
+
+        let client = reqwest::Client::new();
+        let url = format!("{}/v1/chat/completions", fairlead);
+        let body = json!({"model":"m","messages":[]});
+
+        // Trip the circuit.
+        let r1 = client.post(&url).json(&body).send().await.unwrap();
+        assert_eq!(r1.status(), 500, "first request should reach backend and return 500");
+
+        // Circuit is open — blocked immediately.
+        let r2 = client.post(&url).json(&body).send().await.unwrap();
+        assert_eq!(r2.status(), 503, "circuit should be open");
+
+        // Wait for cooldown, then flip backend to healthy.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        should_fail.store(false, Ordering::SeqCst);
+
+        // First request after cooldown: circuit enters Half-open, succeeds, closes.
+        let r3 = client.post(&url).json(&body).send().await.unwrap();
+        assert_eq!(r3.status(), 200, "half-open probe should succeed and close the circuit");
+
+        // Circuit is closed again — normal operation.
+        let r4 = client.post(&url).json(&body).send().await.unwrap();
+        assert_eq!(r4.status(), 200);
+        let payload: serde_json::Value = r4.json().await.unwrap();
+        assert_eq!(payload["recovered"], true);
     }
 }
