@@ -2,17 +2,23 @@
 
 ## What this project is
 
-Fairlead is an OpenAI-compatible inference router written in Rust. It routes LLM
-requests across local vLLM nodes and cloud providers, manages circuit breaking and
-session failover, and tracks VRAM consumption across GPU consumers.
+Fairlead is a priority-aware compute task router written in Rust. It routes LLM
+inference requests and async compute jobs across local GPU nodes and cloud providers,
+manages circuit breaking and session failover, and tracks VRAM consumption across
+all GPU consumers on the cluster.
 
-See `design.md` for the full architecture and open design questions.
+It exposes an OpenAI-compatible inference API and a generic async job API. The
+inference path is synchronous (request → response). The job path is async
+(submit → job_id → callback on completion).
+
+See `design.md` for the full architecture.
 
 ## Related repos
 
-- **Rhizome** (Python) — the agent. Points its model client at Fairlead's `/v1` endpoint.
+- **Rhizome** (Python) — the agent. Points its model client at Fairlead `/v1`.
+  Submits async compute jobs (vision, embeddings, indexing) to Fairlead `/v1/jobs`.
 - **Cambium** (Go) — the API gateway. Calls Rhizome; Rhizome calls Fairlead.
-- **Fairlead** (this repo, Rust) — routes requests to vLLM on Loki/Thor or cloud fallback.
+- **Fairlead** (this repo, Rust) — routes to vLLM on Loki/Thor or cloud fallback.
 
 ## Tech stack
 
@@ -21,9 +27,9 @@ See `design.md` for the full architecture and open design questions.
 - **Web framework:** Axum
 - **HTTP client:** reqwest (async, streaming support)
 - **Serialization:** serde + serde_json
-- **Errors:** thiserror (library errors) + anyhow (application errors)
+- **Errors:** thiserror (library errors) + anyhow (application handlers)
 - **Logging:** tracing + tracing-subscriber
-- **Metrics:** Prometheus-compatible via axum-prometheus or manual implementation
+- **Metrics:** Prometheus-compatible (`/metrics`)
 
 ## Build and test
 
@@ -38,7 +44,7 @@ cargo fmt --check                    # format check
 Install `cargo-watch` for development:
 ```bash
 cargo install cargo-watch
-cargo watch -x run                   # restart on file change
+cargo watch -x run
 ```
 
 ## Project layout (planned)
@@ -46,113 +52,241 @@ cargo watch -x run                   # restart on file change
 ```
 src/
   main.rs              — entry point: parse config, init tracing, start server
-  config.rs            — configuration from environment variables
+  config.rs            — all configuration from environment variables
   error.rs             — error types (thiserror)
+
   router/
-    mod.rs             — select backend for incoming request
-    backend.rs         — backend node: URL, health state, VRAM state, active requests
-    circuit.rs         — per-node circuit breaker (Closed / Open / Half-open)
-    affinity.rs        — session affinity: prefer same node for KV cache warmth
-    fallback.rs        — ordered fallback chain: try next on failure
+    mod.rs             — select backend for a synchronous inference request
+    backend.rs         — backend: URL, health state, VRAM headroom, active count
+    circuit.rs         — per-backend circuit breaker (Closed / Open / Half-open)
+    affinity.rs        — session affinity (thread_id → preferred backend)
+    fallback.rs        — ordered fallback chain: try next on failure / circuit-open
+    priority.rs        — priority-aware request scheduling (realtime/batch/background)
+
   proxy/
     mod.rs             — forward request to selected backend, stream response back
     types.rs           — OpenAI-compatible request/response structs (serde)
+
+  jobs/
+    mod.rs             — async job API: submit, query, dispatch
+    queue.rs           — three-tier priority queue (realtime > batch > background)
+    worker.rs          — worker registration: job types, VRAM cost, callback URL
+    scheduler.rs       — select worker for a job; respect priority and VRAM budget
+    types.rs           — job type definitions and payload schemas
+
   vram/
-    mod.rs             — cooperative VRAM accounting: register, release, query
-  worker/
-    mod.rs             — agent worker pool: spawn, restart, route least-busy
-  health.rs            — GET /health handler
-  metrics.rs           — GET /metrics handler (Prometheus)
+    mod.rs             — cooperative VRAM accounting across all consumers
+
+  health.rs            — GET /health
+  metrics.rs           — GET /metrics (Prometheus)
 ```
+
+## API surface
+
+### Inference (synchronous)
+
+```
+POST /v1/chat/completions    — OpenAI-compatible, streaming supported
+POST /v1/embeddings          — OpenAI-compatible embedding generation
+GET  /v1/models              — list available backends/models
+```
+
+### Async jobs
+
+```
+POST   /v1/jobs              — submit a job, returns job_id immediately
+GET    /v1/jobs/{id}         — check status: queued | running | complete | failed
+DELETE /v1/jobs/{id}         — cancel a queued job
+```
+
+Job request body:
+```json
+{
+  "type":         "vision_analysis | embed_batch | index_build | cluster",
+  "priority":     "realtime | batch | background",
+  "payload":      { ... type-specific ... },
+  "callback_url": "http://caller/internal/jobs/{id}/complete"
+}
+```
+
+### Worker registration
+
+```
+POST   /v1/workers/register     — worker announces: job types, VRAM cost, endpoint
+DELETE /v1/workers/{id}         — deregister (graceful shutdown)
+GET    /v1/workers              — list registered workers and their status
+```
+
+### VRAM accounting
+
+```
+POST   /v1/vram/register        — consumer reports allocation: node, name, mb
+DELETE /v1/vram/register/{id}   — release on shutdown
+GET    /v1/vram                 — current VRAM state per node
+```
+
+## Priority queue model
+
+Every request — inference or job — carries one of three priority levels:
+
+| Priority     | Who uses it                                          | Behavior |
+|---|---|---|
+| `realtime`   | Chat completions, retrieval queries (user waiting)   | Always scheduled first; preempts lower-priority work |
+| `batch`      | Vision analysis, per-request embeddings (user submitted but not blocked) | Scheduled when no realtime demand |
+| `background` | Knowledge base ingestion, index rebuilds, clustering | Scheduled only when both higher tiers are idle |
+
+Fairlead implements this with three Tokio channels and a scheduler that always
+drains higher-priority channels before accepting lower-priority work:
+
+```rust
+tokio::select! {
+    job = realtime_rx.recv() => schedule(job),
+    job = batch_rx.recv(),      if realtime_empty() => schedule(job),
+    job = background_rx.recv(), if realtime_empty() && batch_empty() => schedule(job),
+}
+```
+
+This guarantees a user is never queued behind a background knowledge base rebuild,
+even when the GPU is heavily loaded.
+
+## Job types
+
+### `vision_analysis`
+Route to a registered vision worker. Payload: `{ media_path, analysis_type }`.
+Priority: `batch` (user submitted, async delivery via SSE card).
+
+### `embed_batch`
+Generate embeddings for a list of documents. Payload: `{ texts: [...], model }`.
+Priority: `background` for knowledge base ingestion; `realtime` for query-time
+retrieval embedding (user is waiting for search results).
+
+### `index_build`
+Build or update a vector index (pgvector IVFFlat/HNSW, or FAISS for GPU-accelerated
+large-scale indexing). Payload: `{ index_type, table, ... }`.
+Priority: `background`. GPU-accelerated with FAISS when available.
+
+### `cluster`
+Run k-means or HDBSCAN over an embedding space to produce topic structure.
+Payload: `{ table, n_clusters, algorithm }`.
+Priority: `background`. CPU or GPU (cuML) depending on available worker.
 
 ## Environment variables
 
 ```
-PORT                    — listen port (default: 7000)
-BACKENDS                — comma-separated list of backend URLs in priority order
-                          e.g. http://loki:8000/v1,http://thor:8000/v1
-CLOUD_PROVIDERS         — JSON array of cloud provider configs (url, api_key env var)
-CIRCUIT_FAILURE_THRESHOLD  — consecutive failures to open circuit (default: 3)
-CIRCUIT_COOLDOWN_SECS   — seconds before half-open probe (default: 30)
-SESSION_AFFINITY        — "thread" | "user" (default: "thread")
-LOG_LEVEL               — tracing level: error, warn, info, debug, trace (default: info)
+PORT                         — listen port (default: 7000)
+BACKENDS                     — comma-separated backend URLs in priority order
+                               e.g. http://loki:8000/v1,http://thor:8000/v1
+CLOUD_PROVIDERS              — JSON array of cloud provider configs (url, api_key_env)
+CIRCUIT_FAILURE_THRESHOLD    — consecutive failures to open circuit (default: 3)
+CIRCUIT_COOLDOWN_SECS        — seconds before half-open probe (default: 30)
+SESSION_AFFINITY             — "thread" | "user" (default: "thread")
+PRIORITY_REALTIME_LIMIT      — max concurrent realtime requests (default: 8)
+PRIORITY_BATCH_LIMIT         — max concurrent batch jobs (default: 4)
+PRIORITY_BACKGROUND_LIMIT    — max concurrent background jobs (default: 2)
+JOB_CALLBACK_TIMEOUT_SECS   — time to attempt callback delivery (default: 30)
+WORKER_HEARTBEAT_SECS        — interval workers must heartbeat or be deregistered (default: 30)
+LOG_LEVEL                    — tracing level: error, warn, info, debug, trace (default: info)
 ```
 
-## Recommended build order
+## Build phases
 
 ### Phase 1 — Foundation
 
-- `cargo init`, add dependencies to `Cargo.toml`
+- `cargo init`, add core dependencies to `Cargo.toml`
 - Axum server with `GET /health` returning `{"status": "ok"}`
 - Config loading from environment variables
 - Tracing setup (structured JSON logs)
-- Test: server starts and `/health` returns 200
+- Test: server starts, `/health` returns 200
 
 ### Phase 2 — Transparent proxy
 
-- OpenAI-compatible request/response types (`serde` structs for `/v1/chat/completions`)
-- Single hardcoded backend: receive request, forward via `reqwest`, stream response back
-- Handle streaming responses (SSE / chunked transfer)
-- Test: forward a real chat completions request end-to-end; streaming works
+- OpenAI-compatible request/response types (serde structs)
+- Single hardcoded backend: receive, forward via reqwest, stream response back
+- Streaming responses proxied without buffering (SSE / chunked transfer)
+- Test: forward a real `/v1/chat/completions` end-to-end; streaming works
 
 ### Phase 3 — Circuit breaker and health checking
 
-- `CircuitBreaker` struct with `Closed` / `Open` / `Half-open` states
-- Background health check tasks per backend (Tokio `spawn`)
-- Circuit opens after N consecutive failures or timeout
-- Half-open probe: one request to test recovery
-- Test: circuit opens when backend is unreachable; recovers when it comes back
+- `CircuitBreaker` struct: `Closed` / `Open` / `Half-open` states
+- Background health check tasks per backend (`tokio::spawn`)
+- Circuit opens after N consecutive failures or timeout threshold
+- Half-open probe: one test request; success closes, failure re-opens
+- Basic `/metrics` endpoint: `circuit_state` per backend
+- Test: circuit opens when backend unreachable; recovers when it comes back
 
 ### Phase 4 — Fallback chain and session affinity
 
-- Multiple backends in priority order
-- Try next backend on circuit-open or retryable error
-- `SessionAffinity` map: `thread_id → preferred_backend_url` (Arc<RwLock<HashMap>>)
-- Soft affinity: prefer the known backend, fall back if unavailable
-- Cloud provider support (OpenAI, Gemini, Anthropic — same interface as local vLLM)
-- Test: primary backend down → falls back to secondary; requests with same thread_id prefer same node
+- Multiple backends in priority order; try next on circuit-open or retryable error
+- `SessionAffinity`: `thread_id → preferred_backend` (`Arc<RwLock<HashMap>>`)
+- Soft affinity: prefer known backend, fall back if unavailable or overloaded
+- Cloud provider support (OpenAI, Gemini, Anthropic — same OpenAI-compatible interface)
+- Test: primary down → secondary; same thread_id routes to same node while available
 
-### Phase 5 — VRAM accounting
+### Phase 5 — VRAM accounting and priority queues
 
-- `VramRegistry`: `backend_url → Vec<Consumer>` (name, allocated_mb)
-- `POST /v1/vram/register` and `DELETE /v1/vram/register/{consumer_id}` endpoints
+- `VramRegistry`: per-node consumer list with allocated MB
+- `POST /v1/vram/register` and `DELETE /v1/vram/register/{id}`
 - Router checks available VRAM before selecting a backend
-- Test: backend with insufficient VRAM is skipped; requests route to the node with headroom
+- Three-tier priority queue with Tokio channels (realtime / batch / background)
+- Scheduler drains higher-priority channels before accepting lower-priority work
+- Inference requests carry a `X-Fairlead-Priority` header (default: `realtime`)
+- Test: backend with insufficient VRAM is skipped; background jobs yield to realtime
 
-### Phase 6 — Worker pool and metrics
+### Phase 6 — Async job dispatch
 
-- Agent worker pool: spawn N processes, route requests round-robin / least-busy
-- Auto-restart crashed workers
-- `GET /metrics` Prometheus endpoint: requests_total, active_requests, circuit_state, vram_used
-- Test: crashed worker is restarted; metrics update correctly
+- Job API: `POST /v1/jobs`, `GET /v1/jobs/{id}`, `DELETE /v1/jobs/{id}`
+- Worker registration API: `POST /v1/workers/register`, heartbeat, deregister
+- Workers declare: job types they handle, VRAM cost per job, endpoint URL
+- Scheduler: match job type → registered workers; pick based on VRAM headroom and load
+- Callback delivery: on completion, POST to `callback_url` with result payload; retry on failure
+- Built-in job types: `vision_analysis`, `embed_batch`
+- Test: submit vision job → dispatched to registered worker → callback fires with result
+
+### Phase 7 — Advanced compute jobs and full metrics
+
+- `index_build` job type: pgvector (CPU) and FAISS (GPU) backends
+- `cluster` job type: k-means and HDBSCAN via registered compute worker
+- GPU-aware job scheduling: prefer GPU worker for index/cluster; fall back to CPU worker
+- Full Prometheus `/metrics`: requests_total, queue_depth per priority, job_duration,
+  worker_utilization, vram_used per node, circuit_state per backend
+- Test: index_build job completes and callback fires; metrics reflect job throughput
 
 ## Invariants — never violate
 
-- **Never block the async runtime.** No `std::thread::sleep`, no synchronous I/O, no
-  `std::sync::Mutex` held across `.await` points. Use `tokio::time::sleep`,
+- **Never block the async runtime.** No `std::thread::sleep`, no synchronous I/O,
+  no `std::sync::Mutex` held across `.await` points. Use `tokio::time::sleep`,
   async I/O, and `tokio::sync::RwLock`/`Mutex`.
 
 - **All shared state behind Arc.** Anything accessed across Tokio tasks must be
-  wrapped in `Arc<RwLock<T>>` or `Arc<Mutex<T>>`. Document why you chose RwLock
-  vs Mutex at the call site.
+  wrapped in `Arc<RwLock<T>>` or `Arc<Mutex<T>>`. Document the choice at the call
+  site: RwLock for read-heavy state (backends, affinity map); Mutex for write-heavy
+  (queue counters, circuit state transitions).
 
-- **Circuit breaker state is the routing source of truth.** The router must check
-  circuit state before selecting a backend. Never route to an open circuit.
+- **Circuit breaker state is the routing source of truth.** Always check circuit
+  state before selecting a backend. Never route to an open circuit.
 
-- **VRAM accounting is cooperative.** Fairlead cannot observe GPU memory directly —
-  consumers must register. Design the registration protocol to fail safely: an
-  unregistered consumer is invisible, so it is better to under-schedule than
-  to assume VRAM is available.
+- **Priority is always respected.** The scheduler must never dispatch a `background`
+  job while a `realtime` request is waiting. This is the central guarantee Fairlead
+  makes to its callers.
 
-- **Fairlead is application-agnostic.** It must not contain knowledge of gardens,
-  users, tasks, or any Rhizome domain concept. It routes bytes. Keep it that way.
+- **VRAM accounting is cooperative.** Fairlead cannot read GPU memory directly.
+  Fail safe: treat unregistered consumers as using zero VRAM (invisible to
+  accounting). This can cause OOM — document it clearly and encourage registration.
+  Never assume VRAM is available if it has not been reported.
 
-- **Streaming responses must be proxied without buffering.** Do not collect the
-  full response body before forwarding. Use `reqwest`'s streaming body and
-  Axum's `StreamBody` or similar to forward chunks as they arrive.
+- **Fairlead is application-agnostic.** Job payloads are opaque to Fairlead's
+  routing logic. It does not know what `vision_analysis` means, what a plant is,
+  or what a `thread_id` represents. It routes jobs to workers. Keep it that way.
 
-- **`cargo clippy --all -- -D warnings` must pass before every commit.** Clippy
-  catches common Rust mistakes. Treat warnings as errors.
+- **Jobs do not store results.** Fairlead holds job status (`queued`, `running`,
+  `complete`, `failed`) and fires the callback. It does not persist results —
+  the caller's callback handler is responsible for storing them.
+
+- **Streaming responses must be proxied without buffering.** Use reqwest's
+  streaming body and Axum's `StreamBody`. Collecting the full response body
+  before forwarding defeats streaming and blocks the async runtime.
+
+- **`cargo clippy --all -- -D warnings` must pass before every commit.**
 
 ## Rust patterns used in this project
 
@@ -162,34 +296,76 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 
 type BackendMap = Arc<RwLock<HashMap<String, BackendState>>>;
+
+// Writer
+backends.write().await.insert(url, state);
+
+// Reader (many concurrent readers allowed)
+let state = backends.read().await.get(&url).cloned();
 ```
 
-**Background tasks:**
+**Priority queue with Tokio channels:**
+```rust
+let (realtime_tx, mut realtime_rx) = mpsc::channel::<Job>(256);
+let (batch_tx,    mut batch_rx)    = mpsc::channel::<Job>(256);
+let (bg_tx,       mut bg_rx)       = mpsc::channel::<Job>(256);
+
+// Scheduler loop — always drain higher priority first
+loop {
+    tokio::select! {
+        biased;  // evaluate branches in order, not randomly
+        Some(job) = realtime_rx.recv() => dispatch(job).await,
+        Some(job) = batch_rx.recv(),
+            if realtime_rx.is_empty() => dispatch(job).await,
+        Some(job) = bg_rx.recv(),
+            if realtime_rx.is_empty() && batch_rx.is_empty() => dispatch(job).await,
+    }
+}
+```
+
+**Background health check task:**
 ```rust
 tokio::spawn(async move {
+    let mut interval = tokio::time::interval(Duration::from_secs(10));
     loop {
-        health_check(&backend).await;
-        tokio::time::sleep(Duration::from_secs(10)).await;
+        interval.tick().await;
+        let ok = probe(&backend_url).await.is_ok();
+        circuit.write().await.record(ok);
     }
 });
 ```
 
-**Error propagation:**
-```rust
-// In library code: use thiserror
-#[derive(Debug, thiserror::Error)]
-pub enum RouterError {
-    #[error("no backend available: {0}")]
-    NoBackend(String),
-}
-
-// In main/handlers: use anyhow
-async fn handler() -> Result<impl IntoResponse, StatusCode> { ... }
-```
-
 **Streaming proxy:**
 ```rust
-// Forward reqwest streaming body as Axum response
-let stream = response.bytes_stream();
-Body::from_stream(stream)
+let upstream = reqwest_client
+    .post(&backend_url)
+    .json(&body)
+    .send()
+    .await?;
+
+let stream = upstream.bytes_stream();
+Ok(Response::new(Body::from_stream(stream)))
+```
+
+**Error propagation:**
+```rust
+// Library errors: thiserror for precise types
+#[derive(Debug, thiserror::Error)]
+pub enum RouterError {
+    #[error("no backend available (all circuits open or insufficient VRAM)")]
+    NoBackend,
+    #[error("job type '{0}' has no registered worker")]
+    NoWorker(String),
+}
+
+// Handler errors: convert to HTTP status
+impl IntoResponse for RouterError {
+    fn into_response(self) -> Response {
+        let status = match self {
+            RouterError::NoBackend => StatusCode::SERVICE_UNAVAILABLE,
+            RouterError::NoWorker(_) => StatusCode::BAD_REQUEST,
+        };
+        (status, self.to_string()).into_response()
+    }
+}
 ```
