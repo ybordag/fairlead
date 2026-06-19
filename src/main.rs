@@ -1,11 +1,23 @@
 mod config;
 mod error;
 mod health;
+mod proxy;
 
-use axum::{routing::get, Router};
+use axum::{routing::{get, post}, Router};
 use std::net::SocketAddr;
 use tracing::info;
 use tracing_subscriber::EnvFilter;
+
+/// Shared state injected into every handler via Axum's `State` extractor.
+/// All fields must be `Clone` — Axum clones state once per request.
+#[derive(Clone)]
+pub struct AppState {
+    /// Reusable HTTP client for forwarding requests to backends.
+    pub client: reqwest::Client,
+    /// Ordered list of backend base URLs (e.g. "http://loki:8000/v1").
+    /// Phase 2: first entry is always used. Phase 3+ adds circuit-breaker selection.
+    pub backends: Vec<String>,
+}
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -13,7 +25,12 @@ async fn main() -> anyhow::Result<()> {
 
     init_tracing(&cfg);
 
-    let app = build_router();
+    let state = AppState {
+        client: reqwest::Client::new(),
+        backends: cfg.backends.clone(),
+    };
+
+    let app = build_router(state);
 
     let addr: SocketAddr = format!("0.0.0.0:{}", cfg.port).parse()?;
     info!(port = cfg.port, "fairlead starting");
@@ -24,8 +41,12 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-fn build_router() -> Router {
-    Router::new().route("/health", get(health::health))
+pub(crate) fn build_router(state: AppState) -> Router {
+    Router::new()
+        .route("/health", get(health::health))
+        .route("/v1/chat/completions", post(proxy::chat_completions))
+        .route("/v1/embeddings", post(proxy::embeddings))
+        .with_state(state)
 }
 
 fn init_tracing(cfg: &config::Config) {
@@ -46,18 +67,19 @@ fn init_tracing(cfg: &config::Config) {
 mod tests {
     use super::*;
 
-    /// Bind a real TCP listener on a random port and confirm the server accepts
-    /// connections and returns a valid health response. This is the only test
-    /// that exercises the full TCP path rather than the in-process oneshot harness.
     #[tokio::test]
     async fn server_binds_and_serves_health() {
+        let state = AppState {
+            client: reqwest::Client::new(),
+            backends: vec![],
+        };
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .unwrap();
         let addr = listener.local_addr().unwrap();
 
         tokio::spawn(async move {
-            axum::serve(listener, build_router()).await.unwrap();
+            axum::serve(listener, build_router(state)).await.unwrap();
         });
 
         let resp = reqwest::get(format!("http://{addr}/health"))
