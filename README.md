@@ -26,6 +26,7 @@ The current service provides:
 - **Per-backend circuit breakers** for connection failures and 5xx responses.
 - **Background health probes** that update circuit state.
 - **Soft session affinity** through `X-Fairlead-Thread-Id`.
+- **Origin-node locality** through `X-Fairlead-Origin-Node`.
 - **Prometheus-style metrics** for backend circuit state.
 
 Fairlead does **not** run inference itself. It routes requests to model servers
@@ -156,6 +157,7 @@ Chat completions are proxied to one of the configured backends:
 ```bash
 curl http://localhost:7000/v1/chat/completions \
   -H 'content-type: application/json' \
+  -H 'X-Fairlead-Origin-Node: loki' \
   -H 'X-Fairlead-Thread-Id: demo-thread' \
   -d '{"model":"local-model","messages":[{"role":"user","content":"hello"}]}'
 ```

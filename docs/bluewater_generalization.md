@@ -29,6 +29,7 @@ Fairlead currently provides:
 - Ordered backend selection from `BACKENDS`.
 - Per-backend circuit breakers with background health probes.
 - Soft session affinity through `X-Fairlead-Thread-Id`.
+- Origin-node locality through `X-Fairlead-Origin-Node`.
 - Streaming proxy support for Server-Sent Events.
 - Basic Prometheus circuit-state metrics.
 - Node-aware backend metadata through `BACKENDS_JSON`.
@@ -130,14 +131,15 @@ healthy eligible local backend.
 
 Scope:
 
-- [ ] Add request origin metadata, initially via `X-Fairlead-Origin-Node`.
-- [ ] Add route selection logic that prefers backends on the origin node when
-  they are circuit-closed and resource-eligible.
-- [ ] Define precedence between locality and existing session affinity.
-- [ ] Add tests for Loki-origin requests preferring Loki and Thor-origin requests
+- [x] Add request origin metadata, initially via `X-Fairlead-Origin-Node`.
+- [x] Add route selection logic that prefers backends on the origin node when
+  they are circuit-closed. Resource eligibility is added in the resource-aware
+  selection epic.
+- [x] Define precedence between locality and existing session affinity.
+- [x] Add tests for Loki-origin requests preferring Loki and Thor-origin requests
   preferring Thor.
 
-Proposed precedence:
+Current precedence:
 
 ```text
 eligible backend on origin node

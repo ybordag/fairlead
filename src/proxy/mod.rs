@@ -37,13 +37,19 @@ async fn forward(state: &AppState, path: &str, headers: &HeaderMap, body: Bytes)
         .and_then(|v| v.to_str().ok())
         .map(str::to_owned);
 
+    // Extract optional origin node for locality-aware routing.
+    let origin_node = headers
+        .get("x-fairlead-origin-node")
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_owned);
+
     // Resolve preferred backend index (if any) then run the fallback chain.
     let preferred = match thread_id {
         Some(ref tid) => state.affinity.preferred(tid).await,
         None => None,
     };
 
-    let Some(idx) = select_backend(&state.backends, preferred).await else {
+    let Some(idx) = select_backend(&state.backends, preferred, origin_node.as_deref()).await else {
         return (
             StatusCode::SERVICE_UNAVAILABLE,
             "all backends unavailable (circuits open)",
@@ -107,6 +113,7 @@ async fn forward(state: &AppState, path: &str, headers: &HeaderMap, body: Bytes)
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::{BackendConfig, WorkloadKind};
     use crate::{build_router, router::BackendState, router::SessionAffinity};
     use axum::{http::StatusCode, routing::post, Router};
     use serde_json::json;
@@ -151,6 +158,20 @@ mod tests {
             axum::serve(listener, build_router(state)).await.unwrap();
         });
         format!("http://{}", addr)
+    }
+
+    fn backend_on_node(url: String, node_id: &str) -> BackendState {
+        BackendState::from_config(
+            BackendConfig {
+                id: format!("{node_id}-vllm"),
+                url,
+                node_id: Some(node_id.to_string()),
+                pool: "local-llm".into(),
+                workloads: WorkloadKind::default_proxy_workloads(),
+            },
+            10,
+            Duration::from_secs(60),
+        )
     }
 
     // ── existing proxy coverage ──────────────────────────────────────────────
@@ -551,6 +572,129 @@ mod tests {
             .unwrap();
 
         assert_eq!(resp.status(), 503);
+    }
+
+    // ── origin-node locality integration ────────────────────────────────────
+
+    #[tokio::test]
+    async fn origin_node_routes_to_same_node_backend() {
+        let loki = Router::new().route(
+            "/v1/chat/completions",
+            post(|| async { axum::Json(json!({"source":"loki"})) }),
+        );
+        let thor = Router::new().route(
+            "/v1/chat/completions",
+            post(|| async { axum::Json(json!({"source":"thor"})) }),
+        );
+        let loki_url = start_mock(loki).await;
+        let thor_url = start_mock(thor).await;
+
+        let fairlead = start_fairlead_with_backends(vec![
+            backend_on_node(loki_url, "loki"),
+            backend_on_node(thor_url, "thor"),
+        ])
+        .await;
+
+        let resp = reqwest::Client::new()
+            .post(format!("{}/v1/chat/completions", fairlead))
+            .header("x-fairlead-origin-node", "thor")
+            .json(&json!({"model":"m","messages":[]}))
+            .send()
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), 200);
+        assert_eq!(
+            resp.json::<serde_json::Value>().await.unwrap()["source"],
+            "thor"
+        );
+    }
+
+    #[tokio::test]
+    async fn origin_node_falls_back_when_same_node_backend_open() {
+        let loki = Router::new().route(
+            "/v1/chat/completions",
+            post(|| async { axum::Json(json!({"source":"loki"})) }),
+        );
+        let thor = Router::new().route(
+            "/v1/chat/completions",
+            post(|| async { axum::Json(json!({"source":"thor"})) }),
+        );
+        let loki_url = start_mock(loki).await;
+        let thor_url = start_mock(thor).await;
+
+        let loki_backend = backend_on_node(loki_url, "loki");
+        for _ in 0..10 {
+            loki_backend.circuit.write().await.record_failure();
+        }
+        let fairlead =
+            start_fairlead_with_backends(vec![loki_backend, backend_on_node(thor_url, "thor")])
+                .await;
+
+        let resp = reqwest::Client::new()
+            .post(format!("{}/v1/chat/completions", fairlead))
+            .header("x-fairlead-origin-node", "loki")
+            .json(&json!({"model":"m","messages":[]}))
+            .send()
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), 200);
+        assert_eq!(
+            resp.json::<serde_json::Value>().await.unwrap()["source"],
+            "thor"
+        );
+    }
+
+    #[tokio::test]
+    async fn origin_node_precedes_existing_affinity() {
+        let loki = Router::new().route(
+            "/v1/chat/completions",
+            post(|| async { axum::Json(json!({"source":"loki"})) }),
+        );
+        let thor = Router::new().route(
+            "/v1/chat/completions",
+            post(|| async { axum::Json(json!({"source":"thor"})) }),
+        );
+        let loki_url = start_mock(loki).await;
+        let thor_url = start_mock(thor).await;
+
+        let fairlead = start_fairlead_with_backends(vec![
+            backend_on_node(loki_url, "loki"),
+            backend_on_node(thor_url, "thor"),
+        ])
+        .await;
+
+        let client = reqwest::Client::new();
+        let url = format!("{}/v1/chat/completions", fairlead);
+        let body = json!({"model":"m","messages":[]});
+
+        let first = client
+            .post(&url)
+            .header("x-fairlead-origin-node", "thor")
+            .header("x-fairlead-thread-id", "thread-1")
+            .json(&body)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            first.json::<serde_json::Value>().await.unwrap()["source"],
+            "thor"
+        );
+
+        let second = client
+            .post(&url)
+            .header("x-fairlead-origin-node", "loki")
+            .header("x-fairlead-thread-id", "thread-1")
+            .json(&body)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            second.json::<serde_json::Value>().await.unwrap()["source"],
+            "loki",
+            "same-node locality should take precedence over prior affinity"
+        );
     }
 
     // ── session affinity integration ─────────────────────────────────────────

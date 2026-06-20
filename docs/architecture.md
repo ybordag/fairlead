@@ -189,11 +189,13 @@ if none eligible:
   queue, return 503, or fall back to cloud according to workload policy
 ```
 
-Current Fairlead does not yet implement locality-aware or VRAM-aware routing. It
-only walks the configured `BACKENDS` list, honors soft session affinity, and
-skips backends whose circuit breakers are open. The Loki/Thor behavior above is
-the intended Bluewater/Fairlead direction once backend pools, origin metadata,
-resource accounting, and priority queues are added.
+Current Fairlead implements the first locality-aware slice: backends can carry
+`node_id` metadata, requests can carry `X-Fairlead-Origin-Node`, and the router
+prefers an eligible same-node backend before falling back to affinity or
+configured order. It does not yet implement VRAM-aware routing, backend-pool
+selection, queueing, or cloud fallback. The full Loki/Thor behavior above is the
+intended Bluewater/Fairlead direction once resource accounting and priority
+queues are added.
 
 ---
 

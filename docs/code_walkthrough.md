@@ -641,16 +641,24 @@ if state.backends.is_empty() {
 If `BACKENDS` was empty, there is nowhere to send the request. Fairlead returns
 HTTP 503.
 
-### 3. Extract the Optional Affinity Header
+### 3. Extract Optional Routing Headers
 
 ```rust
 let thread_id = headers
     .get("x-fairlead-thread-id")
     .and_then(|v| v.to_str().ok())
     .map(str::to_owned);
+
+let origin_node = headers
+    .get("x-fairlead-origin-node")
+    .and_then(|v| v.to_str().ok())
+    .map(str::to_owned);
 ```
 
-This tries to read `X-Fairlead-Thread-Id`.
+This tries to read:
+
+- `X-Fairlead-Thread-Id`, used for soft session affinity.
+- `X-Fairlead-Origin-Node`, used for same-node locality.
 
 The return type is `Option<String>`:
 
@@ -679,7 +687,7 @@ need `thread_id` later when recording affinity.
 ### 5. Select a Backend
 
 ```rust
-let Some(idx) = select_backend(&state.backends, preferred).await else {
+let Some(idx) = select_backend(&state.backends, preferred, origin_node.as_deref()).await else {
     return (
         StatusCode::SERVICE_UNAVAILABLE,
         "all backends unavailable (circuits open)",
@@ -705,32 +713,32 @@ otherwise return 503
 `src/router/fallback.rs`:
 
 ```rust
-pub async fn select_backend(backends: &[BackendState], preferred: Option<usize>) -> Option<usize> {
+pub async fn select_backend(
+    backends: &[BackendState],
+    preferred: Option<usize>,
+    origin_node: Option<&str>,
+) -> Option<usize> {
+    if let Some(origin) = origin_node {
+        // try available backends whose node_id matches origin
+    }
+
     if let Some(idx) = preferred {
-        if let Some(backend) = backends.get(idx) {
-            if backend.circuit.write().await.is_available() {
-                return Some(idx);
-            }
-        }
+        // try affinity backend if it was not already checked
     }
 
     for (i, backend) in backends.iter().enumerate() {
-        if Some(i) == preferred {
-            continue;
-        }
-        if backend.circuit.write().await.is_available() {
-            return Some(i);
-        }
+        // walk configured backend order, skipping already checked candidates
     }
 
     None
 }
 ```
 
-It does two passes:
+It checks candidates in this order:
 
-1. Try the preferred backend if there is one.
-2. Otherwise walk the configured backend list in order.
+1. Same-node backends matching `X-Fairlead-Origin-Node`.
+2. Existing session-affinity backend from `X-Fairlead-Thread-Id`.
+3. Remaining backends in configured order.
 
 Each check locks that backend's circuit breaker for writing because
 `is_available()` may mutate circuit state from `Open` to `HalfOpen` if cooldown
@@ -960,6 +968,7 @@ and a request:
 
 ```text
 POST /v1/chat/completions
+X-Fairlead-Origin-Node: loki
 X-Fairlead-Thread-Id: abc
 ```
 
@@ -968,9 +977,10 @@ Fairlead does:
 1. Axum routes to `proxy::chat_completions`.
 2. `chat_completions` calls `forward`.
 3. `forward` checks that backends exist.
-4. `forward` extracts thread ID `abc`.
+4. `forward` extracts origin node `loki` and thread ID `abc`.
 5. `SessionAffinity::preferred("abc")` returns a preferred index or `None`.
-6. `select_backend` checks circuit breakers and returns an available backend.
+6. `select_backend` prefers an available backend on `loki`, then affinity, then
+   configured order.
 7. `forward` builds the upstream URL.
 8. `reqwest` sends the request body to vLLM or another compatible backend.
 9. Fairlead records success or failure on that backend's circuit breaker.
