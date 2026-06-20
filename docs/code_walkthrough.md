@@ -106,6 +106,85 @@ Cloning means different things depending on the type:
 So `clone()` is not automatically "deep copy everything." You need to know the
 type being cloned.
 
+### Shared State
+
+Shared state means multiple independently running parts of the program can
+observe or update the same underlying value.
+
+In Fairlead, there are two important shared-state objects:
+
+- Each backend's `CircuitBreaker`.
+- The global `SessionAffinity` map.
+
+These must be shared because the server has many concurrent activities:
+
+- Request handler A may notice `backend[0]` returned HTTP 500.
+- Request handler B may arrive milliseconds later and need to know whether
+  `backend[0]` is still available.
+- A background health probe may independently discover that `backend[0]`
+  recovered.
+- Another request handler may update the affinity map after routing
+  `thread-123` to `backend[1]`.
+
+If every handler had its own private copy of the circuit breaker, failures
+recorded in one request would be invisible to every other request. The router
+would keep sending traffic to a broken backend because each handler would see
+its own fresh state.
+
+Fairlead avoids that with `Arc<RwLock<T>>`.
+
+```text
+                      Arc handle in request A
+                    /
+shared allocation: RwLock<CircuitBreaker>
+                    \
+                      Arc handle in health probe
+```
+
+All handles point to the same allocation. The reference count tracks how many
+handles still exist. When the last `Arc` handle is dropped, the shared allocation
+is deallocated.
+
+The `RwLock` protects the value inside that allocation:
+
+- `read().await` gives temporary read access. Many readers may coexist.
+- `write().await` gives temporary mutable access. Only one writer may exist.
+- The lock guard releases automatically when it goes out of scope.
+
+So this line:
+
+```rust
+backend.circuit.write().await.record_failure();
+```
+
+means:
+
+```text
+wait until exclusive access to the circuit breaker is available
+get mutable access
+record one failure
+release the lock when the guard is dropped
+```
+
+This is similar to a mutex-protected shared pointer, but with reader/writer lock
+semantics and compiler-enforced ownership around the handles.
+
+`AppState` itself is cloned into request handlers, but the important interior
+state remains shared:
+
+```rust
+pub struct AppState {
+    pub client: reqwest::Client,
+    pub backends: Vec<BackendState>,
+    pub affinity: SessionAffinity,
+}
+```
+
+Cloning `AppState` does not create independent circuit breakers or independent
+affinity maps. `BackendState` contains an `Arc<RwLock<CircuitBreaker>>`, and
+`SessionAffinity` contains an `Arc<RwLock<HashMap<...>>>`, so cloned handlers
+still coordinate through the same underlying state.
+
 ### `async` and `.await`
 
 An `async fn` can pause at `.await` points while waiting for I/O, timers, or
@@ -281,7 +360,8 @@ success. If it fails to connect, it records circuit failure.
 
 The important part is that `b.circuit.clone()` clones the `Arc`, not the circuit
 breaker itself. The health probe and request handlers share the same circuit
-state.
+state. When the health probe records a failure, the request path can immediately
+see that same failure count and circuit state.
 
 ### 9. Build `AppState`
 
