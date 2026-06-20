@@ -19,6 +19,57 @@ start process
   -> stream the response back
 ```
 
+## Code Architecture Diagram
+
+This diagram shows how the current Rust modules and main functions connect.
+
+```mermaid
+flowchart TD
+    process["fairlead process"] --> main["src/main.rs\nmain()"]
+
+    main --> cfg["src/config.rs\nConfig::from_env()"]
+    main --> backend_build["Build Vec<BackendState>"]
+    backend_build --> backend_state["src/router/backend.rs\nBackendState::new()"]
+    backend_state --> circuit["src/router/circuit.rs\nCircuitBreaker"]
+
+    main --> probes["spawn_health_probe() per backend"]
+    probes --> probe_loop["background health loop\nGET backend URL"]
+    probe_loop --> circuit
+
+    main --> app_state["AppState\nclient + backends + affinity"]
+    app_state --> router_build["build_router()"]
+
+    router_build --> health_route["GET /health\nhealth::health()"]
+    router_build --> metrics_route["GET /metrics\nmetrics::metrics()"]
+    router_build --> chat_route["POST /v1/chat/completions\nproxy::chat_completions()"]
+    router_build --> embed_route["POST /v1/embeddings\nproxy::embeddings()"]
+
+    chat_route --> forward["src/proxy/mod.rs\nforward()"]
+    embed_route --> forward
+
+    forward --> affinity_read["src/router/affinity.rs\nSessionAffinity::preferred()"]
+    forward --> select["src/router/fallback.rs\nselect_backend()"]
+    select --> circuit
+
+    forward --> reqwest["reqwest::Client\nPOST selected backend"]
+    reqwest --> upstream["vLLM or OpenAI-compatible backend"]
+    upstream --> stream["bytes_stream()"]
+    stream --> caller["Axum Response\nstreamed back to caller"]
+
+    forward --> affinity_write["SessionAffinity::record()\non success"]
+    forward --> circuit_update["record_success() or record_failure()"]
+    circuit_update --> circuit
+
+    metrics_route --> circuit
+```
+
+Important shared state:
+
+- `CircuitBreaker` is shared by request handlers, health probes, and metrics.
+- `SessionAffinity` is shared by request handlers.
+- `AppState` is cloned into handlers, but its interior circuit breakers and
+  affinity map still point at shared allocations.
+
 ## Rust Concepts Used Here
 
 ### Crates

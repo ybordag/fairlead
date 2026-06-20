@@ -114,6 +114,87 @@ breaking, health probing, soft affinity, streaming proxying, and basic metrics.
 VRAM accounting, priority queues, worker registration, and async job dispatch are
 planned later phases.
 
+### Rhizome example: Loki and Thor
+
+Assume a deployment with two GPU nodes:
+
+- `loki`: runs a Rhizome worker and a local vLLM server.
+- `thor`: runs a Rhizome worker and a local vLLM server.
+- Fairlead can run as one shared service, or as a local sidecar per node. The
+  routing policy is easiest to reason about as one logical Fairlead control
+  plane.
+
+```mermaid
+flowchart LR
+    cambium["Cambium\nAPI gateway"] --> rhizome_loki["Rhizome worker\non Loki"]
+    cambium --> rhizome_thor["Rhizome worker\non Thor"]
+
+    rhizome_loki --> fairlead["Fairlead\nrouting/control plane"]
+    rhizome_thor --> fairlead
+
+    fairlead --> vllm_loki["vLLM\non Loki GPU"]
+    fairlead --> vllm_thor["vLLM\non Thor GPU"]
+
+    vllm_loki --> gpu_loki["Loki GPU"]
+    vllm_thor --> gpu_thor["Thor GPU"]
+
+    fairlead -. planned .-> registry["Resource registry\nhealth + VRAM + load + locality"]
+    registry -. informs .-> fairlead
+```
+
+The desired routing behavior is locality-aware and resource-aware:
+
+```text
+Rhizome request starts on Loki
+  -> prefer vLLM on Loki, because same-node traffic should have lower latency
+  -> if Loki vLLM is unhealthy, overloaded, or lacks reported GPU headroom,
+     route to Thor vLLM
+  -> if both local GPU backends are unavailable or full, either queue by priority
+     or fall back to a cloud provider, depending on policy
+```
+
+The same applies in reverse for a Rhizome request that starts on Thor:
+
+```text
+Rhizome request starts on Thor
+  -> prefer vLLM on Thor
+  -> if Thor is unavailable or full, route to Loki
+  -> if both are unavailable or full, queue or cloud fallback
+```
+
+To make this work, Fairlead needs more metadata than the current Phase 4 code
+has:
+
+- **Backend node identity:** each backend must know whether it lives on `loki`,
+  `thor`, or another node.
+- **Request origin identity:** Rhizome or the local Fairlead sidecar must provide
+  where the request originated, for example `X-Fairlead-Origin-Node: loki`.
+- **Resource state:** vLLM and other GPU consumers must report usable capacity,
+  reserved VRAM, current load, or an equivalent schedulable signal.
+- **Workload metadata:** chat completions, embeddings, vision jobs, and batch
+  jobs may have different resource estimates and priority rules.
+- **Queue policy:** realtime inference may fail fast or wait briefly; background
+  jobs can queue longer and yield to realtime work.
+
+With those inputs, the router can make a decision like:
+
+```text
+candidates = all backends serving the requested model/workload
+candidates = remove backends with open circuits
+candidates = remove backends without enough reported capacity
+prefer backend on request origin node
+then prefer existing session affinity
+then prefer lower load / higher free capacity
+if none eligible:
+  queue, return 503, or fall back to cloud according to workload policy
+```
+
+Current Fairlead does not yet implement locality-aware or VRAM-aware routing. It
+only walks the configured `BACKENDS` list, honors soft session affinity, and
+skips backends whose circuit breakers are open. The Loki/Thor behavior above is
+the intended Bluewater/Fairlead direction once backend pools, origin metadata,
+resource accounting, and priority queues are added.
+
 ---
 
 ## What Fairlead does
