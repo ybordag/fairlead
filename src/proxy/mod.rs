@@ -7,15 +7,28 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use bytes::Bytes;
+use std::time::Instant;
+use tracing::{info, warn};
 
-use crate::{router::select_backend_excluding, AppState};
+use crate::{
+    metrics::{FallbackLabels, RequestLabels, RetryLabels},
+    router::{select_backend_excluding, BackendState},
+    AppState,
+};
 
 pub async fn chat_completions(
     State(state): State<AppState>,
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    forward(&state, "chat/completions", &headers, body).await
+    forward(
+        &state,
+        "chat_completions",
+        "chat/completions",
+        &headers,
+        body,
+    )
+    .await
 }
 
 pub async fn embeddings(
@@ -23,13 +36,35 @@ pub async fn embeddings(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    forward(&state, "embeddings", &headers, body).await
+    forward(&state, "embeddings", "embeddings", &headers, body).await
 }
 
-async fn forward(state: &AppState, path: &str, headers: &HeaderMap, body: Bytes) -> Response {
+async fn forward(
+    state: &AppState,
+    workload: &str,
+    path: &str,
+    headers: &HeaderMap,
+    body: Bytes,
+) -> Response {
+    let started = Instant::now();
     if state.backends.is_empty() {
+        record_request(
+            state,
+            workload,
+            None,
+            None,
+            StatusCode::SERVICE_UNAVAILABLE,
+            "no_backends",
+            started,
+        );
         return (StatusCode::SERVICE_UNAVAILABLE, "no backends configured").into_response();
     }
+
+    let request_id = headers
+        .get("x-request-id")
+        .or_else(|| headers.get("x-fairlead-request-id"))
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
 
     // Extract optional thread ID for session affinity.
     let thread_id = headers
@@ -65,12 +100,54 @@ async fn forward(state: &AppState, path: &str, headers: &HeaderMap, body: Bytes)
                 .await
                 else {
                     if attempted.is_empty() {
+                        record_request(
+                            state,
+                            workload,
+                            None,
+                            origin_node.as_deref(),
+                            StatusCode::SERVICE_UNAVAILABLE,
+                            "unavailable",
+                            started,
+                        );
+                        info!(
+                            request_id,
+                            workload,
+                            origin_node = origin_node.as_deref().unwrap_or(""),
+                            affinity_key = thread_id.as_deref().unwrap_or(""),
+                            selected_backend = "",
+                            retry_count = attempted.len(),
+                            fallback_reason = "",
+                            status = StatusCode::SERVICE_UNAVAILABLE.as_u16(),
+                            outcome = "unavailable",
+                            "request completed"
+                        );
                         return (
                             StatusCode::SERVICE_UNAVAILABLE,
                             "all backends unavailable (circuits open)",
                         )
                             .into_response();
                     }
+                    record_request(
+                        state,
+                        workload,
+                        None,
+                        origin_node.as_deref(),
+                        StatusCode::BAD_GATEWAY,
+                        "upstream_error",
+                        started,
+                    );
+                    info!(
+                        request_id,
+                        workload,
+                        origin_node = origin_node.as_deref().unwrap_or(""),
+                        affinity_key = thread_id.as_deref().unwrap_or(""),
+                        selected_backend = "",
+                        retry_count = attempted.len(),
+                        fallback_reason = "",
+                        status = StatusCode::BAD_GATEWAY.as_u16(),
+                        outcome = "upstream_error",
+                        "request completed"
+                    );
                     return StatusCode::BAD_GATEWAY.into_response();
                 };
                 idx
@@ -78,6 +155,11 @@ async fn forward(state: &AppState, path: &str, headers: &HeaderMap, body: Bytes)
         };
 
         let backend = &state.backends[idx];
+        let fallback_reason =
+            fallback_reason(&state.backends, idx, preferred, origin_node.as_deref());
+        if let Some(reason) = fallback_reason {
+            record_fallback(state, workload, backend, origin_node.as_deref(), reason);
+        }
         let url = format!("{}/{}", backend.url.trim_end_matches('/'), path);
 
         let upstream = match state
@@ -91,6 +173,23 @@ async fn forward(state: &AppState, path: &str, headers: &HeaderMap, body: Bytes)
             Ok(r) => r,
             Err(_) => {
                 backend.circuit.write().await.record_failure();
+                record_retry(
+                    state,
+                    workload,
+                    backend,
+                    origin_node.as_deref(),
+                    "connection_error",
+                );
+                warn!(
+                    request_id,
+                    workload,
+                    origin_node = origin_node.as_deref().unwrap_or(""),
+                    affinity_key = thread_id.as_deref().unwrap_or(""),
+                    failed_backend = backend.id,
+                    retry_count = attempted.len() + 1,
+                    reason = "connection_error",
+                    "retrying after upstream failure"
+                );
                 attempted.push(idx);
                 next_backend = select_backend_excluding(
                     &state.backends,
@@ -102,6 +201,27 @@ async fn forward(state: &AppState, path: &str, headers: &HeaderMap, body: Bytes)
                 if next_backend.is_some() {
                     continue;
                 }
+                record_request(
+                    state,
+                    workload,
+                    Some(backend),
+                    origin_node.as_deref(),
+                    StatusCode::BAD_GATEWAY,
+                    "upstream_error",
+                    started,
+                );
+                info!(
+                    request_id,
+                    workload,
+                    origin_node = origin_node.as_deref().unwrap_or(""),
+                    affinity_key = thread_id.as_deref().unwrap_or(""),
+                    selected_backend = backend.id,
+                    retry_count = attempted.len(),
+                    fallback_reason = fallback_reason.unwrap_or(""),
+                    status = StatusCode::BAD_GATEWAY.as_u16(),
+                    outcome = "upstream_error",
+                    "request completed"
+                );
                 return StatusCode::BAD_GATEWAY.into_response();
             }
         };
@@ -110,6 +230,24 @@ async fn forward(state: &AppState, path: &str, headers: &HeaderMap, body: Bytes)
 
         if status.is_server_error() {
             backend.circuit.write().await.record_failure();
+            record_retry(
+                state,
+                workload,
+                backend,
+                origin_node.as_deref(),
+                "server_error",
+            );
+            warn!(
+                request_id,
+                workload,
+                origin_node = origin_node.as_deref().unwrap_or(""),
+                affinity_key = thread_id.as_deref().unwrap_or(""),
+                failed_backend = backend.id,
+                retry_count = attempted.len() + 1,
+                status = status.as_u16(),
+                reason = "server_error",
+                "retrying after upstream failure"
+            );
             attempted.push(idx);
             next_backend = select_backend_excluding(
                 &state.backends,
@@ -121,6 +259,27 @@ async fn forward(state: &AppState, path: &str, headers: &HeaderMap, body: Bytes)
             if next_backend.is_some() {
                 continue;
             }
+            record_request(
+                state,
+                workload,
+                Some(backend),
+                origin_node.as_deref(),
+                status,
+                "upstream_5xx",
+                started,
+            );
+            info!(
+                request_id,
+                workload,
+                origin_node = origin_node.as_deref().unwrap_or(""),
+                affinity_key = thread_id.as_deref().unwrap_or(""),
+                selected_backend = backend.id,
+                retry_count = attempted.len(),
+                fallback_reason = fallback_reason.unwrap_or(""),
+                status = status.as_u16(),
+                outcome = "upstream_5xx",
+                "request completed"
+            );
             return upstream_response(upstream, status);
         }
 
@@ -131,8 +290,118 @@ async fn forward(state: &AppState, path: &str, headers: &HeaderMap, body: Bytes)
             state.affinity.record(tid, idx).await;
         }
 
+        let outcome = if attempted.is_empty() {
+            "completed"
+        } else {
+            "retried_success"
+        };
+        record_request(
+            state,
+            workload,
+            Some(backend),
+            origin_node.as_deref(),
+            status,
+            outcome,
+            started,
+        );
+        info!(
+            request_id,
+            workload,
+            origin_node = origin_node.as_deref().unwrap_or(""),
+            affinity_key = thread_id.as_deref().unwrap_or(""),
+            selected_backend = backend.id,
+            retry_count = attempted.len(),
+            fallback_reason = fallback_reason.unwrap_or(""),
+            status = status.as_u16(),
+            outcome,
+            "request completed"
+        );
+
         return upstream_response(upstream, status);
     }
+}
+
+fn fallback_reason(
+    backends: &[BackendState],
+    selected_idx: usize,
+    preferred: Option<usize>,
+    origin_node: Option<&str>,
+) -> Option<&'static str> {
+    let selected = backends.get(selected_idx)?;
+
+    if let Some(origin) = origin_node {
+        let has_origin_backend = backends
+            .iter()
+            .any(|backend| backend.node_id.as_deref() == Some(origin));
+        if has_origin_backend && selected.node_id.as_deref() != Some(origin) {
+            return Some("origin_unavailable");
+        }
+    }
+
+    if let Some(preferred_idx) = preferred {
+        if preferred_idx != selected_idx && backends.get(preferred_idx).is_some() {
+            return Some("affinity_unavailable");
+        }
+    }
+
+    None
+}
+
+fn record_request(
+    state: &AppState,
+    workload: &str,
+    backend: Option<&BackendState>,
+    origin_node: Option<&str>,
+    status: StatusCode,
+    outcome: &str,
+    started: Instant,
+) {
+    let labels = RequestLabels {
+        workload: workload.to_string(),
+        backend: backend.map(|b| b.id.clone()).unwrap_or_default(),
+        node: backend.and_then(|b| b.node_id.clone()).unwrap_or_default(),
+        pool: backend.map(|b| b.pool.clone()).unwrap_or_default(),
+        origin_node: origin_node.unwrap_or("").to_string(),
+        status: status.as_u16(),
+        outcome: outcome.to_string(),
+    };
+    state.metrics.record_request(labels, started.elapsed());
+}
+
+fn record_fallback(
+    state: &AppState,
+    workload: &str,
+    backend: &BackendState,
+    origin_node: Option<&str>,
+    reason: &str,
+) {
+    let labels = FallbackLabels {
+        workload: workload.to_string(),
+        backend: backend.id.clone(),
+        node: backend.node_id.clone().unwrap_or_default(),
+        pool: backend.pool.clone(),
+        origin_node: origin_node.unwrap_or("").to_string(),
+        reason: reason.to_string(),
+    };
+    state.metrics.record_fallback(labels);
+}
+
+fn record_retry(
+    state: &AppState,
+    workload: &str,
+    backend: &BackendState,
+    origin_node: Option<&str>,
+    reason: &str,
+) {
+    let labels = RetryLabels {
+        workload: workload.to_string(),
+        backend: backend.id.clone(),
+        node: backend.node_id.clone().unwrap_or_default(),
+        pool: backend.pool.clone(),
+        origin_node: origin_node.unwrap_or("").to_string(),
+        reason: reason.to_string(),
+    };
+    state.metrics.record_retry(labels);
 }
 
 fn upstream_response(upstream: reqwest::Response, status: StatusCode) -> Response {
@@ -199,6 +468,7 @@ mod tests {
             client: reqwest::Client::new(),
             backends,
             affinity: SessionAffinity::default(),
+            metrics: crate::metrics::RoutingMetrics::default(),
         };
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -215,6 +485,21 @@ mod tests {
                 url,
                 node_id: Some(node_id.to_string()),
                 pool: "local-llm".into(),
+                workloads: WorkloadKind::default_proxy_workloads(),
+                health_path: None,
+            },
+            10,
+            Duration::from_secs(60),
+        )
+    }
+
+    fn backend_with_id(url: String, id: &str) -> BackendState {
+        BackendState::from_config(
+            BackendConfig {
+                id: id.to_string(),
+                url,
+                node_id: None,
+                pool: "default".into(),
                 workloads: WorkloadKind::default_proxy_workloads(),
                 health_path: None,
             },
@@ -380,7 +665,11 @@ mod tests {
             }),
         );
         let second_backend = start_mock(second).await;
-        let fairlead = start_fairlead(&[&first_backend, &second_backend]).await;
+        let fairlead = start_fairlead_with_backends(vec![
+            backend_with_id(first_backend, "primary"),
+            backend_with_id(second_backend, "secondary"),
+        ])
+        .await;
 
         let resp = reqwest::Client::new()
             .post(format!("{}/v1/chat/completions", fairlead))
@@ -394,6 +683,21 @@ mod tests {
         assert_eq!(received["choices"][0]["message"]["content"], "fallback");
         assert_eq!(first_hits.load(Ordering::SeqCst), 1);
         assert_eq!(second_hits.load(Ordering::SeqCst), 1);
+
+        let metrics = reqwest::Client::new()
+            .get(format!("{}/metrics", fairlead))
+            .send()
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap();
+        assert!(metrics.contains(
+            "fairlead_retries_total{workload=\"chat_completions\",backend=\"primary\",node=\"\",pool=\"default\",origin_node=\"\",reason=\"server_error\"} 1"
+        ));
+        assert!(metrics.contains(
+            "fairlead_requests_total{workload=\"chat_completions\",backend=\"secondary\",node=\"\",pool=\"default\",origin_node=\"\",status=\"200\",outcome=\"retried_success\"} 1"
+        ));
     }
 
     #[tokio::test]
@@ -458,6 +762,42 @@ mod tests {
         assert_eq!(resp.status(), 200);
         let received: serde_json::Value = resp.json().await.unwrap();
         assert_eq!(received["data"][0]["embedding"][0], 0.1);
+    }
+
+    #[tokio::test]
+    async fn routing_metrics_record_workload_backend_and_origin() {
+        let mock = Router::new().route(
+            "/v1/chat/completions",
+            post(|| async { axum::Json(json!({"choices": [{"message": {"content": "ok"}}]})) }),
+        );
+        let backend = start_mock(mock).await;
+        let fairlead = start_fairlead_with_backends(vec![backend_on_node(backend, "node-a")]).await;
+
+        let client = reqwest::Client::new();
+        let resp = client
+            .post(format!("{}/v1/chat/completions", fairlead))
+            .header("x-fairlead-origin-node", "node-a")
+            .json(&json!({"model":"m","messages":[]}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+
+        let metrics = client
+            .get(format!("{}/metrics", fairlead))
+            .send()
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap();
+
+        assert!(metrics.contains(
+            "fairlead_requests_total{workload=\"chat_completions\",backend=\"node-a-vllm\",node=\"node-a\",pool=\"local-llm\",origin_node=\"node-a\",status=\"200\",outcome=\"completed\"} 1"
+        ));
+        assert!(metrics.contains(
+            "fairlead_request_latency_seconds_count{workload=\"chat_completions\",backend=\"node-a-vllm\",node=\"node-a\",pool=\"local-llm\",origin_node=\"node-a\",status=\"200\",outcome=\"completed\"} 1"
+        ));
     }
 
     #[tokio::test]
@@ -795,7 +1135,8 @@ mod tests {
         ])
         .await;
 
-        let resp = reqwest::Client::new()
+        let client = reqwest::Client::new();
+        let resp = client
             .post(format!("{}/v1/chat/completions", fairlead))
             .header("x-fairlead-origin-node", "node-a")
             .json(&json!({"model":"m","messages":[]}))
@@ -808,6 +1149,18 @@ mod tests {
             resp.json::<serde_json::Value>().await.unwrap()["source"],
             "node-b"
         );
+
+        let metrics = client
+            .get(format!("{}/metrics", fairlead))
+            .send()
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap();
+        assert!(metrics.contains(
+            "fairlead_fallbacks_total{workload=\"chat_completions\",backend=\"node-b-vllm\",node=\"node-b\",pool=\"local-llm\",origin_node=\"node-a\",reason=\"origin_unavailable\"} 1"
+        ));
     }
 
     #[tokio::test]

@@ -29,7 +29,8 @@ The current service provides:
 - **Origin-node locality** through `X-Fairlead-Origin-Node`.
 - **Same-request retry** across eligible backends for connection failures,
   timeouts, and 5xx responses before response bytes are streamed.
-- **Prometheus-style metrics** for backend circuit state.
+- **Prometheus-style metrics** for backend circuit state, request outcomes,
+  latency, fallback reasons, and retry reasons.
 
 Fairlead does **not** run inference itself. It routes requests to model servers
 such as vLLM. vLLM owns model loading, GPU execution, KV cache management, and

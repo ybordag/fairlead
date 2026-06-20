@@ -130,7 +130,7 @@ system.
   workloads and backend metadata.
 - [ ] Add an adapter boundary for non-OpenAI-compatible synchronous endpoints,
   such as `/v1/rerank` or `/v1/images/generations`.
-- [ ] Add metrics labels for workload kind and selected backend.
+- [x] Add metrics labels for workload kind and selected backend.
 - [ ] Decide whether session affinity should be keyed globally, per workload, or
   per backend pool.
 - [x] Make health probes target an explicit backend health endpoint such as
@@ -226,7 +226,7 @@ Scope:
   selected 5xx statuses.
 - [x] Keep request bodies replayable for non-streaming inbound requests.
 - [x] Avoid retrying unsafe or already-partially-streamed responses.
-- [ ] Record retry/fallback reason in logs and metrics.
+- [x] Record retry/fallback reason in logs and metrics.
 - [x] Add tests for primary connection failure -> secondary success.
 
 Acceptance criteria:
@@ -244,11 +244,11 @@ metrics.
 
 Scope:
 
-- [ ] Add metrics for request count by workload, backend, origin node, and
+- [x] Add metrics for request count by workload, backend, origin node, and
   status.
-- [ ] Add latency metrics by workload and backend.
-- [ ] Add fallback/retry counters with reason labels.
-- [ ] Add structured tracing fields for request ID, workload, origin node,
+- [x] Add latency metrics by workload and backend.
+- [x] Add fallback/retry counters with reason labels.
+- [x] Add structured tracing fields for request ID, workload, origin node,
   selected backend, fallback reason, affinity key, and retry count.
 
 Acceptance criteria:

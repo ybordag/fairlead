@@ -965,7 +965,7 @@ concurrently with request handlers.
 The task loops forever:
 
 1. Wait for the next interval tick.
-2. Send `GET` to the backend base URL.
+2. Send `GET` to the backend health URL.
 3. Lock the circuit breaker.
 4. Record success or failure.
 
@@ -987,6 +987,26 @@ Values:
 - `0`: closed
 - `1`: half-open
 - `2`: open
+
+The same endpoint also renders synchronous routing metrics recorded by
+`proxy::forward`:
+
+```text
+fairlead_requests_total{workload="chat_completions",backend="spark-a-vllm",node="spark-a",pool="local-llm",origin_node="spark-a",status="200",outcome="completed"} 1
+fairlead_request_latency_seconds_count{workload="chat_completions",backend="spark-a-vllm",node="spark-a",pool="local-llm",origin_node="spark-a",status="200",outcome="completed"} 1
+fairlead_request_latency_seconds_sum{workload="chat_completions",backend="spark-a-vllm",node="spark-a",pool="local-llm",origin_node="spark-a",status="200",outcome="completed"} 0.012345
+```
+
+Fallback and retry decisions have separate counters:
+
+```text
+fairlead_fallbacks_total{workload="chat_completions",backend="spark-b-vllm",node="spark-b",pool="local-llm",origin_node="spark-a",reason="origin_unavailable"} 1
+fairlead_retries_total{workload="chat_completions",backend="spark-a-vllm",node="spark-a",pool="local-llm",origin_node="spark-a",reason="server_error"} 1
+```
+
+The proxy logs structured fields for the same decision: request ID, workload,
+origin node, affinity key, selected backend, retry count, fallback reason,
+status, and outcome.
 
 ## Health Path
 

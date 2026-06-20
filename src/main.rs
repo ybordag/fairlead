@@ -13,6 +13,7 @@ use std::{net::SocketAddr, time::Duration};
 use tracing::info;
 use tracing_subscriber::EnvFilter;
 
+use metrics::RoutingMetrics;
 use router::{spawn_health_probe, BackendState, SessionAffinity};
 
 /// Shared state cloned into every handler by Axum's `State` extractor.
@@ -27,6 +28,8 @@ pub struct AppState {
     pub backends: Vec<BackendState>,
     /// Thread-ID → backend-index affinity map.
     pub affinity: SessionAffinity,
+    /// In-process routing metrics rendered by `/metrics`.
+    pub metrics: RoutingMetrics,
 }
 
 #[tokio::main]
@@ -63,6 +66,7 @@ async fn main() -> anyhow::Result<()> {
         client,
         backends,
         affinity: SessionAffinity::default(),
+        metrics: RoutingMetrics::default(),
     };
     let app = build_router(state);
 
@@ -106,6 +110,7 @@ mod tests {
             client: reqwest::Client::new(),
             backends: vec![],
             affinity: SessionAffinity::default(),
+            metrics: RoutingMetrics::default(),
         };
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
