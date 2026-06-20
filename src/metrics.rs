@@ -66,7 +66,7 @@ mod tests {
     #[tokio::test]
     async fn metrics_reports_closed_for_healthy_backend() {
         let backends = vec![BackendState::new(
-            "http://loki:8000/v1".into(),
+            "http://node-a:8000/v1".into(),
             3,
             Duration::from_secs(30),
         )];
@@ -83,13 +83,13 @@ mod tests {
         assert_eq!(resp.status(), 200);
         let text = body_text(resp).await;
         assert!(text.contains(
-            "fairlead_circuit_state{backend=\"backend-0\",url=\"http://loki:8000/v1\",node=\"\",pool=\"default\"} 0"
+            "fairlead_circuit_state{backend=\"backend-0\",url=\"http://node-a:8000/v1\",node=\"\",pool=\"default\"} 0"
         ));
     }
 
     #[tokio::test]
     async fn metrics_reports_open_after_failures() {
-        let backend = BackendState::new("http://thor:8000/v1".into(), 1, Duration::from_secs(30));
+        let backend = BackendState::new("http://node-b:8000/v1".into(), 1, Duration::from_secs(30));
         // Trip the circuit manually.
         backend.circuit.write().await.record_failure();
 
@@ -105,13 +105,14 @@ mod tests {
 
         let text = body_text(resp).await;
         assert!(text.contains(
-            "fairlead_circuit_state{backend=\"backend-0\",url=\"http://thor:8000/v1\",node=\"\",pool=\"default\"} 2"
+            "fairlead_circuit_state{backend=\"backend-0\",url=\"http://node-b:8000/v1\",node=\"\",pool=\"default\"} 2"
         ));
     }
 
     #[tokio::test]
     async fn metrics_reports_half_open() {
-        let backend = BackendState::new("http://loki:8000/v1".into(), 1, Duration::from_millis(10));
+        let backend =
+            BackendState::new("http://node-a:8000/v1".into(), 1, Duration::from_millis(10));
         backend.circuit.write().await.record_failure();
         tokio::time::sleep(Duration::from_millis(20)).await;
         // is_available() transitions Open → HalfOpen once the cooldown has elapsed.
@@ -130,7 +131,7 @@ mod tests {
         let text = body_text(resp).await;
         assert!(
             text.contains(
-                "fairlead_circuit_state{backend=\"backend-0\",url=\"http://loki:8000/v1\",node=\"\",pool=\"default\"} 1"
+                "fairlead_circuit_state{backend=\"backend-0\",url=\"http://node-a:8000/v1\",node=\"\",pool=\"default\"} 1"
             ),
             "HalfOpen should report value 1, got:\n{text}"
         );
@@ -138,8 +139,8 @@ mod tests {
 
     #[tokio::test]
     async fn metrics_reports_multiple_backends() {
-        let healthy = BackendState::new("http://loki:8000/v1".into(), 3, Duration::from_secs(30));
-        let broken = BackendState::new("http://thor:8000/v1".into(), 1, Duration::from_secs(30));
+        let healthy = BackendState::new("http://node-a:8000/v1".into(), 3, Duration::from_secs(30));
+        let broken = BackendState::new("http://node-b:8000/v1".into(), 1, Duration::from_secs(30));
         broken.circuit.write().await.record_failure();
 
         let app = router_with_backends(vec![healthy, broken]);
@@ -154,10 +155,10 @@ mod tests {
 
         let text = body_text(resp).await;
         assert!(text.contains(
-            "fairlead_circuit_state{backend=\"backend-0\",url=\"http://loki:8000/v1\",node=\"\",pool=\"default\"} 0"
+            "fairlead_circuit_state{backend=\"backend-0\",url=\"http://node-a:8000/v1\",node=\"\",pool=\"default\"} 0"
         ));
         assert!(text.contains(
-            "fairlead_circuit_state{backend=\"backend-0\",url=\"http://thor:8000/v1\",node=\"\",pool=\"default\"} 2"
+            "fairlead_circuit_state{backend=\"backend-0\",url=\"http://node-b:8000/v1\",node=\"\",pool=\"default\"} 2"
         ));
     }
 
@@ -165,11 +166,12 @@ mod tests {
     async fn metrics_reports_backend_metadata_labels() {
         let backend = BackendState::from_config(
             crate::config::BackendConfig {
-                id: "loki-vllm".into(),
-                url: "http://loki:8000/v1".into(),
-                node_id: Some("loki".into()),
+                id: "node-a-vllm".into(),
+                url: "http://node-a:8000/v1".into(),
+                node_id: Some("node-a".into()),
                 pool: "local-llm".into(),
                 workloads: crate::config::WorkloadKind::default_proxy_workloads(),
+                health_path: None,
             },
             3,
             Duration::from_secs(30),
@@ -186,7 +188,7 @@ mod tests {
 
         let text = body_text(resp).await;
         assert!(text.contains(
-            "fairlead_circuit_state{backend=\"loki-vllm\",url=\"http://loki:8000/v1\",node=\"loki\",pool=\"local-llm\"} 0"
+            "fairlead_circuit_state{backend=\"node-a-vllm\",url=\"http://node-a:8000/v1\",node=\"node-a\",pool=\"local-llm\"} 0"
         ));
     }
 

@@ -21,9 +21,9 @@ impl WorkloadKind {
 pub struct BackendConfig {
     /// Stable backend identifier used by metrics, logs, and future routing policy.
     pub id: String,
-    /// Base URL including the API prefix, e.g. `http://loki:8000/v1`.
+    /// Base URL including the API prefix, e.g. `http://node-a:8000/v1`.
     pub url: String,
-    /// Optional node identifier, e.g. `loki` or `thor`.
+    /// Optional node identifier, e.g. `node-a` or `node-b`.
     #[serde(default)]
     pub node_id: Option<String>,
     /// Backend pool name. Defaults to `default` for backward compatibility.
@@ -32,6 +32,13 @@ pub struct BackendConfig {
     /// Workloads this backend can serve.
     #[serde(default = "WorkloadKind::default_proxy_workloads")]
     pub workloads: Vec<WorkloadKind>,
+    /// Optional health probe path or absolute URL.
+    ///
+    /// Defaults to appending `models` to the backend API base URL, e.g.
+    /// `http://node-a:8000/v1` -> `http://node-a:8000/v1/models`.
+    /// Use `/health` for servers that expose process health at the origin root.
+    #[serde(default)]
+    pub health_path: Option<String>,
 }
 
 impl BackendConfig {
@@ -42,6 +49,7 @@ impl BackendConfig {
             node_id: None,
             pool: default_backend_pool(),
             workloads: WorkloadKind::default_proxy_workloads(),
+            health_path: None,
         }
     }
 }
@@ -156,6 +164,17 @@ fn validate_backends(backends: &[BackendConfig]) -> Result<()> {
                 backend.id
             ));
         }
+        if backend
+            .health_path
+            .as_deref()
+            .map(str::trim)
+            .is_some_and(str::is_empty)
+        {
+            return Err(anyhow!(
+                "invalid BACKENDS_JSON: backend '{}' health_path cannot be empty",
+                backend.id
+            ));
+        }
     }
 
     for i in 0..backends.len() {
@@ -256,14 +275,14 @@ mod tests {
     fn backends_parsed_from_comma_separated_env() {
         let cfg = Config::from_lookup(env(&[(
             "BACKENDS",
-            "http://loki:8000/v1, http://thor:8000/v1",
+            "http://node-a:8000/v1, http://node-b:8000/v1",
         )]))
         .unwrap();
         assert_eq!(
             cfg.backends,
             vec![
-                BackendConfig::from_legacy_url(0, "http://loki:8000/v1".into()),
-                BackendConfig::from_legacy_url(1, "http://thor:8000/v1".into())
+                BackendConfig::from_legacy_url(0, "http://node-a:8000/v1".into()),
+                BackendConfig::from_legacy_url(1, "http://node-b:8000/v1".into())
             ]
         );
     }
@@ -274,16 +293,17 @@ mod tests {
             "BACKENDS_JSON",
             r#"[
                 {
-                    "id": "loki-vllm",
-                    "url": "http://loki:8000/v1",
-                    "node_id": "loki",
+                    "id": "node-a-vllm",
+                    "url": "http://node-a:8000/v1",
+                    "node_id": "node-a",
                     "pool": "local-llm",
-                    "workloads": ["chat_completions", "embeddings"]
+                    "workloads": ["chat_completions", "embeddings"],
+                    "health_path": "/health"
                 },
                 {
-                    "id": "thor-vllm",
-                    "url": "http://thor:8000/v1",
-                    "node_id": "thor",
+                    "id": "node-b-vllm",
+                    "url": "http://node-b:8000/v1",
+                    "node_id": "node-b",
                     "pool": "local-llm",
                     "workloads": ["chat_completions"]
                 }
@@ -292,14 +312,15 @@ mod tests {
         .unwrap();
 
         assert_eq!(cfg.backends.len(), 2);
-        assert_eq!(cfg.backends[0].id, "loki-vllm");
-        assert_eq!(cfg.backends[0].node_id.as_deref(), Some("loki"));
+        assert_eq!(cfg.backends[0].id, "node-a-vllm");
+        assert_eq!(cfg.backends[0].node_id.as_deref(), Some("node-a"));
         assert_eq!(cfg.backends[0].pool, "local-llm");
         assert_eq!(
             cfg.backends[0].workloads,
             vec![WorkloadKind::ChatCompletions, WorkloadKind::Embeddings]
         );
-        assert_eq!(cfg.backends[1].id, "thor-vllm");
+        assert_eq!(cfg.backends[0].health_path.as_deref(), Some("/health"));
+        assert_eq!(cfg.backends[1].id, "node-b-vllm");
         assert_eq!(
             cfg.backends[1].workloads,
             vec![WorkloadKind::ChatCompletions]
@@ -310,7 +331,7 @@ mod tests {
     fn backends_json_defaults_pool_and_workloads() {
         let cfg = Config::from_lookup(env(&[(
             "BACKENDS_JSON",
-            r#"[{"id":"loki-vllm","url":"http://loki:8000/v1","node_id":"loki"}]"#,
+            r#"[{"id":"node-a-vllm","url":"http://node-a:8000/v1","node_id":"node-a"}]"#,
         )]))
         .unwrap();
 
@@ -319,6 +340,7 @@ mod tests {
             cfg.backends[0].workloads,
             WorkloadKind::default_proxy_workloads()
         );
+        assert_eq!(cfg.backends[0].health_path, None);
     }
 
     #[test]
@@ -336,8 +358,8 @@ mod tests {
         let result = Config::from_lookup(env(&[(
             "BACKENDS_JSON",
             r#"[
-                {"id":"same","url":"http://loki:8000/v1"},
-                {"id":"same","url":"http://thor:8000/v1"}
+                {"id":"same","url":"http://node-a:8000/v1"},
+                {"id":"same","url":"http://node-b:8000/v1"}
             ]"#,
         )]));
         assert!(result.is_err());
@@ -345,5 +367,18 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("duplicate backend id"));
+    }
+
+    #[test]
+    fn empty_health_path_returns_err() {
+        let result = Config::from_lookup(env(&[(
+            "BACKENDS_JSON",
+            r#"[{"id":"node-a-vllm","url":"http://node-a:8000/v1","health_path":"   "}]"#,
+        )]));
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("health_path cannot be empty"));
     }
 }

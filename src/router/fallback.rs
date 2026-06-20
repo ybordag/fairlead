@@ -70,6 +70,7 @@ mod tests {
                 node_id: Some(node_id.to_string()),
                 pool: "local-llm".into(),
                 workloads: WorkloadKind::default_proxy_workloads(),
+                health_path: None,
             },
             1,
             Duration::from_secs(60),

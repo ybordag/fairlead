@@ -53,7 +53,7 @@ async fn main() -> anyhow::Result<()> {
     for b in &backends {
         spawn_health_probe(
             b.circuit.clone(),
-            b.url.clone(),
+            b.health_url.clone(),
             client.clone(),
             Duration::from_secs(cfg.health_probe_interval_secs),
         );

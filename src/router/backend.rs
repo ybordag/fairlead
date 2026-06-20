@@ -12,7 +12,7 @@ use super::circuit::CircuitBreaker;
 pub struct BackendState {
     /// Stable identifier used in metrics and future routing policy.
     pub id: String,
-    /// Base URL including the API prefix, e.g. `http://loki:8000/v1`.
+    /// Base URL including the API prefix, e.g. `http://node-a:8000/v1`.
     pub url: String,
     /// Optional node identity for locality-aware routing.
     pub node_id: Option<String>,
@@ -20,6 +20,8 @@ pub struct BackendState {
     pub pool: String,
     /// Workloads this backend can serve.
     pub workloads: Vec<WorkloadKind>,
+    /// URL used by background health probes.
+    pub health_url: String,
     /// Circuit breaker shared between the request path and the health-probe task.
     pub circuit: Arc<RwLock<CircuitBreaker>>,
 }
@@ -34,18 +36,55 @@ impl BackendState {
     }
 
     pub fn from_config(config: BackendConfig, failure_threshold: u32, cooldown: Duration) -> Self {
+        let health_url = derive_health_url(&config.url, config.health_path.as_deref());
         Self {
             id: config.id,
             url: config.url,
             node_id: config.node_id,
             pool: config.pool,
             workloads: config.workloads,
+            health_url,
             circuit: Arc::new(RwLock::new(CircuitBreaker::new(
                 failure_threshold,
                 cooldown,
             ))),
         }
     }
+}
+
+fn derive_health_url(base_url: &str, health_path: Option<&str>) -> String {
+    match health_path.map(str::trim) {
+        Some(path) if path.starts_with("http://") || path.starts_with("https://") => {
+            path.to_string()
+        }
+        Some(path) if path.starts_with('/') => {
+            join_origin_path(base_url, path).unwrap_or_else(|| {
+                format!(
+                    "{}/{}",
+                    base_url.trim_end_matches('/'),
+                    path.trim_start_matches('/')
+                )
+            })
+        }
+        Some(path) => append_url_path(base_url, path),
+        None => append_url_path(base_url, "models"),
+    }
+}
+
+fn append_url_path(base_url: &str, path: &str) -> String {
+    format!(
+        "{}/{}",
+        base_url.trim_end_matches('/'),
+        path.trim_start_matches('/')
+    )
+}
+
+fn join_origin_path(base_url: &str, path: &str) -> Option<String> {
+    let mut url = reqwest::Url::parse(base_url).ok()?;
+    url.set_path(path);
+    url.set_query(None);
+    url.set_fragment(None);
+    Some(url.to_string())
 }
 
 #[cfg(test)]
@@ -60,7 +99,8 @@ mod tests {
     /// in one handler never affect any other.
     #[tokio::test]
     async fn clone_shares_circuit_not_copies() {
-        let original = BackendState::new("http://loki:8000/v1".into(), 1, Duration::from_secs(30));
+        let original =
+            BackendState::new("http://node-a:8000/v1".into(), 1, Duration::from_secs(30));
         let cloned = original.clone();
 
         original.circuit.write().await.record_failure();
@@ -76,31 +116,88 @@ mod tests {
     fn from_config_preserves_node_aware_metadata() {
         let backend = BackendState::from_config(
             BackendConfig {
-                id: "loki-vllm".into(),
-                url: "http://loki:8000/v1".into(),
-                node_id: Some("loki".into()),
+                id: "node-a-vllm".into(),
+                url: "http://node-a:8000/v1".into(),
+                node_id: Some("node-a".into()),
                 pool: "local-llm".into(),
                 workloads: vec![WorkloadKind::ChatCompletions],
+                health_path: None,
             },
             3,
             Duration::from_secs(30),
         );
 
-        assert_eq!(backend.id, "loki-vllm");
-        assert_eq!(backend.url, "http://loki:8000/v1");
-        assert_eq!(backend.node_id.as_deref(), Some("loki"));
+        assert_eq!(backend.id, "node-a-vllm");
+        assert_eq!(backend.url, "http://node-a:8000/v1");
+        assert_eq!(backend.node_id.as_deref(), Some("node-a"));
         assert_eq!(backend.pool, "local-llm");
         assert_eq!(backend.workloads, vec![WorkloadKind::ChatCompletions]);
+        assert_eq!(backend.health_url, "http://node-a:8000/v1/models");
     }
 
     #[test]
     fn legacy_constructor_uses_default_metadata() {
-        let backend = BackendState::new("http://loki:8000/v1".into(), 3, Duration::from_secs(30));
+        let backend = BackendState::new("http://node-a:8000/v1".into(), 3, Duration::from_secs(30));
 
         assert_eq!(backend.id, "backend-0");
         assert_eq!(backend.node_id, None);
         assert_eq!(backend.pool, crate::config::DEFAULT_BACKEND_POOL);
         assert_eq!(backend.workloads, WorkloadKind::default_proxy_workloads());
+        assert_eq!(backend.health_url, "http://node-a:8000/v1/models");
+    }
+
+    #[test]
+    fn configured_absolute_health_path_uses_backend_origin() {
+        let backend = BackendState::from_config(
+            BackendConfig {
+                id: "node-a-vllm".into(),
+                url: "http://node-a:8000/v1".into(),
+                node_id: Some("node-a".into()),
+                pool: "local-llm".into(),
+                workloads: WorkloadKind::default_proxy_workloads(),
+                health_path: Some("/health".into()),
+            },
+            3,
+            Duration::from_secs(30),
+        );
+
+        assert_eq!(backend.health_url, "http://node-a:8000/health");
+    }
+
+    #[test]
+    fn configured_relative_health_path_uses_backend_base_url() {
+        let backend = BackendState::from_config(
+            BackendConfig {
+                id: "node-a-vllm".into(),
+                url: "http://node-a:8000/v1".into(),
+                node_id: Some("node-a".into()),
+                pool: "local-llm".into(),
+                workloads: WorkloadKind::default_proxy_workloads(),
+                health_path: Some("ready".into()),
+            },
+            3,
+            Duration::from_secs(30),
+        );
+
+        assert_eq!(backend.health_url, "http://node-a:8000/v1/ready");
+    }
+
+    #[test]
+    fn configured_health_url_can_be_absolute() {
+        let backend = BackendState::from_config(
+            BackendConfig {
+                id: "node-a-vllm".into(),
+                url: "http://node-a:8000/v1".into(),
+                node_id: Some("node-a".into()),
+                pool: "local-llm".into(),
+                workloads: WorkloadKind::default_proxy_workloads(),
+                health_path: Some("http://node-a:9000/ready".into()),
+            },
+            3,
+            Duration::from_secs(30),
+        );
+
+        assert_eq!(backend.health_url, "http://node-a:9000/ready");
     }
 
     async fn start_probe_target(app: Router) -> String {
@@ -119,7 +216,7 @@ mod tests {
     /// one successful probe fires.
     #[tokio::test]
     async fn probe_closes_open_circuit_on_success() {
-        let mock = Router::new().route("/v1", get(|| async { StatusCode::OK }));
+        let mock = Router::new().route("/v1/models", get(|| async { StatusCode::OK }));
         let url = start_probe_target(mock).await;
 
         // Long cooldown: is_available() alone would never transition this circuit.
@@ -135,7 +232,7 @@ mod tests {
 
         spawn_health_probe(
             circuit.clone(),
-            url,
+            append_url_path(&url, "models"),
             reqwest::Client::new(),
             Duration::from_millis(25),
         );
@@ -186,14 +283,14 @@ mod tests {
     /// probes must not inadvertently change state.
     #[tokio::test]
     async fn probe_keeps_healthy_circuit_closed() {
-        let mock = Router::new().route("/v1", get(|| async { StatusCode::OK }));
+        let mock = Router::new().route("/v1/models", get(|| async { StatusCode::OK }));
         let url = start_probe_target(mock).await;
 
         let circuit = Arc::new(RwLock::new(CircuitBreaker::new(1, Duration::from_secs(30))));
 
         spawn_health_probe(
             circuit.clone(),
-            url,
+            append_url_path(&url, "models"),
             reqwest::Client::new(),
             Duration::from_millis(25),
         );
