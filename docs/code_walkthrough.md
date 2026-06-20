@@ -1,7 +1,9 @@
 # Code Walkthrough
 
 This document explains the current Rust code from process startup to proxied
-response. It assumes comfort with C-style systems programming, but not much Rust.
+response. It assumes familiarity with allocation and deallocation, pointers or
+references, mutable shared state, and request/response services, but not much
+Rust.
 
 Fairlead is currently one Rust binary. Its current behavior is:
 
@@ -39,7 +41,9 @@ names:
 - `mod proxy;` loads `src/proxy/mod.rs`.
 - `mod router;` loads `src/router/mod.rs`.
 
-This is closer to declaring compilation units than to C's textual `#include`.
+This is closer to declaring compilation units than to copying source text into
+the current file. The compiler still understands these modules as part of one
+crate.
 
 ### `use`
 
@@ -63,7 +67,7 @@ async fn main() -> anyhow::Result<()>
 ```
 
 That means the function either returns success value `()` or an error. `()` is
-Rust's unit value, similar to `void` as a value.
+Rust's unit value: a real value that carries no information.
 
 The `?` operator means: if this expression is an error, return that error from
 the current function immediately; otherwise unwrap the success value.
@@ -72,16 +76,35 @@ the current function immediately; otherwise unwrap the success value.
 let cfg = config::Config::from_env()?;
 ```
 
-### Ownership and Cloning
+### Ownership, Allocation, and Cloning
 
-Rust values usually have one owner. If a value needs to be shared across many
-async request handlers, Fairlead uses `Arc` and `RwLock`.
+Rust values usually have one owner. When that owner goes out of scope, the value
+is dropped and any owned heap allocations are released. This is deterministic
+cleanup without a garbage collector.
+
+Passing a value by value usually moves ownership. After a move, the previous
+binding cannot be used. Borrowing with `&value` gives another function temporary
+access without transferring ownership.
+
+If a value needs to be shared across many async request handlers, Fairlead uses
+`Arc` and `RwLock`.
 
 - `Arc<T>` is an atomically reference-counted pointer.
 - `RwLock<T>` allows many readers or one writer.
 - `Arc<RwLock<T>>` means shared mutable state with runtime locking.
 
 This is the central pattern for circuit breakers and affinity maps.
+
+Cloning means different things depending on the type:
+
+- Cloning a `String` allocates/copies string data.
+- Cloning an `Arc<T>` increments a reference count and gives another handle to
+  the same allocation.
+- Cloning `BackendState` is cheap because its circuit breaker is inside an
+  `Arc`.
+
+So `clone()` is not automatically "deep copy everything." You need to know the
+type being cloned.
 
 ### `async` and `.await`
 
@@ -178,7 +201,8 @@ init_tracing(&cfg);
 ```
 
 This configures logging. The `&cfg` syntax is a borrowed reference. It lets
-`init_tracing` read the config without taking ownership of it.
+`init_tracing` read the config without taking ownership of it. After this call,
+`main` still owns `cfg` and can keep using it.
 
 ### 6. Create the Outbound HTTP Client
 
@@ -205,19 +229,20 @@ let backends: Vec<BackendState> = cfg
     .collect();
 ```
 
-This transforms each configured URL string into a `BackendState`.
+This transforms each configured URL string into a `BackendState`. In
+language-agnostic pseudocode:
 
-In C-like pseudocode:
-
-```c
-BackendState backends[MAX];
-for each url in cfg.backends {
-    backends.push(BackendState_new(
-        copy(url),
+```text
+backends = new empty growable list
+for each url reference in cfg.backends:
+    copied_url = copy url string
+    cooldown = duration_from_seconds(cfg.circuit_cooldown_secs)
+    backend = BackendState.new(
+        copied_url,
         cfg.circuit_failure_threshold,
-        seconds(cfg.circuit_cooldown_secs)
-    ));
-}
+        cooldown
+    )
+    append backend to backends
 ```
 
 `BackendState::new` creates:
@@ -230,6 +255,10 @@ pub struct BackendState {
 ```
 
 Each backend has its own circuit breaker.
+
+The `url.clone()` call copies the URL string because each `BackendState` owns its
+own URL. The circuit breaker is allocated inside `BackendState::new` and wrapped
+in `Arc<RwLock<_>>` so request handlers and health probes can share it.
 
 ### 8. Spawn Background Health Probes
 
@@ -379,7 +408,8 @@ The return type is `Option<String>`:
 - `None` if it is missing or invalid.
 
 `Option<T>` is Rust's explicit nullable value. It is like a pointer that must be
-checked before use, but without null pointer behavior.
+checked before use, except the compiler forces the check before the inner value
+can be accessed.
 
 ### 4. Look Up Preferred Backend
 
