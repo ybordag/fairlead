@@ -1,1 +1,13 @@
 /target
+
+# Local environment and deployment configuration. Commit sanitized examples in
+# docs or as *.example files instead.
+.env
+.env.*
+!.env.example
+*.local
+*.local.*
+local/
+config/local/
+fixtures/local/
+fixtures/private/
