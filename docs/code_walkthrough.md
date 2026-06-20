@@ -47,7 +47,18 @@ crate.
 
 ### `use`
 
-`use` brings names into scope:
+`use` brings names into the current scope.
+
+A **name** is an identifier the program can refer to, such as a function, type,
+module, constant, or trait. In this example, the names are:
+
+- `get`: a function from Axum used to register a `GET` route.
+- `post`: a function from Axum used to register a `POST` route.
+- `Router`: a type from Axum used to build the HTTP router.
+
+A **scope** is the region of code where an unqualified name can be used. After a
+`use` statement at the top of `src/main.rs`, the imported names are available in
+the rest of that file/module.
 
 ```rust
 use axum::{
@@ -56,7 +67,45 @@ use axum::{
 };
 ```
 
-This is not textual inclusion. It is closer to importing names from a namespace.
+Without this `use`, the code could still refer to the same items by their full
+paths:
+
+```rust
+let app = axum::Router::new()
+    .route("/health", axum::routing::get(health::health))
+    .route("/v1/chat/completions", axum::routing::post(proxy::chat_completions));
+```
+
+With the `use`, the shorter names are available:
+
+```rust
+let app = Router::new()
+    .route("/health", get(health::health))
+    .route("/v1/chat/completions", post(proxy::chat_completions));
+```
+
+A **namespace** is a named hierarchy that organizes code and prevents unrelated
+items from colliding. `axum` is a crate namespace. Inside it, `routing` is a
+module namespace. Inside `routing`, there are names like `get` and `post`.
+
+```text
+axum
+  -> routing
+       -> get
+       -> post
+  -> Router
+```
+
+This means `axum::routing::get` is the full path to the `get` function, and
+`axum::Router` is the full path to the `Router` type.
+
+`use` does not copy the contents of another file into this file. It only creates
+shorter local names for items that already exist elsewhere. The compiler still
+knows where the original items live.
+
+That is what "not textual inclusion" means: the source text from Axum is not
+pasted into `main.rs`. Fairlead imports names from Axum's namespace and then
+links against the compiled Axum crate.
 
 ### `Result`
 
