@@ -21,6 +21,22 @@ start process
 
 ## Rust Concepts Used Here
 
+### Crates
+
+A **crate** is Rust's unit of compilation and packaging. In this repo, Fairlead
+is one binary crate: compiling the project produces one executable server.
+
+Fairlead also depends on library crates listed in `Cargo.toml`, including:
+
+- `axum` for the HTTP server framework.
+- `tokio` for the async runtime.
+- `reqwest` for outbound HTTP requests.
+- `serde` and `serde_json` for JSON types.
+
+When code starts with a path like `axum::...`, it is referring to something
+exported by the external `axum` crate. When code starts with `crate::...`, it is
+referring to something inside the current Fairlead crate.
+
 ### Modules
 
 At the top of `src/main.rs`:
@@ -47,18 +63,19 @@ crate.
 
 ### `use`
 
-`use` brings names into the current scope.
+Rust code often refers to items through paths separated by `::`.
 
-A **name** is an identifier the program can refer to, such as a function, type,
-module, constant, or trait. In this example, the names are:
+For example:
 
-- `get`: a function from Axum used to register a `GET` route.
-- `post`: a function from Axum used to register a `POST` route.
-- `Router`: a type from Axum used to build the HTTP router.
+```rust
+axum::routing::get
+```
 
-A **scope** is the region of code where an unqualified name can be used. After a
-`use` statement at the top of `src/main.rs`, the imported names are available in
-the rest of that file/module.
+means: start at the external `axum` crate, go into its `routing` module, and use
+the `get` function.
+
+`use` lets the rest of the current module use a shorter local name for an item
+from one of those paths.
 
 ```rust
 use axum::{
@@ -67,8 +84,14 @@ use axum::{
 };
 ```
 
-Without this `use`, the code could still refer to the same items by their full
-paths:
+This imports three Axum items into `src/main.rs`:
+
+- `get`, from `axum::routing::get`.
+- `post`, from `axum::routing::post`.
+- `Router`, from `axum::Router`.
+
+Without the `use`, the code could still refer to the same items by their full
+paths every time:
 
 ```rust
 let app = axum::Router::new()
@@ -84,41 +107,10 @@ let app = Router::new()
     .route("/v1/chat/completions", post(proxy::chat_completions));
 ```
 
-A **namespace** is a named hierarchy that organizes code and prevents unrelated
-items from colliding.
-
-A **crate** is Rust's unit of compilation and packaging. A crate can be:
-
-- A library dependency, such as `axum`, `tokio`, or `reqwest`.
-- The current application package being compiled, in this repo's case
-  `fairlead`.
-
-A **crate namespace** is the top-level namespace owned by a crate. When code says
-`axum::...`, it is looking inside the namespace exported by the `axum` crate.
-Inside that crate namespace, there can be module namespaces, types, functions,
-traits, constants, and macros.
-
-In this example, `axum` is a crate namespace. Inside it, `routing` is a module
-namespace. Inside `routing`, there are names like `get` and `post`.
-
-```text
-axum
-  -> routing
-       -> get
-       -> post
-  -> Router
-```
-
-This means `axum::routing::get` is the full path to the `get` function, and
-`axum::Router` is the full path to the `Router` type.
-
-`use` does not copy the contents of another file into this file. It only creates
-shorter local names for items that already exist elsewhere. The compiler still
-knows where the original items live.
-
-That is what "not textual inclusion" means: the source text from Axum is not
-pasted into `main.rs`. Fairlead imports names from Axum's namespace and then
-links against the compiled Axum crate.
+The Rust-specific point is that `use` is about name resolution, not loading or
+copying code. The Axum code is compiled as the `axum` crate. Fairlead imports
+selected names from that crate's module tree so the current module can refer to
+them directly.
 
 ### `Result`
 
