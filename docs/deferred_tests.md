@@ -66,25 +66,6 @@ never exercised by any test.
 
 ---
 
-## `src/proxy/mod.rs`
-
-### `affinity_follows_circuit_after_connection_failure`
-The connection-error equivalent of `affinity_follows_circuit_after_5xx_degradation`.
-
-When the preferred backend becomes unreachable (reqwest returns `Err`, Fairlead
-returns 502), affinity is intentionally not updated. The thread keeps retrying the
-unreachable backend on each request, accumulating failures until the circuit opens,
-at which point `select_backend` falls back to a healthy backend and the affinity
-map is updated.
-
-The 5xx path is tested end-to-end. The 502/connection-error path shares the same
-`record_failure()` + early-return code but is not explicitly tested.
-
-**Why deferred:** Behaviour is structurally identical to the 5xx path; single
-additional integration test.
-
----
-
 ### `embeddings_uses_fallback_chain_when_first_backend_open`
 Explicit integration test that `POST /v1/embeddings` also benefits from the
 fallback chain when the first backend's circuit is open.

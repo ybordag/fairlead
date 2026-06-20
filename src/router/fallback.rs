@@ -7,10 +7,22 @@ use crate::router::backend::BackendState;
 /// returned. If no origin-local backend is available, `preferred` session
 /// affinity is tried. Otherwise the list is walked in declared order, skipping
 /// already-checked indexes. Returns `None` if every circuit is open.
-pub async fn select_backend(
+#[cfg(test)]
+async fn select_backend(
     backends: &[BackendState],
     preferred: Option<usize>,
     origin_node: Option<&str>,
+) -> Option<usize> {
+    select_backend_excluding(backends, preferred, origin_node, &[]).await
+}
+
+/// Select the best available backend index while skipping backends already
+/// attempted for the current request.
+pub async fn select_backend_excluding(
+    backends: &[BackendState],
+    preferred: Option<usize>,
+    origin_node: Option<&str>,
+    excluded: &[usize],
 ) -> Option<usize> {
     let mut checked = Vec::with_capacity(2);
 
@@ -18,18 +30,19 @@ pub async fn select_backend(
     // rule; resource eligibility will be layered in later.
     if let Some(origin) = origin_node {
         for (i, backend) in backends.iter().enumerate() {
-            if backend.node_id.as_deref() == Some(origin) {
-                checked.push(i);
-                if backend.circuit.write().await.is_available() {
-                    return Some(i);
-                }
+            if excluded.contains(&i) || backend.node_id.as_deref() != Some(origin) {
+                continue;
+            }
+            checked.push(i);
+            if backend.circuit.write().await.is_available() {
+                return Some(i);
             }
         }
     }
 
     // Try the preferred backend first.
     if let Some(idx) = preferred {
-        if !checked.contains(&idx) {
+        if !checked.contains(&idx) && !excluded.contains(&idx) {
             if let Some(backend) = backends.get(idx) {
                 checked.push(idx);
                 if backend.circuit.write().await.is_available() {
@@ -41,7 +54,7 @@ pub async fn select_backend(
 
     // Walk in declared priority order, skipping already-checked candidates.
     for (i, backend) in backends.iter().enumerate() {
-        if checked.contains(&i) {
+        if checked.contains(&i) || excluded.contains(&i) {
             continue;
         }
         if backend.circuit.write().await.is_available() {
@@ -139,45 +152,78 @@ mod tests {
     #[tokio::test]
     async fn origin_node_preferred_when_available() {
         let backends = vec![
-            healthy_on_node("http://loki:8000/v1", "loki"),
-            healthy_on_node("http://thor:8000/v1", "thor"),
+            healthy_on_node("http://node-a:8000/v1", "node-a"),
+            healthy_on_node("http://node-b:8000/v1", "node-b"),
         ];
 
-        assert_eq!(select_backend(&backends, None, Some("thor")).await, Some(1));
+        assert_eq!(
+            select_backend(&backends, None, Some("node-b")).await,
+            Some(1)
+        );
     }
 
     #[tokio::test]
     async fn origin_node_precedence_over_affinity() {
         let backends = vec![
-            healthy_on_node("http://loki:8000/v1", "loki"),
-            healthy_on_node("http://thor:8000/v1", "thor"),
+            healthy_on_node("http://node-a:8000/v1", "node-a"),
+            healthy_on_node("http://node-b:8000/v1", "node-b"),
         ];
 
         assert_eq!(
-            select_backend(&backends, Some(1), Some("loki")).await,
+            select_backend(&backends, Some(1), Some("node-a")).await,
             Some(0)
         );
     }
 
     #[tokio::test]
     async fn origin_node_falls_back_when_local_circuit_open() {
-        let local = healthy_on_node("http://loki:8000/v1", "loki");
+        let local = healthy_on_node("http://node-a:8000/v1", "node-a");
         local.circuit.write().await.record_failure();
-        let backends = vec![local, healthy_on_node("http://thor:8000/v1", "thor")];
+        let backends = vec![local, healthy_on_node("http://node-b:8000/v1", "node-b")];
 
-        assert_eq!(select_backend(&backends, None, Some("loki")).await, Some(1));
+        assert_eq!(
+            select_backend(&backends, None, Some("node-a")).await,
+            Some(1)
+        );
     }
 
     #[tokio::test]
     async fn unknown_origin_node_uses_affinity_then_chain() {
         let backends = vec![
-            healthy_on_node("http://loki:8000/v1", "loki"),
-            healthy_on_node("http://thor:8000/v1", "thor"),
+            healthy_on_node("http://node-a:8000/v1", "node-a"),
+            healthy_on_node("http://node-b:8000/v1", "node-b"),
         ];
 
         assert_eq!(
             select_backend(&backends, Some(1), Some("odin")).await,
             Some(1)
+        );
+    }
+
+    #[tokio::test]
+    async fn excluded_origin_backend_uses_next_candidate() {
+        let backends = vec![
+            healthy_on_node("http://node-a:8000/v1", "node-a"),
+            healthy_on_node("http://node-b:8000/v1", "node-b"),
+        ];
+
+        assert_eq!(
+            select_backend_excluding(&backends, None, Some("node-a"), &[0]).await,
+            Some(1)
+        );
+    }
+
+    #[tokio::test]
+    async fn excluded_preferred_backend_uses_chain() {
+        let backends = vec![
+            healthy("http://a:8000/v1"),
+            healthy("http://b:8000/v1"),
+            healthy("http://c:8000/v1"),
+        ];
+
+        assert_eq!(
+            select_backend_excluding(&backends, Some(1), None, &[1]).await,
+            Some(0)
         );
     }
 }

@@ -8,7 +8,7 @@ use axum::{
 };
 use bytes::Bytes;
 
-use crate::{router::select_backend, AppState};
+use crate::{router::select_backend_excluding, AppState};
 
 pub async fn chat_completions(
     State(state): State<AppState>,
@@ -49,45 +49,93 @@ async fn forward(state: &AppState, path: &str, headers: &HeaderMap, body: Bytes)
         None => None,
     };
 
-    let Some(idx) = select_backend(&state.backends, preferred, origin_node.as_deref()).await else {
-        return (
-            StatusCode::SERVICE_UNAVAILABLE,
-            "all backends unavailable (circuits open)",
-        )
-            .into_response();
-    };
+    let mut attempted = Vec::new();
+    let mut next_backend = None;
 
-    let backend = &state.backends[idx];
-    let url = format!("{}/{}", backend.url.trim_end_matches('/'), path);
+    loop {
+        let idx = match next_backend.take() {
+            Some(idx) => idx,
+            None => {
+                let Some(idx) = select_backend_excluding(
+                    &state.backends,
+                    preferred,
+                    origin_node.as_deref(),
+                    &attempted,
+                )
+                .await
+                else {
+                    if attempted.is_empty() {
+                        return (
+                            StatusCode::SERVICE_UNAVAILABLE,
+                            "all backends unavailable (circuits open)",
+                        )
+                            .into_response();
+                    }
+                    return StatusCode::BAD_GATEWAY.into_response();
+                };
+                idx
+            }
+        };
 
-    let upstream = match state
-        .client
-        .post(&url)
-        .header("content-type", "application/json")
-        .body(body)
-        .send()
-        .await
-    {
-        Ok(r) => r,
-        Err(_) => {
+        let backend = &state.backends[idx];
+        let url = format!("{}/{}", backend.url.trim_end_matches('/'), path);
+
+        let upstream = match state
+            .client
+            .post(&url)
+            .header("content-type", "application/json")
+            .body(body.clone())
+            .send()
+            .await
+        {
+            Ok(r) => r,
+            Err(_) => {
+                backend.circuit.write().await.record_failure();
+                attempted.push(idx);
+                next_backend = select_backend_excluding(
+                    &state.backends,
+                    preferred,
+                    origin_node.as_deref(),
+                    &attempted,
+                )
+                .await;
+                if next_backend.is_some() {
+                    continue;
+                }
+                return StatusCode::BAD_GATEWAY.into_response();
+            }
+        };
+
+        let status = upstream.status();
+
+        if status.is_server_error() {
             backend.circuit.write().await.record_failure();
-            return StatusCode::BAD_GATEWAY.into_response();
+            attempted.push(idx);
+            next_backend = select_backend_excluding(
+                &state.backends,
+                preferred,
+                origin_node.as_deref(),
+                &attempted,
+            )
+            .await;
+            if next_backend.is_some() {
+                continue;
+            }
+            return upstream_response(upstream, status);
         }
-    };
 
-    let status = upstream.status();
-
-    if status.is_server_error() {
-        backend.circuit.write().await.record_failure();
-    } else {
         backend.circuit.write().await.record_success();
         // Update affinity so the next request from this thread prefers the
         // same backend — including after a fallback re-route.
         if let Some(ref tid) = thread_id {
             state.affinity.record(tid, idx).await;
         }
-    }
 
+        return upstream_response(upstream, status);
+    }
+}
+
+fn upstream_response(upstream: reqwest::Response, status: StatusCode) -> Response {
     let content_type = upstream.headers().get(CONTENT_TYPE).cloned();
     let is_sse = content_type
         .as_ref()
@@ -119,7 +167,7 @@ mod tests {
     use serde_json::json;
     use std::{
         sync::{
-            atomic::{AtomicBool, Ordering},
+            atomic::{AtomicBool, AtomicUsize, Ordering},
             Arc,
         },
         time::Duration,
@@ -267,6 +315,119 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), 502);
+    }
+
+    #[tokio::test]
+    async fn connection_failure_retries_next_backend() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        drop(listener);
+        let dead_backend = format!("http://{}/v1", addr);
+
+        let mock = Router::new().route(
+            "/v1/chat/completions",
+            post(|| async {
+                axum::Json(json!({
+                    "id": "chatcmpl-retry",
+                    "choices": [{"message": {"role": "assistant", "content": "retried"}}]
+                }))
+            }),
+        );
+        let healthy_backend = start_mock(mock).await;
+        let fairlead = start_fairlead(&[&dead_backend, &healthy_backend]).await;
+
+        let resp = reqwest::Client::new()
+            .post(format!("{}/v1/chat/completions", fairlead))
+            .json(&json!({"model":"m","messages":[]}))
+            .send()
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), 200);
+        let received: serde_json::Value = resp.json().await.unwrap();
+        assert_eq!(received["choices"][0]["message"]["content"], "retried");
+    }
+
+    #[tokio::test]
+    async fn server_error_retries_next_backend() {
+        let first_hits = Arc::new(AtomicUsize::new(0));
+        let first_hits_for_route = first_hits.clone();
+        let first = Router::new().route(
+            "/v1/chat/completions",
+            post(move || {
+                let hits = first_hits_for_route.clone();
+                async move {
+                    hits.fetch_add(1, Ordering::SeqCst);
+                    StatusCode::INTERNAL_SERVER_ERROR
+                }
+            }),
+        );
+        let first_backend = start_mock(first).await;
+
+        let second_hits = Arc::new(AtomicUsize::new(0));
+        let second_hits_for_route = second_hits.clone();
+        let second = Router::new().route(
+            "/v1/chat/completions",
+            post(move || {
+                let hits = second_hits_for_route.clone();
+                async move {
+                    hits.fetch_add(1, Ordering::SeqCst);
+                    axum::Json(json!({
+                        "id": "chatcmpl-server-error-retry",
+                        "choices": [{"message": {"role": "assistant", "content": "fallback"}}]
+                    }))
+                }
+            }),
+        );
+        let second_backend = start_mock(second).await;
+        let fairlead = start_fairlead(&[&first_backend, &second_backend]).await;
+
+        let resp = reqwest::Client::new()
+            .post(format!("{}/v1/chat/completions", fairlead))
+            .json(&json!({"model":"m","messages":[]}))
+            .send()
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), 200);
+        let received: serde_json::Value = resp.json().await.unwrap();
+        assert_eq!(received["choices"][0]["message"]["content"], "fallback");
+        assert_eq!(first_hits.load(Ordering::SeqCst), 1);
+        assert_eq!(second_hits.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn client_error_does_not_retry_next_backend() {
+        let first = Router::new().route(
+            "/v1/chat/completions",
+            post(|| async { StatusCode::TOO_MANY_REQUESTS }),
+        );
+        let first_backend = start_mock(first).await;
+
+        let second_hit = Arc::new(AtomicBool::new(false));
+        let second_hit_for_route = second_hit.clone();
+        let second = Router::new().route(
+            "/v1/chat/completions",
+            post(move || {
+                let hit = second_hit_for_route.clone();
+                async move {
+                    hit.store(true, Ordering::SeqCst);
+                    StatusCode::OK
+                }
+            }),
+        );
+        let second_backend = start_mock(second).await;
+        let fairlead = start_fairlead(&[&first_backend, &second_backend]).await;
+
+        let resp = reqwest::Client::new()
+            .post(format!("{}/v1/chat/completions", fairlead))
+            .json(&json!({"model":"m","messages":[]}))
+            .send()
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), 429);
+        assert!(!second_hit.load(Ordering::SeqCst));
     }
 
     #[tokio::test]
@@ -579,26 +740,26 @@ mod tests {
 
     #[tokio::test]
     async fn origin_node_routes_to_same_node_backend() {
-        let loki = Router::new().route(
+        let node_a = Router::new().route(
             "/v1/chat/completions",
-            post(|| async { axum::Json(json!({"source":"loki"})) }),
+            post(|| async { axum::Json(json!({"source":"node-a"})) }),
         );
-        let thor = Router::new().route(
+        let node_b = Router::new().route(
             "/v1/chat/completions",
-            post(|| async { axum::Json(json!({"source":"thor"})) }),
+            post(|| async { axum::Json(json!({"source":"node-b"})) }),
         );
-        let loki_url = start_mock(loki).await;
-        let thor_url = start_mock(thor).await;
+        let node_a_url = start_mock(node_a).await;
+        let node_b_url = start_mock(node_b).await;
 
         let fairlead = start_fairlead_with_backends(vec![
-            backend_on_node(loki_url, "loki"),
-            backend_on_node(thor_url, "thor"),
+            backend_on_node(node_a_url, "node-a"),
+            backend_on_node(node_b_url, "node-b"),
         ])
         .await;
 
         let resp = reqwest::Client::new()
             .post(format!("{}/v1/chat/completions", fairlead))
-            .header("x-fairlead-origin-node", "thor")
+            .header("x-fairlead-origin-node", "node-b")
             .json(&json!({"model":"m","messages":[]}))
             .send()
             .await
@@ -607,34 +768,36 @@ mod tests {
         assert_eq!(resp.status(), 200);
         assert_eq!(
             resp.json::<serde_json::Value>().await.unwrap()["source"],
-            "thor"
+            "node-b"
         );
     }
 
     #[tokio::test]
     async fn origin_node_falls_back_when_same_node_backend_open() {
-        let loki = Router::new().route(
+        let node_a = Router::new().route(
             "/v1/chat/completions",
-            post(|| async { axum::Json(json!({"source":"loki"})) }),
+            post(|| async { axum::Json(json!({"source":"node-a"})) }),
         );
-        let thor = Router::new().route(
+        let node_b = Router::new().route(
             "/v1/chat/completions",
-            post(|| async { axum::Json(json!({"source":"thor"})) }),
+            post(|| async { axum::Json(json!({"source":"node-b"})) }),
         );
-        let loki_url = start_mock(loki).await;
-        let thor_url = start_mock(thor).await;
+        let node_a_url = start_mock(node_a).await;
+        let node_b_url = start_mock(node_b).await;
 
-        let loki_backend = backend_on_node(loki_url, "loki");
+        let node_a_backend = backend_on_node(node_a_url, "node-a");
         for _ in 0..10 {
-            loki_backend.circuit.write().await.record_failure();
+            node_a_backend.circuit.write().await.record_failure();
         }
-        let fairlead =
-            start_fairlead_with_backends(vec![loki_backend, backend_on_node(thor_url, "thor")])
-                .await;
+        let fairlead = start_fairlead_with_backends(vec![
+            node_a_backend,
+            backend_on_node(node_b_url, "node-b"),
+        ])
+        .await;
 
         let resp = reqwest::Client::new()
             .post(format!("{}/v1/chat/completions", fairlead))
-            .header("x-fairlead-origin-node", "loki")
+            .header("x-fairlead-origin-node", "node-a")
             .json(&json!({"model":"m","messages":[]}))
             .send()
             .await
@@ -643,26 +806,26 @@ mod tests {
         assert_eq!(resp.status(), 200);
         assert_eq!(
             resp.json::<serde_json::Value>().await.unwrap()["source"],
-            "thor"
+            "node-b"
         );
     }
 
     #[tokio::test]
     async fn origin_node_precedes_existing_affinity() {
-        let loki = Router::new().route(
+        let node_a = Router::new().route(
             "/v1/chat/completions",
-            post(|| async { axum::Json(json!({"source":"loki"})) }),
+            post(|| async { axum::Json(json!({"source":"node-a"})) }),
         );
-        let thor = Router::new().route(
+        let node_b = Router::new().route(
             "/v1/chat/completions",
-            post(|| async { axum::Json(json!({"source":"thor"})) }),
+            post(|| async { axum::Json(json!({"source":"node-b"})) }),
         );
-        let loki_url = start_mock(loki).await;
-        let thor_url = start_mock(thor).await;
+        let node_a_url = start_mock(node_a).await;
+        let node_b_url = start_mock(node_b).await;
 
         let fairlead = start_fairlead_with_backends(vec![
-            backend_on_node(loki_url, "loki"),
-            backend_on_node(thor_url, "thor"),
+            backend_on_node(node_a_url, "node-a"),
+            backend_on_node(node_b_url, "node-b"),
         ])
         .await;
 
@@ -672,7 +835,7 @@ mod tests {
 
         let first = client
             .post(&url)
-            .header("x-fairlead-origin-node", "thor")
+            .header("x-fairlead-origin-node", "node-b")
             .header("x-fairlead-thread-id", "thread-1")
             .json(&body)
             .send()
@@ -680,12 +843,12 @@ mod tests {
             .unwrap();
         assert_eq!(
             first.json::<serde_json::Value>().await.unwrap()["source"],
-            "thor"
+            "node-b"
         );
 
         let second = client
             .post(&url)
-            .header("x-fairlead-origin-node", "loki")
+            .header("x-fairlead-origin-node", "node-a")
             .header("x-fairlead-thread-id", "thread-1")
             .json(&body)
             .send()
@@ -693,7 +856,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             second.json::<serde_json::Value>().await.unwrap()["source"],
-            "loki",
+            "node-a",
             "same-node locality should take precedence over prior affinity"
         );
     }
@@ -770,20 +933,23 @@ mod tests {
         );
     }
 
-    /// Affinity is only updated on success, never on failure.  When a preferred
-    /// backend starts returning 5xx the thread keeps hitting it (accumulating
-    /// failures) until the circuit opens, at which point the fallback chain
-    /// takes over and the affinity map is updated to the new backend.
+    /// Affinity is only updated on success, never on failure. When a preferred
+    /// backend starts returning 5xx, the same request retries the next eligible
+    /// backend and affinity follows the successful retry target.
     #[tokio::test]
-    async fn affinity_follows_circuit_after_5xx_degradation() {
+    async fn affinity_follows_same_request_retry_after_5xx_degradation() {
         let a_failing = Arc::new(AtomicBool::new(false));
         let af = a_failing.clone();
+        let a_hits = Arc::new(AtomicUsize::new(0));
+        let a_hits_for_route = a_hits.clone();
 
         let backend_a = Router::new().route(
             "/v1/chat/completions",
             post(move || {
                 let flag = af.clone();
+                let hits = a_hits_for_route.clone();
                 async move {
+                    hits.fetch_add(1, Ordering::SeqCst);
                     if flag.load(Ordering::SeqCst) {
                         StatusCode::INTERNAL_SERVER_ERROR.into_response()
                     } else {
@@ -822,8 +988,8 @@ mod tests {
         // Step 2: A starts failing.
         a_failing.store(true, Ordering::SeqCst);
 
-        // Steps 3–4: two 5xx responses — circuit not open yet (1/2 then 2/2).
-        // Affinity is NOT updated because the requests did not succeed.
+        // Step 3: A returns 5xx, Fairlead records the failure, retries B in the
+        // same request, and updates affinity to B after that retry succeeds.
         let r2 = client
             .post(&url)
             .header("x-fairlead-thread-id", "thread-1")
@@ -831,8 +997,11 @@ mod tests {
             .send()
             .await
             .unwrap();
-        assert_eq!(r2.status(), 500, "A degrading, circuit at 1/2");
+        assert_eq!(r2.status(), 200);
+        assert_eq!(r2.json::<serde_json::Value>().await.unwrap()["source"], "b");
+        assert_eq!(a_hits.load(Ordering::SeqCst), 2);
 
+        // Step 4: Affinity now points to B. The next request does not hit A.
         let r3 = client
             .post(&url)
             .header("x-fairlead-thread-id", "thread-1")
@@ -840,33 +1009,12 @@ mod tests {
             .send()
             .await
             .unwrap();
-        assert_eq!(r3.status(), 500, "A degrading, circuit now opens at 2/2");
-
-        // Step 5: A's circuit is open. select_backend skips A, routes to B,
-        // succeeds, and updates affinity to thread-1 → B (index 1).
-        let r4 = client
-            .post(&url)
-            .header("x-fairlead-thread-id", "thread-1")
-            .json(&body)
-            .send()
-            .await
-            .unwrap();
-        assert_eq!(r4.status(), 200);
-        assert_eq!(r4.json::<serde_json::Value>().await.unwrap()["source"], "b");
-
-        // Step 6: Affinity now points to B — thread stays on B even if A recovers.
-        let r5 = client
-            .post(&url)
-            .header("x-fairlead-thread-id", "thread-1")
-            .json(&body)
-            .send()
-            .await
-            .unwrap();
         assert_eq!(
-            r5.json::<serde_json::Value>().await.unwrap()["source"],
+            r3.json::<serde_json::Value>().await.unwrap()["source"],
             "b",
             "affinity updated to B after fallback"
         );
+        assert_eq!(a_hits.load(Ordering::SeqCst), 2);
     }
 
     /// Soft affinity: when the preferred backend's circuit opens, the request

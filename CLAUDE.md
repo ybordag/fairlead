@@ -18,7 +18,7 @@ See `design.md` for the full architecture.
 - **Rhizome** (Python) — the agent. Points its model client at Fairlead `/v1`.
   Submits async compute jobs (vision, embeddings, indexing) to Fairlead `/v1/jobs`.
 - **Cambium** (Go) — the API gateway. Calls Rhizome; Rhizome calls Fairlead.
-- **Fairlead** (this repo, Rust) — routes to vLLM on Loki/Thor or cloud fallback.
+- **Fairlead** (this repo, Rust) — routes to vLLM on spark-a/spark-b or cloud fallback.
 
 ## Tech stack
 
@@ -76,7 +76,7 @@ src/
     mod.rs          — module entry point
     circuit.rs      — CircuitBreaker: Closed/Open/HalfOpen state machine
     backend.rs      — BackendState (url + Arc<RwLock<CircuitBreaker>>), spawn_health_probe()
-    fallback.rs     — select_backend(): ordered fallback chain with soft affinity
+    fallback.rs     — backend selection with origin locality, affinity, and retry exclusions
     affinity.rs     — SessionAffinity: thread_id → backend_index map
   proxy/
     mod.rs          — POST /v1/chat/completions, POST /v1/embeddings; circuit + affinity + fallback
@@ -201,7 +201,7 @@ Priority: `background`. CPU or GPU (cuML) depending on available worker.
 ```
 PORT                         — listen port (default: 7000)
 BACKENDS                     — comma-separated backend URLs in priority order
-                               e.g. http://loki:8000/v1,http://thor:8000/v1
+                               e.g. http://node-a:8000/v1,http://node-b:8000/v1
 CLOUD_PROVIDERS              — JSON array of cloud provider configs (url, api_key_env)
 CIRCUIT_FAILURE_THRESHOLD    — consecutive failures to open circuit (default: 3)
 CIRCUIT_COOLDOWN_SECS        — seconds before half-open probe (default: 30)

@@ -139,13 +139,13 @@ protocol change.
 ### vLLM on DGX Spark
 
 ```
-Loki (DGX Spark B)
+spark-a (DGX Spark)
   └── vLLM container
         image: vllm/vllm-openai
         port: 8000
         model: e.g. meta-llama/Llama-3-8B-Instruct
         GPU: full node VRAM allocated to vLLM
-        API: http://loki:8000/v1  (OpenAI-compatible)
+        API: http://node-a:8000/v1  (OpenAI-compatible)
 ```
 
 For models that exceed a single node's VRAM, vLLM supports tensor parallelism across
@@ -155,8 +155,8 @@ models but requires vLLM's distributed serving mode and adds latency.
 ### Fallback chain with vLLM
 
 ```
-  1. vLLM on Loki           (local, fast, no API cost)
-  2. vLLM on Thor           (local secondary, if Loki is down)
+  1. vLLM on spark-a           (local, fast, no API cost)
+  2. vLLM on spark-b           (local secondary, if spark-a is down)
   3. Gemini Flash           (cloud, cheap + fast)
   4. Claude Haiku           (cloud, last resort)
 ```

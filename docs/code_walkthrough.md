@@ -33,7 +33,7 @@ flowchart TD
     backend_state --> circuit["src/router/circuit.rs\nCircuitBreaker"]
 
     main --> probes["spawn_health_probe() per backend"]
-    probes --> probe_loop["background health loop\nGET backend URL"]
+    probes --> probe_loop["background health loop\nGET backend health URL"]
     probe_loop --> circuit
 
     main --> app_state["AppState\nclient + backends + affinity"]
@@ -48,7 +48,7 @@ flowchart TD
     embed_route --> forward
 
     forward --> affinity_read["src/router/affinity.rs\nSessionAffinity::preferred()"]
-    forward --> select["src/router/fallback.rs\nselect_backend()"]
+    forward --> select["src/router/fallback.rs\nselect_backend_excluding()"]
     select --> circuit
 
     forward --> reqwest["reqwest::Client\nPOST selected backend"]
@@ -418,7 +418,7 @@ environment variables:
 `BACKENDS` is parsed as a comma-separated list:
 
 ```text
-http://loki:8000/v1,http://thor:8000/v1
+http://spark-a:8000/v1,http://spark-b:8000/v1
 ```
 
 `BACKENDS_JSON` is the node-aware Bluewater configuration path. It can describe
@@ -427,9 +427,9 @@ stable backend IDs, node IDs, pools, and supported workloads:
 ```json
 [
   {
-    "id": "loki-vllm",
-    "url": "http://loki:8000/v1",
-    "node_id": "loki",
+    "id": "spark-a-vllm",
+    "url": "http://spark-a:8000/v1",
+    "node_id": "spark-a",
     "pool": "local-llm",
     "workloads": ["chat_completions", "embeddings"]
   }
@@ -498,11 +498,15 @@ pub struct BackendState {
     pub node_id: Option<String>,
     pub pool: String,
     pub workloads: Vec<WorkloadKind>,
+    pub health_url: String,
     pub circuit: Arc<RwLock<CircuitBreaker>>,
 }
 ```
 
-Each backend has its own circuit breaker.
+Each backend has its own circuit breaker and health probe URL. For an
+OpenAI-compatible backend with base URL `http://node-a:8000/v1`, the default
+health URL is `http://node-a:8000/v1/models`. If a backend exposes a different
+endpoint, `BACKENDS_JSON` can provide `health_path`, such as `/health`.
 
 The `backend.clone()` call copies the parsed backend metadata because each
 `BackendState` owns its runtime copy. The circuit breaker is allocated inside
@@ -515,7 +519,7 @@ and health probes can share it.
 for b in &backends {
     spawn_health_probe(
         b.circuit.clone(),
-        b.url.clone(),
+        b.health_url.clone(),
         client.clone(),
         Duration::from_secs(cfg.health_probe_interval_secs),
     );
@@ -525,8 +529,9 @@ for b in &backends {
 `for b in &backends` borrows the backend list. It does not move the backends.
 
 For each backend, Fairlead starts a background Tokio task. The task periodically
-sends `GET` to the backend URL. If the request succeeds, it records circuit
-success. If it fails to connect, it records circuit failure.
+sends `GET` to the backend health URL. If the request reaches the backend and
+gets an HTTP response, it records circuit success. If it fails to connect, it
+records circuit failure.
 
 The important part is that `b.circuit.clone()` clones the `Arc`, not the circuit
 breaker itself. The health probe and request handlers share the same circuit
@@ -687,19 +692,38 @@ need `thread_id` later when recording affinity.
 ### 5. Select a Backend
 
 ```rust
-let Some(idx) = select_backend(&state.backends, preferred, origin_node.as_deref()).await else {
-    return (
-        StatusCode::SERVICE_UNAVAILABLE,
-        "all backends unavailable (circuits open)",
-    )
-    .into_response();
+let mut attempted = Vec::new();
+let mut next_backend = None;
+
+loop {
+    let idx = match next_backend.take() {
+        Some(idx) => idx,
+        None => {
+            let Some(idx) = select_backend_excluding(
+                &state.backends,
+                preferred,
+                origin_node.as_deref(),
+                &attempted,
+            )
+            .await else {
+                return StatusCode::SERVICE_UNAVAILABLE.into_response();
+            };
+            idx
+        }
+    };
+
+    // Send to backend idx.
 };
 ```
 
-`select_backend` returns `Option<usize>`:
+Fairlead keeps an `attempted` list for the current request. If the selected
+backend fails before Fairlead starts streaming a response body to the caller, the
+backend index is added to `attempted` and selection runs again.
+
+`select_backend_excluding` returns `Option<usize>`:
 
 - `Some(idx)` means backend at index `idx` is available.
-- `None` means no backend is available.
+- `None` means no unattempted backend is available.
 
 `let Some(idx) = ... else { ... };` is pattern matching. It means:
 
@@ -708,26 +732,28 @@ if result is Some(idx), continue with idx
 otherwise return 503
 ```
 
-### 6. How `select_backend` Works
+### 6. How `select_backend_excluding` Works
 
 `src/router/fallback.rs`:
 
 ```rust
-pub async fn select_backend(
+pub async fn select_backend_excluding(
     backends: &[BackendState],
     preferred: Option<usize>,
     origin_node: Option<&str>,
+    excluded: &[usize],
 ) -> Option<usize> {
     if let Some(origin) = origin_node {
-        // try available backends whose node_id matches origin
+        // try available backends whose node_id matches origin,
+        // skipping indexes in excluded
     }
 
     if let Some(idx) = preferred {
-        // try affinity backend if it was not already checked
+        // try affinity backend if it was not already checked or excluded
     }
 
     for (i, backend) in backends.iter().enumerate() {
-        // walk configured backend order, skipping already checked candidates
+        // walk configured backend order, skipping checked or excluded candidates
     }
 
     None
@@ -779,7 +805,7 @@ let url = format!("{}/{}", backend.url.trim_end_matches('/'), path);
 If the backend URL is:
 
 ```text
-http://loki:8000/v1
+http://spark-a:8000/v1
 ```
 
 and the path is:
@@ -791,7 +817,7 @@ chat/completions
 then the final upstream URL is:
 
 ```text
-http://loki:8000/v1/chat/completions
+http://spark-a:8000/v1/chat/completions
 ```
 
 ### 9. Forward the Request to the Backend
@@ -808,6 +834,11 @@ let upstream = match state
     Ok(r) => r,
     Err(_) => {
         backend.circuit.write().await.record_failure();
+        attempted.push(idx);
+        next_backend = select_backend_excluding(...).await;
+        if next_backend.is_some() {
+            continue;
+        }
         return StatusCode::BAD_GATEWAY.into_response();
     }
 };
@@ -820,7 +851,9 @@ The `match` handles success or failure:
 - `Ok(r)` means the backend returned an HTTP response.
 - `Err(_)` means the HTTP request itself failed, such as connection refused.
 
-On connection failure, Fairlead records a circuit failure and returns HTTP 502.
+On connection failure, Fairlead records a circuit failure. If another eligible
+backend exists, it retries the same request body there. If no backend remains,
+it returns HTTP 502.
 
 ### 10. Record Backend Success or Failure
 
@@ -829,6 +862,12 @@ let status = upstream.status();
 
 if status.is_server_error() {
     backend.circuit.write().await.record_failure();
+    attempted.push(idx);
+    next_backend = select_backend_excluding(...).await;
+    if next_backend.is_some() {
+        continue;
+    }
+    return upstream_response(upstream, status);
 } else {
     backend.circuit.write().await.record_success();
     if let Some(ref tid) = thread_id {
@@ -841,6 +880,10 @@ Fairlead treats:
 
 - `5xx` as backend failure.
 - `2xx`, `3xx`, and `4xx` as backend success.
+
+For `5xx`, Fairlead retries the next eligible backend before streaming the
+failed response body. If there is no next backend, it forwards the original
+`5xx` response so single-backend behavior remains easy to understand.
 
 The reason `4xx` counts as success is that a `400 Bad Request` often means the
 backend is alive and correctly rejected a bad client request. It should not trip
@@ -936,7 +979,7 @@ The request path and the health probe path share the same circuit breaker via
 For each backend, it reads the circuit state and emits:
 
 ```text
-fairlead_circuit_state{backend="loki-vllm",url="http://loki:8000/v1",node="loki",pool="local-llm"} 0
+fairlead_circuit_state{backend="spark-a-vllm",url="http://spark-a:8000/v1",node="spark-a",pool="local-llm"} 0
 ```
 
 Values:
@@ -961,14 +1004,14 @@ alive and can serve HTTP.
 With:
 
 ```text
-BACKENDS=http://loki:8000/v1,http://thor:8000/v1
+BACKENDS=http://spark-a:8000/v1,http://spark-b:8000/v1
 ```
 
 and a request:
 
 ```text
 POST /v1/chat/completions
-X-Fairlead-Origin-Node: loki
+X-Fairlead-Origin-Node: spark-a
 X-Fairlead-Thread-Id: abc
 ```
 
@@ -977,9 +1020,9 @@ Fairlead does:
 1. Axum routes to `proxy::chat_completions`.
 2. `chat_completions` calls `forward`.
 3. `forward` checks that backends exist.
-4. `forward` extracts origin node `loki` and thread ID `abc`.
+4. `forward` extracts origin node `spark-a` and thread ID `abc`.
 5. `SessionAffinity::preferred("abc")` returns a preferred index or `None`.
-6. `select_backend` prefers an available backend on `loki`, then affinity, then
+6. `select_backend` prefers an available backend on `spark-a`, then affinity, then
    configured order.
 7. `forward` builds the upstream URL.
 8. `reqwest` sends the request body to vLLM or another compatible backend.

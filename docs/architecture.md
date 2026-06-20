@@ -17,7 +17,7 @@ Rhizome          Python LangGraph agent — 93 tools, planning, triage, DB
   ↓  HTTP /v1/chat/completions (OpenAI-compatible)
 Fairlead         Rust compute router — inference, job dispatch, circuit breaking
   ↓  HTTP /v1
-vLLM             Python model server — GPU inference on Loki
+vLLM             Python model server — GPU inference on spark-a
   OR
 Cloud APIs       Gemini, Claude, OpenAI — fallback when local is unavailable
 ```
@@ -96,7 +96,7 @@ sending new work to nodes without enough reported headroom.
 Example:
 
 ```text
-node: loki
+node: spark-a
   total_vram_mb: 24576
   registered_consumers:
     - vllm-llama: 18432 MB
@@ -114,29 +114,29 @@ breaking, health probing, soft affinity, streaming proxying, and basic metrics.
 VRAM accounting, priority queues, worker registration, and async job dispatch are
 planned later phases.
 
-### Rhizome example: Loki and Thor
+### Rhizome example: spark-a and spark-b
 
 Assume a deployment with two GPU nodes:
 
-- `loki`: runs a Rhizome worker and a local vLLM server.
-- `thor`: runs a Rhizome worker and a local vLLM server.
+- `spark-a`: runs a Rhizome worker and a local vLLM server.
+- `spark-b`: runs a Rhizome worker and a local vLLM server.
 - Fairlead can run as one shared service, or as a local sidecar per node. The
   routing policy is easiest to reason about as one logical Fairlead control
   plane.
 
 ```mermaid
 flowchart LR
-    cambium["Cambium API gateway"] --> rhizome_loki["Rhizome worker on Loki"]
-    cambium --> rhizome_thor["Rhizome worker on Thor"]
+    cambium["Cambium API gateway"] --> rhizome_a["Rhizome worker on spark-a"]
+    cambium --> rhizome_b["Rhizome worker on spark-b"]
 
-    rhizome_loki --> fairlead["Fairlead routing/control plane"]
-    rhizome_thor --> fairlead
+    rhizome_a --> fairlead["Fairlead routing/control plane"]
+    rhizome_b --> fairlead
 
-    fairlead --> vllm_loki["vLLM on Loki GPU"]
-    fairlead --> vllm_thor["vLLM on Thor GPU"]
+    fairlead --> vllm_a["vLLM on spark-a GPU"]
+    fairlead --> vllm_b["vLLM on spark-b GPU"]
 
-    vllm_loki --> gpu_loki["Loki GPU"]
-    vllm_thor --> gpu_thor["Thor GPU"]
+    vllm_a --> gpu_a["spark-a GPU"]
+    vllm_b --> gpu_b["spark-b GPU"]
 
     fairlead -. planned .-> registry["Resource registry health + VRAM + load + locality"]
     registry -. informs .-> fairlead
@@ -145,30 +145,30 @@ flowchart LR
 The desired routing behavior is locality-aware and resource-aware:
 
 ```text
-Rhizome request starts on Loki
-  -> prefer vLLM on Loki, because same-node traffic should have lower latency
-  -> if Loki vLLM is unhealthy, overloaded, or lacks reported GPU headroom,
-     route to Thor vLLM
+Rhizome request starts on spark-a
+  -> prefer vLLM on spark-a, because same-node traffic should have lower latency
+  -> if spark-a vLLM is unhealthy, overloaded, or lacks reported GPU headroom,
+     route to spark-b vLLM
   -> if both local GPU backends are unavailable or full, either queue by priority
      or fall back to a cloud provider, depending on policy
 ```
 
-The same applies in reverse for a Rhizome request that starts on Thor:
+The same applies in reverse for a Rhizome request that starts on spark-b:
 
 ```text
-Rhizome request starts on Thor
-  -> prefer vLLM on Thor
-  -> if Thor is unavailable or full, route to Loki
+Rhizome request starts on spark-b
+  -> prefer vLLM on spark-b
+  -> if spark-b is unavailable or full, route to spark-a
   -> if both are unavailable or full, queue or cloud fallback
 ```
 
 To make this work, Fairlead needs more metadata than the current Phase 4 code
 has:
 
-- **Backend node identity:** each backend must know whether it lives on `loki`,
-  `thor`, or another node.
+- **Backend node identity:** each backend must know whether it lives on `spark-a`,
+  `spark-b`, or another node.
 - **Request origin identity:** Rhizome or the local Fairlead sidecar must provide
-  where the request originated, for example `X-Fairlead-Origin-Node: loki`.
+  where the request originated, for example `X-Fairlead-Origin-Node: spark-a`.
 - **Resource state:** vLLM and other GPU consumers must report usable capacity,
   reserved VRAM, current load, or an equivalent schedulable signal.
 - **Workload metadata:** chat completions, embeddings, vision jobs, and batch
@@ -193,9 +193,9 @@ Current Fairlead implements the first locality-aware slice: backends can carry
 `node_id` metadata, requests can carry `X-Fairlead-Origin-Node`, and the router
 prefers an eligible same-node backend before falling back to affinity or
 configured order. It does not yet implement VRAM-aware routing, backend-pool
-selection, queueing, or cloud fallback. The full Loki/Thor behavior above is the
-intended Bluewater/Fairlead direction once resource accounting and priority
-queues are added.
+selection, queueing, or cloud fallback. The full spark-a/spark-b behavior above
+is the intended Bluewater/Fairlead direction once resource accounting and
+priority queues are added.
 
 ---
 
@@ -239,7 +239,7 @@ job submitted
 ```
 
 **Job types:**
-- `vision_analysis` — route to vision MCP sidecar on Loki GPU
+- `vision_analysis` — route to vision MCP sidecar on spark-a GPU
 - `embed_batch` — batch embedding generation
 - `index_build` — pgvector or FAISS index construction
 - `cluster` — k-means or HDBSCAN over an embedding space
@@ -328,7 +328,9 @@ This forces a clear architecture split.
 **Async path** — request handlers, forwarding, queue checks:
 ```rust
 async fn handle_chat_completions(/* ... */) -> Response {
-    let backend = router.select_backend().await;   // async: checks circuit state
+    let backend = router
+        .select_backend_excluding(&attempted)
+        .await;                                    // async: checks circuit state
     let response = client.post(&backend.url)
         .send().await?;                            // async: network I/O
     Body::from_stream(response.bytes_stream())     // async: stream back

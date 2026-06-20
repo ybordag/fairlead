@@ -27,6 +27,8 @@ The current service provides:
 - **Background health probes** that update circuit state.
 - **Soft session affinity** through `X-Fairlead-Thread-Id`.
 - **Origin-node locality** through `X-Fairlead-Origin-Node`.
+- **Same-request retry** across eligible backends for connection failures,
+  timeouts, and 5xx responses before response bytes are streamed.
 - **Prometheus-style metrics** for backend circuit state.
 
 Fairlead does **not** run inference itself. It routes requests to model servers
@@ -46,13 +48,13 @@ Planned work includes:
 - **Workload abstraction** for chat, embeddings, rerank, vision, batch jobs, and
   future non-OpenAI-compatible adapters.
 - **Node-aware backend configuration** so backends know whether they run on
-  Loki, Thor, or another node.
-- **Locality-aware routing** so a request that starts on Loki can prefer Loki's
-  local vLLM backend before crossing the network to Thor.
+  spark-a, spark-b, or another node.
+- **Locality-aware routing** so a request that starts on spark-a can prefer spark-a's
+  local vLLM backend before crossing the network to spark-b.
 - **Resource-aware admission** using cooperative VRAM/load reports from vLLM and
   other GPU consumers.
-- **Same-request retry** for retryable upstream failures when the request can be
-  safely replayed.
+- **Richer retry policy and observability** for retry reasons, retry counts, and
+  backend-level outcomes.
 - **Priority queues and async jobs** for background work that should yield to
   realtime user requests.
 - **Workload-aware observability** for selected backend, fallback reason,
@@ -73,8 +75,8 @@ Application or OpenAI-compatible client
     ▼
 Fairlead
     │  circuit-aware routing + streaming proxy
-    ├── vLLM on Loki
-    └── vLLM on Thor
+    ├── vLLM on spark-a
+    └── vLLM on spark-b
 ```
 
 Intended Bluewater topology:
@@ -85,8 +87,8 @@ Applications / agents
     ▼
 Fairlead
     │  workload-aware, node-aware, resource-aware routing
-    ├── vLLM on Loki
-    ├── vLLM on Thor
+    ├── vLLM on spark-a
+    ├── vLLM on spark-b
     ├── embedding / vision / indexing workers
     └── cloud providers as fallback
 ```
@@ -110,7 +112,7 @@ Fairlead
 Example with two local OpenAI-compatible backends:
 
 ```bash
-BACKENDS=http://loki:8000/v1,http://thor:8000/v1 \
+BACKENDS=http://spark-a:8000/v1,http://spark-b:8000/v1 \
 PORT=7000 \
 cargo run
 ```
@@ -120,16 +122,16 @@ Node-aware backend configuration:
 ```bash
 BACKENDS_JSON='[
   {
-    "id": "loki-vllm",
-    "url": "http://loki:8000/v1",
-    "node_id": "loki",
+    "id": "spark-a-vllm",
+    "url": "http://spark-a:8000/v1",
+    "node_id": "spark-a",
     "pool": "local-llm",
     "workloads": ["chat_completions", "embeddings"]
   },
   {
-    "id": "thor-vllm",
-    "url": "http://thor:8000/v1",
-    "node_id": "thor",
+    "id": "spark-b-vllm",
+    "url": "http://spark-b:8000/v1",
+    "node_id": "spark-b",
     "pool": "local-llm",
     "workloads": ["chat_completions", "embeddings"]
   }
@@ -138,7 +140,10 @@ BACKENDS_JSON='[
 
 `BACKENDS` remains the simplest local setup path. `BACKENDS_JSON` is the
 Bluewater configuration path for stable backend IDs, node identity, backend
-pools, and workload support.
+pools, and workload support. By default, health probes append `models` to the
+backend API base URL, so `http://spark-a:8000/v1` is probed at
+`http://spark-a:8000/v1/models`. Backends that expose health elsewhere can set
+`health_path`, for example `"/health"`.
 
 Health:
 
@@ -157,23 +162,29 @@ Chat completions are proxied to one of the configured backends:
 ```bash
 curl http://localhost:7000/v1/chat/completions \
   -H 'content-type: application/json' \
-  -H 'X-Fairlead-Origin-Node: loki' \
+  -H 'X-Fairlead-Origin-Node: spark-a' \
   -H 'X-Fairlead-Thread-Id: demo-thread' \
   -d '{"model":"local-model","messages":[{"role":"user","content":"hello"}]}'
 ```
 
 ## Local Inference: vLLM
 
-Fairlead routes to **vLLM** instances on the DGX Spark nodes. vLLM's OpenAI-compatible API means Fairlead treats a local GPU server and a cloud provider identically — routing to local vs. cloud is a URL swap, not a protocol change.
+Fairlead routes to **vLLM** instances on local GPU nodes. vLLM's
+OpenAI-compatible API means Fairlead treats a local GPU server and a cloud
+provider identically: routing to local vs. cloud is a URL swap, not a protocol
+change.
 
-Each inference node runs a vLLM container:
+In a small DGX Spark deployment, each inference node can run one vLLM server:
 
 ```
-Loki (DGX Spark B)
-  └── vLLM container (vllm/vllm-openai)
+DGX Spark node
+  └── vLLM server
         port: 8000
-        API: http://loki:8000/v1
+        API: http://<node-hostname>:8000/v1
 ```
+
+See [`docs/dgx_spark_deployment.md`](docs/dgx_spark_deployment.md) for the
+manual two-node deployment notes using vLLM, `uv`, and Fairlead.
 
 ---
 
@@ -195,11 +206,15 @@ what the model result means.
 ## Documentation
 
 - [`docs/architecture.md`](docs/architecture.md) — system architecture,
-  vLLM/Fairlead responsibilities, and the Loki/Thor routing example.
+  vLLM/Fairlead responsibilities, and the spark-a/spark-b routing example.
 - [`docs/code_walkthrough.md`](docs/code_walkthrough.md) — Rust code walkthrough
   from process startup to proxied response.
 - [`docs/bluewater_generalization.md`](docs/bluewater_generalization.md) —
   generalization plan, feature epics, and acceptance criteria.
+- [`docs/dgx_spark_deployment.md`](docs/dgx_spark_deployment.md) — manual
+  deployment notes for two DGX Spark nodes connected over InfiniBand.
+- [`docs/fixture_examples.md`](docs/fixture_examples.md) — conventions for
+  sanitized test fixtures and ignored local deployment config.
 - [`docs/deferred_tests.md`](docs/deferred_tests.md) — known test gaps.
 
 ---

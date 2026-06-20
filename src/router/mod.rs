@@ -6,4 +6,4 @@ pub mod fallback;
 pub use affinity::SessionAffinity;
 pub use backend::{spawn_health_probe, BackendState};
 pub use circuit::CircuitState;
-pub use fallback::select_backend;
+pub use fallback::select_backend_excluding;

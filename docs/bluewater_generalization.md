@@ -20,6 +20,36 @@ request or job
 OpenAI-compatible chat and embeddings are the first implemented workload types.
 They should remain first-class, but they should not define the whole system.
 
+## Bluewater Scope Boundary
+
+Bluewater should finish the generalized synchronous inference proxy. It should
+make today's request path resilient, explainable, and demonstrable without
+starting the future scheduler or async job system.
+
+Bluewater includes:
+
+- OpenAI-compatible synchronous proxying for chat completions and embeddings.
+- Node-aware backend metadata.
+- Origin-aware routing.
+- Session affinity.
+- Circuit breaking and clearer backend health probing.
+- Same-request retry for safe synchronous upstream failures.
+- Basic routing observability for the synchronous proxy.
+- A repeatable small-cluster or mock demo.
+- Documentation for local/edge deployment and sanitized fixtures.
+
+Bluewater does not include:
+
+- Resource registry or VRAM-aware scheduling.
+- Resource-aware backend selection.
+- Priority queues.
+- Async job submission, status, cancellation, worker registration, or callbacks.
+- Cloud-provider fallback and provider credential policy.
+- Full adapter implementations for non-OpenAI-compatible protocols.
+
+Those deferred items belong to later branches/phases so this branch stays a
+coherent synchronous-router milestone.
+
 ## Current Baseline
 
 Fairlead currently provides:
@@ -28,12 +58,16 @@ Fairlead currently provides:
   `/v1/embeddings`.
 - Ordered backend selection from `BACKENDS`.
 - Per-backend circuit breakers with background health probes.
+- Health probes use derived or configured health URLs instead of probing the
+  backend base URL directly.
 - Soft session affinity through `X-Fairlead-Thread-Id`.
 - Origin-node locality through `X-Fairlead-Origin-Node`.
 - Streaming proxy support for Server-Sent Events.
 - Basic Prometheus circuit-state metrics.
 - Node-aware backend metadata through `BACKENDS_JSON`.
 - `WorkloadKind` metadata for chat completions and embeddings.
+- Documentation for a manual two-node DGX Spark deployment.
+- Sanitized fixture conventions and ignore rules for private local config.
 
 It does not yet provide:
 
@@ -60,6 +94,10 @@ These should be achievable without changing the core architecture.
   Rhizome in the loop.
 - [ ] Add explicit docs for current headers:
   `X-Fairlead-Thread-Id` and future `X-Fairlead-Priority`.
+- [x] Document manual two-node DGX Spark deployment commands and expected
+  observations.
+- [x] Add fixture/local-config hygiene docs and `.gitignore` rules for private
+  local deployment files.
 - [ ] Add the deferred low-risk tests listed in `docs/deferred_tests.md`.
 - [ ] Run and require the current quality gate:
   `cargo fmt --check`, `cargo clippy --all -- -D warnings`, and `cargo test`.
@@ -95,7 +133,9 @@ system.
 - [ ] Add metrics labels for workload kind and selected backend.
 - [ ] Decide whether session affinity should be keyed globally, per workload, or
   per backend pool.
-- [ ] Implement same-request fallback for retryable upstream failures where it is
+- [x] Make health probes target an explicit backend health endpoint such as
+  `/health` or `/v1/models`, rather than relying on the backend base URL.
+- [x] Implement same-request fallback for retryable upstream failures where it is
   safe to replay the request body.
 
 ## Implementation Epics
@@ -115,12 +155,12 @@ Scope:
 - [x] Add supported workload kinds per backend.
 - [x] Preserve the current comma-separated `BACKENDS` env var as a default pool
   for simple local use.
-- [x] Document example config for Loki and Thor:
-  `loki-vllm`, `thor-vllm`, node IDs, backend URLs, and supported workloads.
+- [x] Document example config for spark-a and spark-b:
+  `spark-a-vllm`, `spark-b-vllm`, node IDs, backend URLs, and supported workloads.
 
 Acceptance criteria:
 
-- Existing `BACKENDS=http://loki:8000/v1,http://thor:8000/v1` still works.
+- Existing `BACKENDS=http://spark-a:8000/v1,http://spark-b:8000/v1` still works.
 - A richer config can describe at least two backends on different nodes.
 - Metrics and logs can identify the selected backend by stable ID, not only URL.
 
@@ -136,8 +176,8 @@ Scope:
   they are circuit-closed. Resource eligibility is added in the resource-aware
   selection epic.
 - [x] Define precedence between locality and existing session affinity.
-- [x] Add tests for Loki-origin requests preferring Loki and Thor-origin requests
-  preferring Thor.
+- [x] Add tests for requests from spark-a preferring spark-a and requests from
+  spark-b preferring spark-b.
 
 Current precedence:
 
@@ -150,12 +190,105 @@ eligible backend on origin node
 
 Acceptance criteria:
 
-- A request with `X-Fairlead-Origin-Node: loki` selects Loki's backend when it is
+- A request with `X-Fairlead-Origin-Node: spark-a` selects spark-a's backend when it is
   healthy and eligible.
-- If Loki is circuit-open or resource-ineligible, the same request selects Thor.
-- The reverse behavior works for `X-Fairlead-Origin-Node: thor`.
+- If spark-a is circuit-open or resource-ineligible, the same request selects spark-b.
+- The reverse behavior works for `X-Fairlead-Origin-Node: spark-b`.
 
-### 3. Resource Registry v1
+### 3. Health Probe Target Cleanup
+
+Goal: make backend health probing explicit and easy to reason about for
+OpenAI-compatible backends.
+
+Scope:
+
+- [x] Add a configured or derived probe path for each backend.
+- [x] Support `/health` through explicit `health_path` configuration.
+- [x] Use `/v1/models` as the OpenAI-compatible default probe.
+- [x] Preserve connection-liveness behavior for simple custom backends.
+- [x] Add tests for healthy probe, unreachable backend, and probe URL
+  derivation.
+
+Acceptance criteria:
+
+- vLLM backends are probed through a meaningful endpoint instead of `GET /v1`.
+- A reachable but invalid base path no longer creates confusing access logs.
+- Existing simple local backends can still be probed without extra config.
+
+### 4. Same-Request Retry
+
+Goal: retry a request on the next eligible backend when the selected backend
+fails before producing a successful response.
+
+Scope:
+
+- [x] Define retryable upstream failures: connection errors, timeouts, and
+  selected 5xx statuses.
+- [x] Keep request bodies replayable for non-streaming inbound requests.
+- [x] Avoid retrying unsafe or already-partially-streamed responses.
+- [ ] Record retry/fallback reason in logs and metrics.
+- [x] Add tests for primary connection failure -> secondary success.
+
+Acceptance criteria:
+
+- If spark-a is selected but connection fails, Fairlead retries spark-b before
+  returning to the caller.
+- If a backend starts streaming response bytes, Fairlead does not attempt to
+  replay the partially completed response.
+- Circuit state is updated for the failed backend.
+
+### 5. Synchronous Routing Observability
+
+Goal: make current synchronous routing decisions explainable from logs and
+metrics.
+
+Scope:
+
+- [ ] Add metrics for request count by workload, backend, origin node, and
+  status.
+- [ ] Add latency metrics by workload and backend.
+- [ ] Add fallback/retry counters with reason labels.
+- [ ] Add structured tracing fields for request ID, workload, origin node,
+  selected backend, fallback reason, affinity key, and retry count.
+
+Acceptance criteria:
+
+- A request from spark-a that falls back to spark-b can be explained from logs
+  and metrics.
+- Metrics identify whether fallback was caused by circuit state or upstream
+  failure.
+- Observability stays scoped to synchronous requests; queue, worker, and
+  resource metrics remain deferred.
+
+### 6. Small-Cluster Demo
+
+Goal: create a portfolio-ready demonstration of Fairlead's routing behavior.
+
+Scope:
+
+- [ ] Add a local demo with two mock OpenAI-compatible backends named spark-a and
+  spark-b.
+- [ ] Simulate healthy, circuit-open, failed-then-retried, and recovered backend
+  states.
+- [ ] Show same-node preference, peer-node fallback, same-request retry, and
+  metrics output.
+- [x] Document manual two-node DGX Spark deployment commands and expected
+  observations.
+- [ ] Add a repeatable local mock demo that does not require GPUs.
+
+Acceptance criteria:
+
+- A reviewer can run the demo locally without real GPUs.
+- The demo clearly shows why Fairlead exists beyond a basic reverse proxy.
+- The same policy can later be pointed at real vLLM servers on spark-a and
+  spark-b.
+
+## Deferred Future Epics
+
+These epics are intentionally out of scope for Bluewater. They are listed here
+to preserve the plan without pulling future-branch work into the current branch.
+
+### Resource Registry v1
 
 Goal: give Fairlead a simple control-plane view of node/backend capacity.
 
@@ -177,11 +310,11 @@ GET  /v1/resources
 
 Acceptance criteria:
 
-- vLLM or a mock worker can report capacity for `loki` and `thor`.
+- vLLM or a mock worker can report capacity for `spark-a` and `spark-b`.
 - Fairlead can read the latest reported capacity during backend selection.
 - Stale reports stop being trusted after a configurable timeout.
 
-### 4. Resource-Aware Selection
+### Resource-Aware Selection
 
 Goal: incorporate resource state into synchronous backend selection.
 
@@ -207,72 +340,29 @@ rank by configured order
 
 Acceptance criteria:
 
-- If Loki has capacity, Loki-origin requests select Loki.
-- If Loki reports insufficient headroom, Loki-origin requests select Thor.
-- If both Loki and Thor are ineligible, Fairlead returns the configured
+- If spark-a has capacity, requests from spark-a select spark-a.
+- If spark-a reports insufficient headroom, requests from spark-a select
+  spark-b.
+- If both spark-a and spark-b are ineligible, Fairlead returns the configured
   no-capacity behavior: queue, 503, or cloud fallback.
 
-### 5. Same-Request Retry
+### Full Observability
 
-Goal: retry a request on the next eligible backend when the selected backend
-fails before producing a successful response.
-
-Scope:
-
-- [ ] Define retryable upstream failures: connection errors, timeouts, and
-  selected 5xx statuses.
-- [ ] Keep request bodies replayable for non-streaming inbound requests.
-- [ ] Avoid retrying unsafe or already-partially-streamed responses.
-- [ ] Record retry/fallback reason in logs and metrics.
-- [ ] Add tests for primary connection failure -> secondary success.
-
-Acceptance criteria:
-
-- If Loki is selected but connection fails, Fairlead retries Thor before
-  returning to the caller.
-- If a backend starts streaming response bytes, Fairlead does not attempt to
-  replay the partially completed response.
-- Circuit state is updated for the failed backend.
-
-### 6. Observability v1
-
-Goal: make routing decisions explainable.
+Goal: extend synchronous routing observability to future resource, queue, worker,
+and async-job behavior.
 
 Scope:
 
-- [ ] Add metrics for request count by workload, backend, origin node, and
-  status.
-- [ ] Add latency metrics by workload and backend.
-- [ ] Add fallback/retry counters with reason labels.
 - [ ] Add resource metrics for reported VRAM/load per node.
-- [ ] Add structured tracing fields for request ID, workload, origin node,
-  selected backend, fallback reason, and affinity key.
+- [ ] Add queue depth by priority and workload.
+- [ ] Add queue wait time by priority and workload.
+- [ ] Add worker availability and utilization.
+- [ ] Add job duration and callback success/failure.
 
 Acceptance criteria:
 
-- A Loki-origin request that falls back to Thor can be explained from logs and
-  metrics.
 - Metrics identify whether fallback was caused by circuit state, resource state,
-  or upstream failure.
-
-### 7. Small-Cluster Demo
-
-Goal: create a portfolio-ready demonstration of Fairlead's routing behavior.
-
-Scope:
-
-- [ ] Add a local demo with two mock OpenAI-compatible backends named Loki and
-  Thor.
-- [ ] Simulate healthy, circuit-open, full, and recovered backend states.
-- [ ] Show same-node preference, peer-node fallback, all-full behavior, and
-  metrics output.
-- [ ] Document the demo commands and expected observations.
-
-Acceptance criteria:
-
-- A reviewer can run the demo locally without real GPUs.
-- The demo clearly shows why Fairlead exists beyond a basic reverse proxy.
-- The same policy can later be pointed at real vLLM servers on Loki and Thor.
+  upstream failure, queue policy, or worker health.
 
 ## Hard Tasks
 
@@ -449,7 +539,10 @@ Docker, or the provider accounts themselves.
 - Add backend pools.
 - Add provider/header policy.
 - Add `/v1/models`.
-- Add workload-aware metrics.
+- Clean up backend health probe targets.
+- Add basic same-request retry for safe synchronous upstream failures.
+- Add workload-aware routing metrics and retry/fallback counters.
+- Add a repeatable local mock demo.
 
 ### Bluewater 2: Resource-Aware Routing
 
