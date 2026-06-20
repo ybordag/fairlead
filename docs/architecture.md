@@ -126,19 +126,19 @@ Assume a deployment with two GPU nodes:
 
 ```mermaid
 flowchart LR
-    cambium["Cambium\nAPI gateway"] --> rhizome_loki["Rhizome worker\non Loki"]
-    cambium --> rhizome_thor["Rhizome worker\non Thor"]
+    cambium["Cambium API gateway"] --> rhizome_loki["Rhizome worker on Loki"]
+    cambium --> rhizome_thor["Rhizome worker on Thor"]
 
-    rhizome_loki --> fairlead["Fairlead\nrouting/control plane"]
+    rhizome_loki --> fairlead["Fairlead routing/control plane"]
     rhizome_thor --> fairlead
 
-    fairlead --> vllm_loki["vLLM\non Loki GPU"]
-    fairlead --> vllm_thor["vLLM\non Thor GPU"]
+    fairlead --> vllm_loki["vLLM on Loki GPU"]
+    fairlead --> vllm_thor["vLLM on Thor GPU"]
 
     vllm_loki --> gpu_loki["Loki GPU"]
     vllm_thor --> gpu_thor["Thor GPU"]
 
-    fairlead -. planned .-> registry["Resource registry\nhealth + VRAM + load + locality"]
+    fairlead -. planned .-> registry["Resource registry health + VRAM + load + locality"]
     registry -. informs .-> fairlead
 ```
 

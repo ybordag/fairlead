@@ -46,7 +46,7 @@ It does not yet provide:
 
 These should be achievable without changing the core architecture.
 
-- [ ] Update `README.md` so it reflects the current runnable Phase 4 service and
+- [x] Update `README.md` so it reflects the current runnable Phase 4 service and
   the Bluewater generalization direction.
 - [ ] Add a short glossary for `backend`, `provider`, `worker`, `workload`,
   `route`, and `affinity` so future docs use the terms consistently.
@@ -94,6 +94,181 @@ system.
   per backend pool.
 - [ ] Implement same-request fallback for retryable upstream failures where it is
   safe to replay the request body.
+
+## Implementation Epics
+
+These are the first implementation-ready Bluewater epics. They turn the broad
+plan above into features with concrete acceptance criteria.
+
+### 1. Node-Aware Backend Model
+
+Goal: make Fairlead understand where a backend runs and what workloads it can
+serve.
+
+Scope:
+
+- [ ] Add stable `backend_id` and `node_id` fields to backend configuration.
+- [ ] Add a backend `pool` or `backend_pool_id`.
+- [ ] Add supported workload kinds per backend.
+- [ ] Preserve the current comma-separated `BACKENDS` env var as a default pool
+  for simple local use.
+- [ ] Document example config for Loki and Thor:
+  `loki-vllm`, `thor-vllm`, node IDs, backend URLs, and supported workloads.
+
+Acceptance criteria:
+
+- Existing `BACKENDS=http://loki:8000/v1,http://thor:8000/v1` still works.
+- A richer config can describe at least two backends on different nodes.
+- Metrics and logs can identify the selected backend by stable ID, not only URL.
+
+### 2. Origin-Aware Routing
+
+Goal: prefer same-node inference when a request originates from a node that has a
+healthy eligible local backend.
+
+Scope:
+
+- [ ] Add request origin metadata, initially via `X-Fairlead-Origin-Node`.
+- [ ] Add route selection logic that prefers backends on the origin node when
+  they are circuit-closed and resource-eligible.
+- [ ] Define precedence between locality and existing session affinity.
+- [ ] Add tests for Loki-origin requests preferring Loki and Thor-origin requests
+  preferring Thor.
+
+Proposed precedence:
+
+```text
+eligible backend on origin node
+  -> existing session affinity if still eligible
+  -> lowest-load eligible backend
+  -> configured fallback order
+```
+
+Acceptance criteria:
+
+- A request with `X-Fairlead-Origin-Node: loki` selects Loki's backend when it is
+  healthy and eligible.
+- If Loki is circuit-open or resource-ineligible, the same request selects Thor.
+- The reverse behavior works for `X-Fairlead-Origin-Node: thor`.
+
+### 3. Resource Registry v1
+
+Goal: give Fairlead a simple control-plane view of node/backend capacity.
+
+Scope:
+
+- [ ] Define resource structs for node ID, backend ID, total VRAM, reserved VRAM,
+  current load, and timestamp.
+- [ ] Add an in-memory registry guarded by `Arc<RwLock<_>>`.
+- [ ] Add registration/update endpoint for cooperative reporting.
+- [ ] Add stale-report handling.
+- [ ] Add tests for resource registration, update, stale expiry, and lookup.
+
+Initial API sketch:
+
+```text
+POST /v1/resources/report
+GET  /v1/resources
+```
+
+Acceptance criteria:
+
+- vLLM or a mock worker can report capacity for `loki` and `thor`.
+- Fairlead can read the latest reported capacity during backend selection.
+- Stale reports stop being trusted after a configurable timeout.
+
+### 4. Resource-Aware Selection
+
+Goal: incorporate resource state into synchronous backend selection.
+
+Scope:
+
+- [ ] Extend backend eligibility to include reported headroom or load.
+- [ ] Add workload-level resource estimates, starting with a coarse default for
+  chat and embeddings.
+- [ ] Decide conservative behavior when no resource report exists.
+- [ ] Add tests for local backend full -> peer backend selected.
+
+Proposed decision pipeline:
+
+```text
+candidates = backends in workload's backend pool
+candidates = remove circuit-open backends
+candidates = remove backends without enough reported capacity
+rank by origin-node locality
+rank by session affinity
+rank by load/headroom
+rank by configured order
+```
+
+Acceptance criteria:
+
+- If Loki has capacity, Loki-origin requests select Loki.
+- If Loki reports insufficient headroom, Loki-origin requests select Thor.
+- If both Loki and Thor are ineligible, Fairlead returns the configured
+  no-capacity behavior: queue, 503, or cloud fallback.
+
+### 5. Same-Request Retry
+
+Goal: retry a request on the next eligible backend when the selected backend
+fails before producing a successful response.
+
+Scope:
+
+- [ ] Define retryable upstream failures: connection errors, timeouts, and
+  selected 5xx statuses.
+- [ ] Keep request bodies replayable for non-streaming inbound requests.
+- [ ] Avoid retrying unsafe or already-partially-streamed responses.
+- [ ] Record retry/fallback reason in logs and metrics.
+- [ ] Add tests for primary connection failure -> secondary success.
+
+Acceptance criteria:
+
+- If Loki is selected but connection fails, Fairlead retries Thor before
+  returning to the caller.
+- If a backend starts streaming response bytes, Fairlead does not attempt to
+  replay the partially completed response.
+- Circuit state is updated for the failed backend.
+
+### 6. Observability v1
+
+Goal: make routing decisions explainable.
+
+Scope:
+
+- [ ] Add metrics for request count by workload, backend, origin node, and
+  status.
+- [ ] Add latency metrics by workload and backend.
+- [ ] Add fallback/retry counters with reason labels.
+- [ ] Add resource metrics for reported VRAM/load per node.
+- [ ] Add structured tracing fields for request ID, workload, origin node,
+  selected backend, fallback reason, and affinity key.
+
+Acceptance criteria:
+
+- A Loki-origin request that falls back to Thor can be explained from logs and
+  metrics.
+- Metrics identify whether fallback was caused by circuit state, resource state,
+  or upstream failure.
+
+### 7. Small-Cluster Demo
+
+Goal: create a portfolio-ready demonstration of Fairlead's routing behavior.
+
+Scope:
+
+- [ ] Add a local demo with two mock OpenAI-compatible backends named Loki and
+  Thor.
+- [ ] Simulate healthy, circuit-open, full, and recovered backend states.
+- [ ] Show same-node preference, peer-node fallback, all-full behavior, and
+  metrics output.
+- [ ] Document the demo commands and expected observations.
+
+Acceptance criteria:
+
+- A reviewer can run the demo locally without real GPUs.
+- The demo clearly shows why Fairlead exists beyond a basic reverse proxy.
+- The same policy can later be pointed at real vLLM servers on Loki and Thor.
 
 ## Hard Tasks
 
