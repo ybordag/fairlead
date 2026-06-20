@@ -40,9 +40,9 @@ async fn main() -> anyhow::Result<()> {
     let backends: Vec<BackendState> = cfg
         .backends
         .iter()
-        .map(|url| {
-            BackendState::new(
-                url.clone(),
+        .map(|backend| {
+            BackendState::from_config(
+                backend.clone(),
                 cfg.circuit_failure_threshold,
                 Duration::from_secs(cfg.circuit_cooldown_secs),
             )
@@ -107,18 +107,14 @@ mod tests {
             backends: vec![],
             affinity: SessionAffinity::default(),
         };
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
 
         tokio::spawn(async move {
             axum::serve(listener, build_router(state)).await.unwrap();
         });
 
-        let resp = reqwest::get(format!("http://{addr}/health"))
-            .await
-            .unwrap();
+        let resp = reqwest::get(format!("http://{addr}/health")).await.unwrap();
         assert_eq!(resp.status(), 200);
 
         let json: serde_json::Value = resp.json().await.unwrap();

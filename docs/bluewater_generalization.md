@@ -31,10 +31,12 @@ Fairlead currently provides:
 - Soft session affinity through `X-Fairlead-Thread-Id`.
 - Streaming proxy support for Server-Sent Events.
 - Basic Prometheus circuit-state metrics.
+- Node-aware backend metadata through `BACKENDS_JSON`.
+- `WorkloadKind` metadata for chat completions and embeddings.
 
 It does not yet provide:
 
-- First-class workload definitions.
+- Workload-aware route selection.
 - Separate backend pools by workload type.
 - Provider-specific auth/header policies.
 - VRAM or CPU resource accounting.
@@ -66,7 +68,7 @@ These should be achievable without changing the core architecture.
 These require small abstractions, but should not require a full scheduler or job
 system.
 
-- [ ] Introduce a `WorkloadKind` enum for synchronous proxy workloads, starting
+- [x] Introduce a `WorkloadKind` enum for synchronous proxy workloads, starting
   with `chat_completions` and `embeddings`.
 - [ ] Move route-specific behavior out of the stringly typed
   `forward(state, path, headers, body)` call and into workload metadata.
@@ -79,7 +81,7 @@ system.
   metric labels.
 - [ ] Split backend configuration by pool so different workloads can target
   different backend sets.
-- [ ] Preserve a default backend pool for today's simple `BACKENDS` config.
+- [x] Preserve a default backend pool for today's simple `BACKENDS` config.
 - [ ] Add provider/header forwarding policy:
   content type,
   authorization,
@@ -107,12 +109,12 @@ serve.
 
 Scope:
 
-- [ ] Add stable `backend_id` and `node_id` fields to backend configuration.
-- [ ] Add a backend `pool` or `backend_pool_id`.
-- [ ] Add supported workload kinds per backend.
-- [ ] Preserve the current comma-separated `BACKENDS` env var as a default pool
+- [x] Add stable `backend_id` and `node_id` fields to backend configuration.
+- [x] Add a backend `pool` or `backend_pool_id`.
+- [x] Add supported workload kinds per backend.
+- [x] Preserve the current comma-separated `BACKENDS` env var as a default pool
   for simple local use.
-- [ ] Document example config for Loki and Thor:
+- [x] Document example config for Loki and Thor:
   `loki-vllm`, `thor-vllm`, node IDs, backend URLs, and supported workloads.
 
 Acceptance criteria:

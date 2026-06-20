@@ -21,6 +21,8 @@ The current service provides:
 - **OpenAI-compatible proxying** for chat completions and embeddings.
 - **Streaming response passthrough** for Server-Sent Events.
 - **Ordered backend selection** from the `BACKENDS` environment variable.
+- **Node-aware backend metadata** through `BACKENDS_JSON` for richer local/edge
+  deployments.
 - **Per-backend circuit breakers** for connection failures and 5xx responses.
 - **Background health probes** that update circuit state.
 - **Soft session affinity** through `X-Fairlead-Thread-Id`.
@@ -111,6 +113,31 @@ BACKENDS=http://loki:8000/v1,http://thor:8000/v1 \
 PORT=7000 \
 cargo run
 ```
+
+Node-aware backend configuration:
+
+```bash
+BACKENDS_JSON='[
+  {
+    "id": "loki-vllm",
+    "url": "http://loki:8000/v1",
+    "node_id": "loki",
+    "pool": "local-llm",
+    "workloads": ["chat_completions", "embeddings"]
+  },
+  {
+    "id": "thor-vllm",
+    "url": "http://thor:8000/v1",
+    "node_id": "thor",
+    "pool": "local-llm",
+    "workloads": ["chat_completions", "embeddings"]
+  }
+]' PORT=7000 cargo run
+```
+
+`BACKENDS` remains the simplest local setup path. `BACKENDS_JSON` is the
+Bluewater configuration path for stable backend IDs, node identity, backend
+pools, and workload support.
 
 Health:
 

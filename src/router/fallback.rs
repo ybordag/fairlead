@@ -60,10 +60,7 @@ mod tests {
 
     #[tokio::test]
     async fn returns_first_healthy_backend() {
-        let backends = vec![
-            healthy("http://a:8000/v1"),
-            healthy("http://b:8000/v1"),
-        ];
+        let backends = vec![healthy("http://a:8000/v1"), healthy("http://b:8000/v1")];
         assert_eq!(select_backend(&backends, None).await, Some(0));
     }
 
@@ -79,10 +76,7 @@ mod tests {
 
     #[tokio::test]
     async fn preferred_used_when_available() {
-        let backends = vec![
-            healthy("http://a:8000/v1"),
-            healthy("http://b:8000/v1"),
-        ];
+        let backends = vec![healthy("http://a:8000/v1"), healthy("http://b:8000/v1")];
         assert_eq!(select_backend(&backends, Some(1)).await, Some(1));
     }
 

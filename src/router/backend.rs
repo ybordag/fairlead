@@ -2,22 +2,44 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::RwLock;
 
+use crate::config::{BackendConfig, WorkloadKind};
+
 use super::circuit::CircuitBreaker;
 
 /// Shared state for one configured backend URL.
 /// Cloning produces a new handle to the same circuit breaker (Arc, not a deep copy).
 #[derive(Clone)]
 pub struct BackendState {
+    /// Stable identifier used in metrics and future routing policy.
+    pub id: String,
     /// Base URL including the API prefix, e.g. `http://loki:8000/v1`.
     pub url: String,
+    /// Optional node identity for locality-aware routing.
+    pub node_id: Option<String>,
+    /// Backend pool name. Phase 4 routes everything through the default pool.
+    pub pool: String,
+    /// Workloads this backend can serve.
+    pub workloads: Vec<WorkloadKind>,
     /// Circuit breaker shared between the request path and the health-probe task.
     pub circuit: Arc<RwLock<CircuitBreaker>>,
 }
 
 impl BackendState {
     pub fn new(url: String, failure_threshold: u32, cooldown: Duration) -> Self {
+        Self::from_config(
+            BackendConfig::from_legacy_url(0, url),
+            failure_threshold,
+            cooldown,
+        )
+    }
+
+    pub fn from_config(config: BackendConfig, failure_threshold: u32, cooldown: Duration) -> Self {
         Self {
-            url,
+            id: config.id,
+            url: config.url,
+            node_id: config.node_id,
+            pool: config.pool,
+            workloads: config.workloads,
             circuit: Arc::new(RwLock::new(CircuitBreaker::new(
                 failure_threshold,
                 cooldown,
@@ -28,8 +50,8 @@ impl BackendState {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::circuit::CircuitState;
+    use super::*;
     use axum::{http::StatusCode, routing::get, Router};
 
     /// BackendState::clone must produce a new Arc handle pointing at the same
@@ -38,8 +60,7 @@ mod tests {
     /// in one handler never affect any other.
     #[tokio::test]
     async fn clone_shares_circuit_not_copies() {
-        let original =
-            BackendState::new("http://loki:8000/v1".into(), 1, Duration::from_secs(30));
+        let original = BackendState::new("http://loki:8000/v1".into(), 1, Duration::from_secs(30));
         let cloned = original.clone();
 
         original.circuit.write().await.record_failure();
@@ -51,10 +72,39 @@ mod tests {
         );
     }
 
+    #[test]
+    fn from_config_preserves_node_aware_metadata() {
+        let backend = BackendState::from_config(
+            BackendConfig {
+                id: "loki-vllm".into(),
+                url: "http://loki:8000/v1".into(),
+                node_id: Some("loki".into()),
+                pool: "local-llm".into(),
+                workloads: vec![WorkloadKind::ChatCompletions],
+            },
+            3,
+            Duration::from_secs(30),
+        );
+
+        assert_eq!(backend.id, "loki-vllm");
+        assert_eq!(backend.url, "http://loki:8000/v1");
+        assert_eq!(backend.node_id.as_deref(), Some("loki"));
+        assert_eq!(backend.pool, "local-llm");
+        assert_eq!(backend.workloads, vec![WorkloadKind::ChatCompletions]);
+    }
+
+    #[test]
+    fn legacy_constructor_uses_default_metadata() {
+        let backend = BackendState::new("http://loki:8000/v1".into(), 3, Duration::from_secs(30));
+
+        assert_eq!(backend.id, "backend-0");
+        assert_eq!(backend.node_id, None);
+        assert_eq!(backend.pool, crate::config::DEFAULT_BACKEND_POOL);
+        assert_eq!(backend.workloads, WorkloadKind::default_proxy_workloads());
+    }
+
     async fn start_probe_target(app: Router) -> String {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move {
             axum::serve(listener, app).await.unwrap();
@@ -73,14 +123,22 @@ mod tests {
         let url = start_probe_target(mock).await;
 
         // Long cooldown: is_available() alone would never transition this circuit.
-        let circuit = Arc::new(RwLock::new(CircuitBreaker::new(1, Duration::from_secs(999))));
+        let circuit = Arc::new(RwLock::new(CircuitBreaker::new(
+            1,
+            Duration::from_secs(999),
+        )));
         circuit.write().await.record_failure();
         assert!(
             matches!(circuit.read().await.state(), CircuitState::Open { .. }),
             "circuit must start Open for this test to be meaningful"
         );
 
-        spawn_health_probe(circuit.clone(), url, reqwest::Client::new(), Duration::from_millis(25));
+        spawn_health_probe(
+            circuit.clone(),
+            url,
+            reqwest::Client::new(),
+            Duration::from_millis(25),
+        );
 
         // Give the probe several opportunities to fire.
         tokio::time::sleep(Duration::from_millis(150)).await;
@@ -95,9 +153,7 @@ mod tests {
     /// failure threshold.
     #[tokio::test]
     async fn probe_opens_circuit_when_backend_unreachable() {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         drop(listener); // nothing listening on this port
 
@@ -110,7 +166,12 @@ mod tests {
             "circuit must start Closed"
         );
 
-        spawn_health_probe(circuit.clone(), url, reqwest::Client::new(), Duration::from_millis(25));
+        spawn_health_probe(
+            circuit.clone(),
+            url,
+            reqwest::Client::new(),
+            Duration::from_millis(25),
+        );
 
         // First tick fires immediately; second at ~25ms. 150ms gives 6+ opportunities.
         tokio::time::sleep(Duration::from_millis(150)).await;
@@ -130,7 +191,12 @@ mod tests {
 
         let circuit = Arc::new(RwLock::new(CircuitBreaker::new(1, Duration::from_secs(30))));
 
-        spawn_health_probe(circuit.clone(), url, reqwest::Client::new(), Duration::from_millis(25));
+        spawn_health_probe(
+            circuit.clone(),
+            url,
+            reqwest::Client::new(),
+            Duration::from_millis(25),
+        );
 
         tokio::time::sleep(Duration::from_millis(150)).await;
 

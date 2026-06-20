@@ -17,10 +17,13 @@ pub async fn metrics(State(state): State<AppState>) -> Response<String> {
                 CircuitState::Open { .. } => 2,
             }
         };
-        // Escape any quotes in the URL so the Prometheus label is valid.
-        let label = backend.url.replace('"', "\\\"");
+        // Escape any quotes so Prometheus labels remain valid.
+        let backend_id = prometheus_escape(&backend.id);
+        let url = prometheus_escape(&backend.url);
+        let node = prometheus_escape(backend.node_id.as_deref().unwrap_or(""));
+        let pool = prometheus_escape(&backend.pool);
         body.push_str(&format!(
-            "fairlead_circuit_state{{backend=\"{label}\"}} {value}\n"
+            "fairlead_circuit_state{{backend=\"{backend_id}\",url=\"{url}\",node=\"{node}\",pool=\"{pool}\"}} {value}\n"
         ));
     }
 
@@ -29,6 +32,10 @@ pub async fn metrics(State(state): State<AppState>) -> Response<String> {
         .header("content-type", "text/plain; version=0.0.4; charset=utf-8")
         .body(body)
         .unwrap()
+}
+
+fn prometheus_escape(value: &str) -> String {
+    value.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
 #[cfg(test)]
@@ -75,7 +82,9 @@ mod tests {
 
         assert_eq!(resp.status(), 200);
         let text = body_text(resp).await;
-        assert!(text.contains("fairlead_circuit_state{backend=\"http://loki:8000/v1\"} 0"));
+        assert!(text.contains(
+            "fairlead_circuit_state{backend=\"backend-0\",url=\"http://loki:8000/v1\",node=\"\",pool=\"default\"} 0"
+        ));
     }
 
     #[tokio::test]
@@ -95,13 +104,14 @@ mod tests {
             .unwrap();
 
         let text = body_text(resp).await;
-        assert!(text.contains("fairlead_circuit_state{backend=\"http://thor:8000/v1\"} 2"));
+        assert!(text.contains(
+            "fairlead_circuit_state{backend=\"backend-0\",url=\"http://thor:8000/v1\",node=\"\",pool=\"default\"} 2"
+        ));
     }
 
     #[tokio::test]
     async fn metrics_reports_half_open() {
-        let backend =
-            BackendState::new("http://loki:8000/v1".into(), 1, Duration::from_millis(10));
+        let backend = BackendState::new("http://loki:8000/v1".into(), 1, Duration::from_millis(10));
         backend.circuit.write().await.record_failure();
         tokio::time::sleep(Duration::from_millis(20)).await;
         // is_available() transitions Open → HalfOpen once the cooldown has elapsed.
@@ -119,17 +129,17 @@ mod tests {
 
         let text = body_text(resp).await;
         assert!(
-            text.contains("fairlead_circuit_state{backend=\"http://loki:8000/v1\"} 1"),
+            text.contains(
+                "fairlead_circuit_state{backend=\"backend-0\",url=\"http://loki:8000/v1\",node=\"\",pool=\"default\"} 1"
+            ),
             "HalfOpen should report value 1, got:\n{text}"
         );
     }
 
     #[tokio::test]
     async fn metrics_reports_multiple_backends() {
-        let healthy =
-            BackendState::new("http://loki:8000/v1".into(), 3, Duration::from_secs(30));
-        let broken =
-            BackendState::new("http://thor:8000/v1".into(), 1, Duration::from_secs(30));
+        let healthy = BackendState::new("http://loki:8000/v1".into(), 3, Duration::from_secs(30));
+        let broken = BackendState::new("http://thor:8000/v1".into(), 1, Duration::from_secs(30));
         broken.circuit.write().await.record_failure();
 
         let app = router_with_backends(vec![healthy, broken]);
@@ -143,8 +153,41 @@ mod tests {
             .unwrap();
 
         let text = body_text(resp).await;
-        assert!(text.contains("fairlead_circuit_state{backend=\"http://loki:8000/v1\"} 0"));
-        assert!(text.contains("fairlead_circuit_state{backend=\"http://thor:8000/v1\"} 2"));
+        assert!(text.contains(
+            "fairlead_circuit_state{backend=\"backend-0\",url=\"http://loki:8000/v1\",node=\"\",pool=\"default\"} 0"
+        ));
+        assert!(text.contains(
+            "fairlead_circuit_state{backend=\"backend-0\",url=\"http://thor:8000/v1\",node=\"\",pool=\"default\"} 2"
+        ));
+    }
+
+    #[tokio::test]
+    async fn metrics_reports_backend_metadata_labels() {
+        let backend = BackendState::from_config(
+            crate::config::BackendConfig {
+                id: "loki-vllm".into(),
+                url: "http://loki:8000/v1".into(),
+                node_id: Some("loki".into()),
+                pool: "local-llm".into(),
+                workloads: crate::config::WorkloadKind::default_proxy_workloads(),
+            },
+            3,
+            Duration::from_secs(30),
+        );
+        let app = router_with_backends(vec![backend]);
+        let resp = app
+            .oneshot(
+                axum::http::Request::get("/metrics")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        let text = body_text(resp).await;
+        assert!(text.contains(
+            "fairlead_circuit_state{backend=\"loki-vllm\",url=\"http://loki:8000/v1\",node=\"loki\",pool=\"local-llm\"} 0"
+        ));
     }
 
     #[tokio::test]

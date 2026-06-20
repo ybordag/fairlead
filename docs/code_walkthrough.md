@@ -29,7 +29,7 @@ flowchart TD
 
     main --> cfg["src/config.rs\nConfig::from_env()"]
     main --> backend_build["Build Vec<BackendState>"]
-    backend_build --> backend_state["src/router/backend.rs\nBackendState::new()"]
+    backend_build --> backend_state["src/router/backend.rs\nBackendState::from_config()"]
     backend_state --> circuit["src/router/circuit.rs\nCircuitBreaker"]
 
     main --> probes["spawn_health_probe() per backend"]
@@ -379,7 +379,8 @@ pub struct AppState {
 `AppState` is the state every HTTP handler needs.
 
 - `client` is the reusable outbound HTTP client.
-- `backends` is the ordered list of backend URLs and their circuit breakers.
+- `backends` is the ordered list of backend runtime states: URL, stable backend
+  ID, optional node ID, pool, supported workloads, and circuit breaker.
 - `affinity` maps thread IDs to preferred backend indexes.
 
 `#[derive(Clone)]` asks Rust to generate a `clone()` implementation. Axum clones
@@ -409,6 +410,7 @@ environment variables:
 - `LOG_LEVEL`
 - `LOG_FORMAT`
 - `BACKENDS`
+- `BACKENDS_JSON`
 - `CIRCUIT_FAILURE_THRESHOLD`
 - `CIRCUIT_COOLDOWN_SECS`
 - `HEALTH_PROBE_INTERVAL_SECS`
@@ -417,6 +419,21 @@ environment variables:
 
 ```text
 http://loki:8000/v1,http://thor:8000/v1
+```
+
+`BACKENDS_JSON` is the node-aware Bluewater configuration path. It can describe
+stable backend IDs, node IDs, pools, and supported workloads:
+
+```json
+[
+  {
+    "id": "loki-vllm",
+    "url": "http://loki:8000/v1",
+    "node_id": "loki",
+    "pool": "local-llm",
+    "workloads": ["chat_completions", "embeddings"]
+  }
+]
 ```
 
 If parsing fails, `?` returns the error and the process exits.
@@ -446,9 +463,9 @@ model servers. It is analogous to a reusable HTTP connection manager.
 let backends: Vec<BackendState> = cfg
     .backends
     .iter()
-    .map(|url| {
-        BackendState::new(
-            url.clone(),
+    .map(|backend| {
+        BackendState::from_config(
+            backend.clone(),
             cfg.circuit_failure_threshold,
             Duration::from_secs(cfg.circuit_cooldown_secs),
         )
@@ -456,36 +473,41 @@ let backends: Vec<BackendState> = cfg
     .collect();
 ```
 
-This transforms each configured URL string into a `BackendState`. In
+This transforms each parsed `BackendConfig` into a runtime `BackendState`. In
 language-agnostic pseudocode:
 
 ```text
 backends = new empty growable list
-for each url reference in cfg.backends:
-    copied_url = copy url string
+for each backend config reference in cfg.backends:
+    copied_config = clone backend config
     cooldown = duration_from_seconds(cfg.circuit_cooldown_secs)
-    backend = BackendState.new(
-        copied_url,
+    backend = BackendState.from_config(
+        copied_config,
         cfg.circuit_failure_threshold,
         cooldown
     )
     append backend to backends
 ```
 
-`BackendState::new` creates:
+`BackendState::from_config` creates:
 
 ```rust
 pub struct BackendState {
+    pub id: String,
     pub url: String,
+    pub node_id: Option<String>,
+    pub pool: String,
+    pub workloads: Vec<WorkloadKind>,
     pub circuit: Arc<RwLock<CircuitBreaker>>,
 }
 ```
 
 Each backend has its own circuit breaker.
 
-The `url.clone()` call copies the URL string because each `BackendState` owns its
-own URL. The circuit breaker is allocated inside `BackendState::new` and wrapped
-in `Arc<RwLock<_>>` so request handlers and health probes can share it.
+The `backend.clone()` call copies the parsed backend metadata because each
+`BackendState` owns its runtime copy. The circuit breaker is allocated inside
+`BackendState::from_config` and wrapped in `Arc<RwLock<_>>` so request handlers
+and health probes can share it.
 
 ### 8. Spawn Background Health Probes
 
@@ -906,7 +928,7 @@ The request path and the health probe path share the same circuit breaker via
 For each backend, it reads the circuit state and emits:
 
 ```text
-fairlead_circuit_state{backend="http://loki:8000/v1"} 0
+fairlead_circuit_state{backend="loki-vllm",url="http://loki:8000/v1",node="loki",pool="local-llm"} 0
 ```
 
 Values:

@@ -119,9 +119,7 @@ mod tests {
     };
 
     async fn start_mock(app: Router) -> String {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move {
             axum::serve(listener, app).await.unwrap();
@@ -147,9 +145,7 @@ mod tests {
             backends,
             affinity: SessionAffinity::default(),
         };
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move {
             axum::serve(listener, build_router(state)).await.unwrap();
@@ -355,9 +351,18 @@ mod tests {
         let url = format!("{}/v1/chat/completions", fairlead);
         let body = json!({"model":"m","messages":[]});
 
-        assert_eq!(client.post(&url).json(&body).send().await.unwrap().status(), 500);
-        assert_eq!(client.post(&url).json(&body).send().await.unwrap().status(), 500);
-        assert_eq!(client.post(&url).json(&body).send().await.unwrap().status(), 503);
+        assert_eq!(
+            client.post(&url).json(&body).send().await.unwrap().status(),
+            500
+        );
+        assert_eq!(
+            client.post(&url).json(&body).send().await.unwrap().status(),
+            500
+        );
+        assert_eq!(
+            client.post(&url).json(&body).send().await.unwrap().status(),
+            503
+        );
     }
 
     #[tokio::test]
@@ -374,7 +379,10 @@ mod tests {
         let url = format!("{}/v1/chat/completions", fairlead);
         let body = json!({"model":"m","messages":[]});
         for _ in 0..3 {
-            assert_eq!(client.post(&url).json(&body).send().await.unwrap().status(), 400);
+            assert_eq!(
+                client.post(&url).json(&body).send().await.unwrap().status(),
+                400
+            );
         }
     }
 
@@ -391,9 +399,18 @@ mod tests {
         let url = format!("{}/v1/chat/completions", fairlead);
         let body = json!({"model":"m","messages":[]});
 
-        assert_eq!(client.post(&url).json(&body).send().await.unwrap().status(), 502);
-        assert_eq!(client.post(&url).json(&body).send().await.unwrap().status(), 502);
-        assert_eq!(client.post(&url).json(&body).send().await.unwrap().status(), 503);
+        assert_eq!(
+            client.post(&url).json(&body).send().await.unwrap().status(),
+            502
+        );
+        assert_eq!(
+            client.post(&url).json(&body).send().await.unwrap().status(),
+            502
+        );
+        assert_eq!(
+            client.post(&url).json(&body).send().await.unwrap().status(),
+            503
+        );
     }
 
     #[tokio::test]
@@ -410,11 +427,25 @@ mod tests {
         let url = format!("{}/v1/chat/completions", fairlead);
         let body = json!({"model":"m","messages":[]});
 
-        assert_eq!(client.post(&url).json(&body).send().await.unwrap().status(), 500);
-        assert_eq!(client.post(&url).json(&body).send().await.unwrap().status(), 503);
+        assert_eq!(
+            client.post(&url).json(&body).send().await.unwrap().status(),
+            500
+        );
+        assert_eq!(
+            client.post(&url).json(&body).send().await.unwrap().status(),
+            503
+        );
         tokio::time::sleep(Duration::from_millis(100)).await;
-        assert_eq!(client.post(&url).json(&body).send().await.unwrap().status(), 500, "half-open probe reached backend");
-        assert_eq!(client.post(&url).json(&body).send().await.unwrap().status(), 503, "circuit re-opened");
+        assert_eq!(
+            client.post(&url).json(&body).send().await.unwrap().status(),
+            500,
+            "half-open probe reached backend"
+        );
+        assert_eq!(
+            client.post(&url).json(&body).send().await.unwrap().status(),
+            503,
+            "circuit re-opened"
+        );
     }
 
     #[tokio::test]
@@ -442,14 +473,26 @@ mod tests {
         let url = format!("{}/v1/chat/completions", fairlead);
         let body = json!({"model":"m","messages":[]});
 
-        assert_eq!(client.post(&url).json(&body).send().await.unwrap().status(), 500);
-        assert_eq!(client.post(&url).json(&body).send().await.unwrap().status(), 503);
+        assert_eq!(
+            client.post(&url).json(&body).send().await.unwrap().status(),
+            500
+        );
+        assert_eq!(
+            client.post(&url).json(&body).send().await.unwrap().status(),
+            503
+        );
         tokio::time::sleep(Duration::from_millis(100)).await;
         should_fail.store(false, Ordering::SeqCst);
-        assert_eq!(client.post(&url).json(&body).send().await.unwrap().status(), 200);
+        assert_eq!(
+            client.post(&url).json(&body).send().await.unwrap().status(),
+            200
+        );
         let r4 = client.post(&url).json(&body).send().await.unwrap();
         assert_eq!(r4.status(), 200);
-        assert_eq!(r4.json::<serde_json::Value>().await.unwrap()["recovered"], true);
+        assert_eq!(
+            r4.json::<serde_json::Value>().await.unwrap()["recovered"],
+            true
+        );
     }
 
     // ── fallback chain integration ───────────────────────────────────────────
@@ -482,14 +525,19 @@ mod tests {
             .unwrap();
 
         assert_eq!(resp.status(), 200);
-        assert_eq!(resp.json::<serde_json::Value>().await.unwrap()["source"], "second");
+        assert_eq!(
+            resp.json::<serde_json::Value>().await.unwrap()["source"],
+            "second"
+        );
     }
 
     /// When all circuits are open, return 503 without touching any backend.
     #[tokio::test]
     async fn all_backends_open_returns_503() {
-        let first_backend = BackendState::new("http://a:8000/v1".into(), 1, Duration::from_secs(60));
-        let second_backend = BackendState::new("http://b:8000/v1".into(), 1, Duration::from_secs(60));
+        let first_backend =
+            BackendState::new("http://a:8000/v1".into(), 1, Duration::from_secs(60));
+        let second_backend =
+            BackendState::new("http://b:8000/v1".into(), 1, Duration::from_secs(60));
         first_backend.circuit.write().await.record_failure();
         second_backend.circuit.write().await.record_failure();
 
@@ -527,8 +575,7 @@ mod tests {
         first_handle.circuit.write().await.record_failure();
         let second_backend = BackendState::new(second_url, 10, Duration::from_secs(60));
 
-        let fairlead =
-            start_fairlead_with_backends(vec![first_backend, second_backend]).await;
+        let fairlead = start_fairlead_with_backends(vec![first_backend, second_backend]).await;
 
         let client = reqwest::Client::new();
         let url = format!("{}/v1/chat/completions", fairlead);
@@ -542,7 +589,10 @@ mod tests {
             .send()
             .await
             .unwrap();
-        assert_eq!(r1.json::<serde_json::Value>().await.unwrap()["source"], "second");
+        assert_eq!(
+            r1.json::<serde_json::Value>().await.unwrap()["source"],
+            "second"
+        );
 
         // Restore backend 0 — now BOTH are available.
         first_handle.circuit.write().await.record_success();
@@ -555,7 +605,11 @@ mod tests {
             .send()
             .await
             .unwrap();
-        assert_eq!(r2.json::<serde_json::Value>().await.unwrap()["source"], "second", "affinity should keep thread on backend 1");
+        assert_eq!(
+            r2.json::<serde_json::Value>().await.unwrap()["source"],
+            "second",
+            "affinity should keep thread on backend 1"
+        );
 
         // Request with thread-2 (no affinity) → goes to backend 0 (first available).
         let r3 = client
@@ -565,7 +619,10 @@ mod tests {
             .send()
             .await
             .unwrap();
-        assert_eq!(r3.json::<serde_json::Value>().await.unwrap()["source"], "first");
+        assert_eq!(
+            r3.json::<serde_json::Value>().await.unwrap()["source"],
+            "first"
+        );
     }
 
     /// Affinity is only updated on success, never on failure.  When a preferred
@@ -608,7 +665,13 @@ mod tests {
         let body = json!({"model": "m", "messages": []});
 
         // Step 1: healthy request establishes affinity thread-1 → A (index 0).
-        let r1 = client.post(&url).header("x-fairlead-thread-id", "thread-1").json(&body).send().await.unwrap();
+        let r1 = client
+            .post(&url)
+            .header("x-fairlead-thread-id", "thread-1")
+            .json(&body)
+            .send()
+            .await
+            .unwrap();
         assert_eq!(r1.json::<serde_json::Value>().await.unwrap()["source"], "a");
 
         // Step 2: A starts failing.
@@ -616,21 +679,49 @@ mod tests {
 
         // Steps 3–4: two 5xx responses — circuit not open yet (1/2 then 2/2).
         // Affinity is NOT updated because the requests did not succeed.
-        let r2 = client.post(&url).header("x-fairlead-thread-id", "thread-1").json(&body).send().await.unwrap();
+        let r2 = client
+            .post(&url)
+            .header("x-fairlead-thread-id", "thread-1")
+            .json(&body)
+            .send()
+            .await
+            .unwrap();
         assert_eq!(r2.status(), 500, "A degrading, circuit at 1/2");
 
-        let r3 = client.post(&url).header("x-fairlead-thread-id", "thread-1").json(&body).send().await.unwrap();
+        let r3 = client
+            .post(&url)
+            .header("x-fairlead-thread-id", "thread-1")
+            .json(&body)
+            .send()
+            .await
+            .unwrap();
         assert_eq!(r3.status(), 500, "A degrading, circuit now opens at 2/2");
 
         // Step 5: A's circuit is open. select_backend skips A, routes to B,
         // succeeds, and updates affinity to thread-1 → B (index 1).
-        let r4 = client.post(&url).header("x-fairlead-thread-id", "thread-1").json(&body).send().await.unwrap();
+        let r4 = client
+            .post(&url)
+            .header("x-fairlead-thread-id", "thread-1")
+            .json(&body)
+            .send()
+            .await
+            .unwrap();
         assert_eq!(r4.status(), 200);
         assert_eq!(r4.json::<serde_json::Value>().await.unwrap()["source"], "b");
 
         // Step 6: Affinity now points to B — thread stays on B even if A recovers.
-        let r5 = client.post(&url).header("x-fairlead-thread-id", "thread-1").json(&body).send().await.unwrap();
-        assert_eq!(r5.json::<serde_json::Value>().await.unwrap()["source"], "b", "affinity updated to B after fallback");
+        let r5 = client
+            .post(&url)
+            .header("x-fairlead-thread-id", "thread-1")
+            .json(&body)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            r5.json::<serde_json::Value>().await.unwrap()["source"],
+            "b",
+            "affinity updated to B after fallback"
+        );
     }
 
     /// Soft affinity: when the preferred backend's circuit opens, the request
@@ -656,8 +747,7 @@ mod tests {
         // Open backend 0 → thread-1's first request lands on backend 1.
         first_handle.circuit.write().await.record_failure();
 
-        let fairlead =
-            start_fairlead_with_backends(vec![first_backend, second_backend]).await;
+        let fairlead = start_fairlead_with_backends(vec![first_backend, second_backend]).await;
 
         let client = reqwest::Client::new();
         let url = format!("{}/v1/chat/completions", fairlead);
@@ -671,7 +761,10 @@ mod tests {
             .send()
             .await
             .unwrap();
-        assert_eq!(r1.json::<serde_json::Value>().await.unwrap()["source"], "second");
+        assert_eq!(
+            r1.json::<serde_json::Value>().await.unwrap()["source"],
+            "second"
+        );
 
         // Now open backend 1's circuit and restore backend 0.
         first_handle.circuit.write().await.record_success();
@@ -685,7 +778,11 @@ mod tests {
             .send()
             .await
             .unwrap();
-        assert_eq!(r2.json::<serde_json::Value>().await.unwrap()["source"], "first", "should fall back to backend 0");
+        assert_eq!(
+            r2.json::<serde_json::Value>().await.unwrap()["source"],
+            "first",
+            "should fall back to backend 0"
+        );
 
         // Affinity map should now point thread-1 → backend 0.
         // Restore backend 1 — thread-1 should still prefer backend 0 (the updated affinity).
@@ -697,6 +794,10 @@ mod tests {
             .send()
             .await
             .unwrap();
-        assert_eq!(r3.json::<serde_json::Value>().await.unwrap()["source"], "first", "affinity should have updated to backend 0");
+        assert_eq!(
+            r3.json::<serde_json::Value>().await.unwrap()["source"],
+            "first",
+            "affinity should have updated to backend 0"
+        );
     }
 }

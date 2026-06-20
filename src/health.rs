@@ -29,7 +29,12 @@ mod tests {
     #[tokio::test]
     async fn health_returns_200() {
         let response = test_router()
-            .oneshot(Request::builder().uri("/health").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri("/health")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
 
@@ -39,7 +44,12 @@ mod tests {
     #[tokio::test]
     async fn health_response_is_json_ok() {
         let response = test_router()
-            .oneshot(Request::builder().uri("/health").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri("/health")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
 
@@ -51,7 +61,12 @@ mod tests {
     #[tokio::test]
     async fn unknown_route_returns_404() {
         let response = test_router()
-            .oneshot(Request::builder().uri("/unknown").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri("/unknown")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
 
@@ -61,7 +76,12 @@ mod tests {
     #[tokio::test]
     async fn health_content_type_is_json() {
         let response = test_router()
-            .oneshot(Request::builder().uri("/health").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri("/health")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
 
