@@ -239,10 +239,53 @@ affinity maps. `BackendState` contains an `Arc<RwLock<CircuitBreaker>>`, and
 `SessionAffinity` contains an `Arc<RwLock<HashMap<...>>>`, so cloned handlers
 still coordinate through the same underlying state.
 
+### Tokio
+
+Tokio is the async runtime Fairlead runs on.
+
+Rust's `async` syntax describes work that can pause and resume, but the language
+itself does not decide how those paused tasks are scheduled, how timers fire, or
+how sockets wake tasks up when data arrives. Tokio provides that machinery.
+
+In Fairlead, Tokio is responsible for:
+
+- Starting the async `main` function through `#[tokio::main]`.
+- Running many request handlers concurrently.
+- Running background health-probe tasks created with `tokio::spawn`.
+- Providing async TCP sockets through `tokio::net::TcpListener`.
+- Providing async timers through `tokio::time::interval`.
+- Providing async locks through `tokio::sync::RwLock`.
+
+The rough mental model is:
+
+```text
+Tokio runtime
+  -> watches sockets, timers, and async locks
+  -> runs tasks until they hit .await
+  -> parks tasks that are waiting
+  -> wakes tasks when their I/O, timer, or lock is ready
+```
+
+This is why Fairlead can have many requests in flight while also running health
+checks. A request waiting for a backend HTTP response does not block the entire
+process. It yields at `.await`, and Tokio runs other ready tasks.
+
+Tokio tasks are lightweight async tasks, not operating-system processes. They
+are closer to scheduled coroutines managed by the runtime. When Fairlead calls:
+
+```rust
+tokio::spawn(async move {
+    // health probe loop
+});
+```
+
+it asks Tokio to run that async block concurrently with the HTTP server and
+other request handlers.
+
 ### `async` and `.await`
 
 An `async fn` can pause at `.await` points while waiting for I/O, timers, or
-locks. Tokio is the async runtime that runs these tasks.
+locks. Tokio is the runtime that polls and resumes these async tasks.
 
 Examples:
 
