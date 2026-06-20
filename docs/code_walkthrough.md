@@ -85,8 +85,21 @@ let app = Router::new()
 ```
 
 A **namespace** is a named hierarchy that organizes code and prevents unrelated
-items from colliding. `axum` is a crate namespace. Inside it, `routing` is a
-module namespace. Inside `routing`, there are names like `get` and `post`.
+items from colliding.
+
+A **crate** is Rust's unit of compilation and packaging. A crate can be:
+
+- A library dependency, such as `axum`, `tokio`, or `reqwest`.
+- The current application package being compiled, in this repo's case
+  `fairlead`.
+
+A **crate namespace** is the top-level namespace owned by a crate. When code says
+`axum::...`, it is looking inside the namespace exported by the `axum` crate.
+Inside that crate namespace, there can be module namespaces, types, functions,
+traits, constants, and macros.
+
+In this example, `axum` is a crate namespace. Inside it, `routing` is a module
+namespace. Inside `routing`, there are names like `get` and `post`.
 
 ```text
 axum
