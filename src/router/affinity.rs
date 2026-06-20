@@ -32,6 +32,11 @@ impl SessionAffinity {
             .await
             .insert(thread_id.to_string(), backend_index);
     }
+
+    #[cfg(test)]
+    pub async fn len(&self) -> usize {
+        self.inner.read().await.len()
+    }
 }
 
 impl Default for SessionAffinity {

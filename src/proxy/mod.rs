@@ -470,6 +470,10 @@ mod tests {
             affinity: SessionAffinity::default(),
             metrics: crate::metrics::RoutingMetrics::default(),
         };
+        start_fairlead_with_state(state).await
+    }
+
+    async fn start_fairlead_with_state(state: AppState) -> String {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move {
@@ -619,9 +623,14 @@ mod tests {
             }),
         );
         let healthy_backend = start_mock(mock).await;
-        let fairlead = start_fairlead(&[&dead_backend, &healthy_backend]).await;
+        let fairlead = start_fairlead_with_backends(vec![
+            backend_with_id(dead_backend, "dead"),
+            backend_with_id(healthy_backend, "healthy"),
+        ])
+        .await;
 
-        let resp = reqwest::Client::new()
+        let client = reqwest::Client::new();
+        let resp = client
             .post(format!("{}/v1/chat/completions", fairlead))
             .json(&json!({"model":"m","messages":[]}))
             .send()
@@ -631,6 +640,21 @@ mod tests {
         assert_eq!(resp.status(), 200);
         let received: serde_json::Value = resp.json().await.unwrap();
         assert_eq!(received["choices"][0]["message"]["content"], "retried");
+
+        let metrics = client
+            .get(format!("{}/metrics", fairlead))
+            .send()
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap();
+        assert!(metrics.contains(
+            "fairlead_retries_total{workload=\"chat_completions\",backend=\"dead\",node=\"\",pool=\"default\",origin_node=\"\",reason=\"connection_error\"} 1"
+        ));
+        assert!(metrics.contains(
+            "fairlead_requests_total{workload=\"chat_completions\",backend=\"healthy\",node=\"\",pool=\"default\",origin_node=\"\",status=\"200\",outcome=\"retried_success\"} 1"
+        ));
     }
 
     #[tokio::test]
@@ -762,6 +786,49 @@ mod tests {
         assert_eq!(resp.status(), 200);
         let received: serde_json::Value = resp.json().await.unwrap();
         assert_eq!(received["data"][0]["embedding"][0], 0.1);
+    }
+
+    #[tokio::test]
+    async fn embeddings_uses_fallback_chain_when_first_backend_open() {
+        let first = Router::new().route(
+            "/v1/embeddings",
+            post(|| async {
+                axum::Json(json!({
+                    "object":"list",
+                    "data":[{"object":"embedding","index":0,"embedding":[9.9]}],
+                    "model":"first"
+                }))
+            }),
+        );
+        let second = Router::new().route(
+            "/v1/embeddings",
+            post(|| async {
+                axum::Json(json!({
+                    "object":"list",
+                    "data":[{"object":"embedding","index":0,"embedding":[0.2]}],
+                    "model":"second"
+                }))
+            }),
+        );
+        let first_url = start_mock(first).await;
+        let second_url = start_mock(second).await;
+
+        let first_backend = BackendState::new(first_url, 1, Duration::from_secs(60));
+        first_backend.circuit.write().await.record_failure();
+        let second_backend = BackendState::new(second_url, 10, Duration::from_secs(60));
+        let fairlead = start_fairlead_with_backends(vec![first_backend, second_backend]).await;
+
+        let resp = reqwest::Client::new()
+            .post(format!("{}/v1/embeddings", fairlead))
+            .json(&json!({"model":"m","input":"hello"}))
+            .send()
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), 200);
+        let received: serde_json::Value = resp.json().await.unwrap();
+        assert_eq!(received["model"], "second");
+        assert_eq!(received["data"][0]["embedding"][0], 0.2);
     }
 
     #[tokio::test]
@@ -1284,6 +1351,94 @@ mod tests {
             r3.json::<serde_json::Value>().await.unwrap()["source"],
             "first"
         );
+    }
+
+    #[tokio::test]
+    async fn affinity_preserved_across_streaming_requests() {
+        let first_sse = "data: {\"source\":\"first\"}\n\ndata: [DONE]\n\n";
+        let second_sse = "data: {\"source\":\"second\"}\n\ndata: [DONE]\n\n";
+        let first = Router::new().route(
+            "/v1/chat/completions",
+            post(move || async move {
+                Response::builder()
+                    .status(200)
+                    .header("content-type", "text/event-stream")
+                    .body(Body::from(first_sse))
+                    .unwrap()
+            }),
+        );
+        let second = Router::new().route(
+            "/v1/chat/completions",
+            post(move || async move {
+                Response::builder()
+                    .status(200)
+                    .header("content-type", "text/event-stream")
+                    .body(Body::from(second_sse))
+                    .unwrap()
+            }),
+        );
+        let first_url = start_mock(first).await;
+        let second_url = start_mock(second).await;
+
+        let first_backend = BackendState::new(first_url, 1, Duration::from_secs(60));
+        let first_handle = first_backend.clone();
+        first_handle.circuit.write().await.record_failure();
+        let second_backend = BackendState::new(second_url, 10, Duration::from_secs(60));
+        let fairlead = start_fairlead_with_backends(vec![first_backend, second_backend]).await;
+
+        let client = reqwest::Client::new();
+        let url = format!("{}/v1/chat/completions", fairlead);
+        let body = json!({"model":"m","messages":[],"stream":true});
+
+        let r1 = client
+            .post(&url)
+            .header("x-fairlead-thread-id", "stream-thread")
+            .json(&body)
+            .send()
+            .await
+            .unwrap();
+        assert!(r1.text().await.unwrap().contains("\"source\":\"second\""));
+
+        first_handle.circuit.write().await.record_success();
+
+        let r2 = client
+            .post(&url)
+            .header("x-fairlead-thread-id", "stream-thread")
+            .json(&body)
+            .send()
+            .await
+            .unwrap();
+        assert!(
+            r2.text().await.unwrap().contains("\"source\":\"second\""),
+            "streaming request should respect recorded affinity"
+        );
+    }
+
+    #[tokio::test]
+    async fn no_thread_id_does_not_pollute_affinity_map() {
+        let mock = Router::new().route(
+            "/v1/chat/completions",
+            post(|| async { axum::Json(json!({"source":"only"})) }),
+        );
+        let backend = start_mock(mock).await;
+        let affinity = SessionAffinity::default();
+        let state = AppState {
+            client: reqwest::Client::new(),
+            backends: vec![BackendState::new(backend, 10, Duration::from_secs(60))],
+            affinity: affinity.clone(),
+            metrics: crate::metrics::RoutingMetrics::default(),
+        };
+        let fairlead = start_fairlead_with_state(state).await;
+
+        let resp = reqwest::Client::new()
+            .post(format!("{}/v1/chat/completions", fairlead))
+            .json(&json!({"model":"m","messages":[]}))
+            .send()
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), 200);
+        assert_eq!(affinity.len().await, 0);
     }
 
     /// Affinity is only updated on success, never on failure. When a preferred

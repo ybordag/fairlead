@@ -143,6 +143,15 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn preferred_at_index_zero_falls_back_when_open() {
+        let backends = vec![
+            tripped("http://a:8000/v1").await,
+            healthy("http://b:8000/v1"),
+        ];
+        assert_eq!(select_backend(&backends, Some(0), None).await, Some(1));
+    }
+
+    #[tokio::test]
     async fn preferred_out_of_bounds_uses_chain() {
         let backends = vec![healthy("http://a:8000/v1")];
         // preferred=99 doesn't exist → chain picks index 0.

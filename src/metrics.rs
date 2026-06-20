@@ -253,6 +253,57 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn metrics_content_type_is_prometheus_format() {
+        let app = router_with_backends(vec![]);
+        let resp = app
+            .oneshot(
+                axum::http::Request::get("/metrics")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        let content_type = resp
+            .headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        assert_eq!(content_type, "text/plain; version=0.0.4; charset=utf-8");
+    }
+
+    #[tokio::test]
+    async fn metrics_escapes_quotes_in_backend_label() {
+        let backend = BackendState::from_config(
+            crate::config::BackendConfig {
+                id: "node-\"a".into(),
+                url: "http://node-a:8000/v1?name=\"quoted\"".into(),
+                node_id: Some("node-\"a".into()),
+                pool: "local-\"llm".into(),
+                workloads: crate::config::WorkloadKind::default_proxy_workloads(),
+                health_path: None,
+            },
+            3,
+            Duration::from_secs(30),
+        );
+        let app = router_with_backends(vec![backend]);
+        let resp = app
+            .oneshot(
+                axum::http::Request::get("/metrics")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        let text = body_text(resp).await;
+        assert!(text.contains("backend=\"node-\\\"a\""));
+        assert!(text.contains("url=\"http://node-a:8000/v1?name=\\\"quoted\\\"\""));
+        assert!(text.contains("node=\"node-\\\"a\""));
+        assert!(text.contains("pool=\"local-\\\"llm\""));
+    }
+
+    #[tokio::test]
     async fn metrics_reports_open_after_failures() {
         let backend = BackendState::new("http://node-b:8000/v1".into(), 1, Duration::from_secs(30));
         // Trip the circuit manually.

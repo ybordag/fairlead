@@ -272,6 +272,36 @@ mod tests {
     }
 
     #[test]
+    fn invalid_circuit_failure_threshold_returns_err() {
+        let result = Config::from_lookup(env(&[("CIRCUIT_FAILURE_THRESHOLD", "abc")]));
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("invalid CIRCUIT_FAILURE_THRESHOLD"));
+    }
+
+    #[test]
+    fn invalid_circuit_cooldown_secs_returns_err() {
+        let result = Config::from_lookup(env(&[("CIRCUIT_COOLDOWN_SECS", "abc")]));
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("invalid CIRCUIT_COOLDOWN_SECS"));
+    }
+
+    #[test]
+    fn invalid_health_probe_interval_returns_err() {
+        let result = Config::from_lookup(env(&[("HEALTH_PROBE_INTERVAL_SECS", "abc")]));
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("invalid HEALTH_PROBE_INTERVAL_SECS"));
+    }
+
+    #[test]
     fn backends_parsed_from_comma_separated_env() {
         let cfg = Config::from_lookup(env(&[(
             "BACKENDS",

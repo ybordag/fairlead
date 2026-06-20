@@ -1,98 +1,61 @@
 # Deferred Tests
 
-Tests that were identified during phase reviews but not implemented at the time.
-Each entry names the test, describes what it covers, and notes why it was deferred.
-Pick these up before promoting the relevant module to production use.
+Tests that are useful but intentionally deferred because they need heavier
+fixtures, log capture, or a runnable demo harness. The low-risk unit and proxy
+tests previously listed here have been implemented.
 
 ---
 
-## `src/config.rs`
+## `src/proxy/mod.rs`
 
-### `invalid_circuit_failure_threshold_returns_err`
-`Config::from_env()` should return `Err` when `CIRCUIT_FAILURE_THRESHOLD` is not a
-valid `u32` (e.g. `"abc"` or `"-1"`).
+### `structured_tracing_fields_are_emitted`
 
-**Why deferred:** The same parse pattern is already tested for `PORT`
-(`invalid_port_returns_err`). Low risk — copy-paste error in the error message is
-the only realistic failure mode.
+Capture tracing output for one successful request and one fallback/retry request.
+Assert that the final request event includes:
 
----
+- request ID
+- workload
+- origin node
+- affinity key
+- selected backend
+- retry count
+- fallback reason
+- status
+- outcome
 
-### `invalid_circuit_cooldown_secs_returns_err`
-Same as above for `CIRCUIT_COOLDOWN_SECS`.
-
----
-
-### `invalid_health_probe_interval_returns_err`
-Same as above for `HEALTH_PROBE_INTERVAL_SECS`.
-
----
-
-## `src/router/fallback.rs`
-
-### `preferred_at_index_zero_falls_back_when_open`
-`select_backend` with `preferred = Some(0)` where `backends[0]` has an open
-circuit should fall back to `backends[1]`.
-
-Currently we only test the reverse direction (`preferred = Some(1)`, falls back to
-`Some(0)`). The code is symmetric but this specific path — where the preferred index
-equals the first chain position — has a subtle skip-check interaction worth verifying
-explicitly.
-
-**Why deferred:** Low risk given the unit tests cover the adjacent cases. One
-additional test.
+**Why deferred:** Capturing `tracing_subscriber` output reliably in async tests
+requires test-specific subscriber setup and isolation. The fields are currently
+covered indirectly by compile-time validation of the tracing calls and by the
+matching metrics assertions.
 
 ---
 
-## `src/metrics.rs`
+### `mid_stream_failure_is_not_retried`
 
-### `metrics_content_type_is_prometheus_format`
-`GET /metrics` response must carry `content-type: text/plain; version=0.0.4`.
-Prometheus scrapers use this header to select the correct parser.
+Use a custom response body that yields one successful Server-Sent Event chunk and
+then returns a stream error. Assert that Fairlead does not replay the request to
+another backend after response bytes have already been sent to the caller.
 
-**Why deferred:** Functional correctness was prioritised; header verification is
-low risk but worth adding before wiring a real Prometheus scraper.
-
----
-
-### `metrics_escapes_quotes_in_backend_label`
-A backend URL containing a double-quote character (`"`) must be escaped to `\"`
-in the Prometheus label so the output remains valid.
-
-The sanitisation (`replace('"', "\\\"")`) is present in the code but the path is
-never exercised by any test.
-
-**Why deferred:** Realistic backend URLs don't contain quotes; added defensively.
+**Why deferred:** This needs a custom fallible body stream fixture rather than the
+simple static SSE bodies used by the current proxy tests. The core policy is
+covered by code structure: retry decisions happen before `upstream_response()`
+turns the upstream response into the caller-visible stream.
 
 ---
 
-### `embeddings_uses_fallback_chain_when_first_backend_open`
-Explicit integration test that `POST /v1/embeddings` also benefits from the
-fallback chain when the first backend's circuit is open.
+## Demo Harness
 
-Currently the fallback tests only exercise `POST /v1/chat/completions`.
-Both endpoints call the same `forward()` function, so this is implicit coverage —
-but explicit coverage guards against a future refactor that accidentally diverges
-the two handlers.
+### `small_cluster_demo_exercises_routing_story`
 
-**Why deferred:** Implicit coverage is strong; explicit test is defensive.
+Once the local mock demo exists, add a smoke test or script assertion that starts
+two mock OpenAI-compatible backends named `spark-a` and `spark-b`, then verifies:
 
----
+- same-node preference
+- peer fallback when same-node circuit is open
+- same-request retry after upstream failure
+- circuit recovery
+- metrics output for request, fallback, retry, and circuit state
 
-### `affinity_preserved_across_streaming_requests`
-`X-Fairlead-Thread-Id` with `"stream": true` should record and respect affinity
-the same way non-streaming requests do. Both paths go through `forward()`, so this
-is implicit — but worth one explicit test to catch any future split of the handlers.
-
-**Why deferred:** Same reasoning as embeddings fallback above.
-
----
-
-### `no_thread_id_does_not_pollute_affinity_map`
-A request sent without `X-Fairlead-Thread-Id` must not insert any entry into the
-affinity map. Currently verified implicitly (most proxy tests don't include the
-header and affinity tests start from a known-empty map), but never asserted
-directly.
-
-**Why deferred:** Implicit coverage; map insertion only happens in one explicit
-`if let Some(ref tid)` branch.
+**Why deferred:** The mock demo does not exist yet. This belongs with the
+Bluewater small-cluster demo task rather than the current unit/integration test
+cleanup.
