@@ -39,6 +39,83 @@ PagedAttention. It knows nothing above itself.
 
 ---
 
+## Mental model: vLLM vs Fairlead
+
+Fairlead is not an inference runtime. It does not load model weights, run CUDA
+kernels, implement attention, tokenize prompts, or produce tokens directly. It is
+the request gateway and control-plane layer in front of inference runtimes.
+
+vLLM is the data-plane inference server. A vLLM process owns:
+
+- Loading model weights into GPU memory.
+- Tokenization and request execution.
+- KV cache management.
+- Continuous batching.
+- GPU kernel execution through CUDA/PyTorch.
+- Streaming OpenAI-compatible responses.
+- Tensor parallelism when configured.
+
+Fairlead owns routing and operational policy around those inference servers. It
+can decide:
+
+- Which backend URL should receive a request.
+- Whether a backend should be skipped because its circuit is open.
+- Whether a thread should prefer the same backend for cache locality.
+- Whether a request should be rejected, retried, or routed elsewhere.
+- What metrics and traces should describe the routing decision.
+
+That means Fairlead is a control-plane gateway, while vLLM is the model-serving
+data plane:
+
+```text
+client or agent
+  -> Fairlead decides where work should go
+  -> vLLM runs the model on GPU
+  -> Fairlead streams the response back
+```
+
+### GPU resource management
+
+Fairlead does not manage GPU memory at the CUDA allocator level. vLLM and other
+GPU workers manage their own memory internally. Fairlead's future role is
+admission control: decide where work is allowed to go based on reported capacity,
+health, priority, and current load.
+
+There are three separate layers:
+
+| Layer | Owner | Example responsibility |
+|---|---|---|
+| GPU execution | vLLM / CUDA / PyTorch | Load weights, allocate KV cache, run kernels |
+| Process placement | k3s / Docker / systemd | Start, stop, restart, and place containers |
+| Request admission | Fairlead | Pick backend, skip unhealthy nodes, avoid oversubscribed resources |
+
+The planned VRAM accounting model is cooperative. GPU consumers register their
+resource use with Fairlead, and Fairlead uses that control-plane view to avoid
+sending new work to nodes without enough reported headroom.
+
+Example:
+
+```text
+node: loki
+  total_vram_mb: 24576
+  registered_consumers:
+    - vllm-llama: 18432 MB
+    - vision-worker: 6144 MB
+  schedulable_headroom: 0 MB
+```
+
+Fairlead does not infer this from CUDA directly in the current design. It relies
+on workers and model servers reporting capacity, or on future node probes that
+publish capacity into Fairlead's registry. This is why the resource registry is a
+scheduler input, not the source of truth for GPU execution.
+
+The current code implements only the gateway part: backend selection, circuit
+breaking, health probing, soft affinity, streaming proxying, and basic metrics.
+VRAM accounting, priority queues, worker registration, and async job dispatch are
+planned later phases.
+
+---
+
 ## What Fairlead does
 
 Two distinct surfaces.
