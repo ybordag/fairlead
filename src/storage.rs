@@ -9,7 +9,7 @@ use std::{
 use crate::config::JobStoreConfig;
 use crate::jobs::{JobQueues, JobRecord, JobRegistryInner, JobStatus};
 
-const JOB_STORE_SCHEMA_VERSION: i32 = 1;
+const JOB_STORE_SCHEMA_VERSION: i32 = 2;
 
 #[cfg(test)]
 pub fn bootstrap_job_store(config: &JobStoreConfig) -> Result<()> {
@@ -49,7 +49,7 @@ impl SqliteJobStore {
             r#"
             SELECT id, type, priority, status, payload_json, callback_url, result_json,
                    error_json, attempts, max_attempts, lease_json, created_at_unix_ms,
-                   updated_at_unix_ms, queue_position
+                   updated_at_unix_ms, queue_position, callback_state_json
             FROM jobs
             ORDER BY order_position ASC, created_at_unix_ms ASC, id ASC
             "#,
@@ -72,6 +72,7 @@ impl SqliteJobStore {
             let created_at_unix_ms: i64 = row.get(11)?;
             let updated_at_unix_ms: i64 = row.get(12)?;
             let queue_position: Option<i64> = row.get(13)?;
+            let callback_state_json: Option<String> = row.get(14)?;
 
             let job = JobRecord {
                 id,
@@ -86,6 +87,9 @@ impl SqliteJobStore {
                     .map(|raw| serde_json::from_str(&raw).map_err(to_sql_error))
                     .transpose()?,
                 error: error_json
+                    .map(|raw| serde_json::from_str(&raw).map_err(to_sql_error))
+                    .transpose()?,
+                callback: callback_state_json
                     .map(|raw| serde_json::from_str(&raw).map_err(to_sql_error))
                     .transpose()?,
                 attempts: row.get::<_, i64>(8)? as u32,
@@ -152,9 +156,9 @@ impl SqliteJobStore {
                 INSERT INTO jobs (
                     id, type, priority, status, payload_json, callback_url, result_json,
                     error_json, attempts, max_attempts, lease_json, created_at_unix_ms,
-                    updated_at_unix_ms, queue_position, order_position
+                    updated_at_unix_ms, queue_position, order_position, callback_state_json
                 )
-                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
+                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)
                 "#,
                 params![
                     job.id,
@@ -172,6 +176,7 @@ impl SqliteJobStore {
                     job.updated_at_unix_ms as i64,
                     queue_positions.get(&job.id).copied(),
                     order_position as i64,
+                    optional_json(&job.callback)?,
                 ],
             )?;
         }
@@ -201,7 +206,8 @@ fn bootstrap_schema(connection: &Connection) -> Result<()> {
             created_at_unix_ms INTEGER NOT NULL,
             updated_at_unix_ms INTEGER NOT NULL,
             queue_position INTEGER,
-            order_position INTEGER NOT NULL DEFAULT 0
+            order_position INTEGER NOT NULL DEFAULT 0,
+            callback_state_json TEXT
         );
 
         CREATE INDEX IF NOT EXISTS idx_jobs_queue
@@ -216,6 +222,12 @@ fn bootstrap_schema(connection: &Connection) -> Result<()> {
         "jobs",
         "order_position",
         "ALTER TABLE jobs ADD COLUMN order_position INTEGER NOT NULL DEFAULT 0",
+    )?;
+    ensure_column(
+        connection,
+        "jobs",
+        "callback_state_json",
+        "ALTER TABLE jobs ADD COLUMN callback_state_json TEXT",
     )?;
     connection.pragma_update(None, "user_version", JOB_STORE_SCHEMA_VERSION)?;
     Ok(())
@@ -336,7 +348,7 @@ mod tests {
     }
 
     #[test]
-    fn sqlite_bootstrap_adds_order_position_to_existing_schema() {
+    fn sqlite_bootstrap_adds_missing_columns_to_existing_schema() {
         let path = unique_db_path("migrate");
         let connection = Connection::open(&path).unwrap();
         connection
@@ -366,13 +378,15 @@ mod tests {
         SqliteJobStore::open(&path).unwrap();
 
         let connection = Connection::open(&path).unwrap();
-        let has_order_position: bool = connection
+        let columns: Vec<String> = connection
             .prepare("PRAGMA table_info(jobs)")
             .unwrap()
             .query_map([], |row| row.get::<_, String>(1))
             .unwrap()
-            .any(|column| column.unwrap() == "order_position");
-        assert!(has_order_position);
+            .map(|column| column.unwrap())
+            .collect();
+        assert!(columns.contains(&"order_position".into()));
+        assert!(columns.contains(&"callback_state_json".into()));
     }
 
     #[test]

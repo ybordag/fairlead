@@ -1,8 +1,12 @@
 use crate::{
-    jobs::{JobRecord, JobResponse},
+    jobs::{JobRegistry, JobResponse},
     metrics::{CallbackLabels, RoutingMetrics},
 };
-use std::time::Duration;
+use std::{
+    collections::HashSet,
+    sync::{Arc, Mutex},
+    time::Duration,
+};
 
 pub const DEFAULT_CALLBACK_MAX_ATTEMPTS: u32 = 3;
 pub const DEFAULT_CALLBACK_TIMEOUT_SECS: u64 = 5;
@@ -25,70 +29,176 @@ impl Default for CallbackPolicy {
     }
 }
 
-pub fn dispatch_job_callback(
+#[derive(Clone, Default)]
+pub struct CallbackDispatcher {
+    in_flight: Arc<Mutex<HashSet<String>>>,
+}
+
+impl CallbackDispatcher {
+    pub fn dispatch(
+        &self,
+        client: reqwest::Client,
+        metrics: RoutingMetrics,
+        policy: CallbackPolicy,
+        jobs: JobRegistry,
+        job_id: String,
+    ) {
+        if !self.mark_in_flight(&job_id) {
+            return;
+        }
+
+        let dispatcher = self.clone();
+        tokio::spawn(async move {
+            deliver_callback(client, metrics, policy, jobs, &job_id).await;
+            dispatcher.clear_in_flight(&job_id);
+        });
+    }
+
+    fn mark_in_flight(&self, job_id: &str) -> bool {
+        self.in_flight
+            .lock()
+            .expect("callback dispatcher mutex poisoned")
+            .insert(job_id.to_string())
+    }
+
+    fn clear_in_flight(&self, job_id: &str) {
+        self.in_flight
+            .lock()
+            .expect("callback dispatcher mutex poisoned")
+            .remove(job_id);
+    }
+}
+
+pub async fn dispatch_pending_callbacks(
+    dispatcher: CallbackDispatcher,
     client: reqwest::Client,
     metrics: RoutingMetrics,
     policy: CallbackPolicy,
-    job: JobRecord,
+    jobs: JobRegistry,
 ) {
-    let Some(callback_url) = job.callback_url.clone() else {
-        return;
-    };
+    for job in jobs.pending_callback_jobs().await {
+        dispatcher.dispatch(
+            client.clone(),
+            metrics.clone(),
+            policy,
+            jobs.clone(),
+            job.id,
+        );
+    }
+}
 
+pub fn spawn_callback_recovery_loop(
+    dispatcher: CallbackDispatcher,
+    client: reqwest::Client,
+    metrics: RoutingMetrics,
+    policy: CallbackPolicy,
+    jobs: JobRegistry,
+) {
     tokio::spawn(async move {
-        let status = job.status.as_str().to_string();
-        let kind = job.kind.as_str().to_string();
-        let max_attempts = policy.max_attempts.max(1);
+        let interval = if policy.retry_delay.is_zero() {
+            Duration::from_secs(1)
+        } else {
+            policy.retry_delay
+        };
 
-        for attempt in 1..=max_attempts {
-            let result = tokio::time::timeout(
-                policy.timeout,
-                client
-                    .post(&callback_url)
-                    .json(&JobResponse { job: job.clone() })
-                    .send(),
+        loop {
+            dispatch_pending_callbacks(
+                dispatcher.clone(),
+                client.clone(),
+                metrics.clone(),
+                policy,
+                jobs.clone(),
             )
             .await;
-
-            let success = match result {
-                Ok(Ok(response)) if response.status().is_success() => {
-                    metrics.record_callback(CallbackLabels {
-                        kind: kind.clone(),
-                        status: status.clone(),
-                        outcome: "success".into(),
-                        http_status: response.status().as_u16(),
-                    });
-                    true
-                }
-                Ok(Ok(response)) => {
-                    metrics.record_callback(CallbackLabels {
-                        kind: kind.clone(),
-                        status: status.clone(),
-                        outcome: "failure".into(),
-                        http_status: response.status().as_u16(),
-                    });
-                    false
-                }
-                Ok(Err(_)) | Err(_) => {
-                    metrics.record_callback(CallbackLabels {
-                        kind: kind.clone(),
-                        status: status.clone(),
-                        outcome: "failure".into(),
-                        http_status: 0,
-                    });
-                    false
-                }
-            };
-
-            if success || attempt == max_attempts {
-                break;
-            }
-
-            if !policy.retry_delay.is_zero() {
-                tokio::time::sleep(policy.retry_delay).await;
-            }
+            tokio::time::sleep(interval).await;
         }
     });
+}
+
+async fn deliver_callback(
+    client: reqwest::Client,
+    metrics: RoutingMetrics,
+    policy: CallbackPolicy,
+    jobs: JobRegistry,
+    job_id: &str,
+) {
+    let max_attempts = policy.max_attempts.max(1);
+
+    for attempt in 1..=max_attempts {
+        let Some(job) = jobs.begin_callback_attempt(job_id).await else {
+            break;
+        };
+        let Some(callback_url) = job.callback_url.clone() else {
+            break;
+        };
+
+        let kind = job.kind.as_str().to_string();
+        let status = job.status.as_str().to_string();
+        let result = tokio::time::timeout(
+            policy.timeout,
+            client
+                .post(&callback_url)
+                .json(&JobResponse { job: job.clone() })
+                .send(),
+        )
+        .await;
+
+        let success = match result {
+            Ok(Ok(response)) if response.status().is_success() => {
+                let http_status = response.status().as_u16();
+                jobs.record_callback_success(job_id, http_status).await;
+                metrics.record_callback(CallbackLabels {
+                    kind,
+                    status,
+                    outcome: "success".into(),
+                    http_status,
+                });
+                true
+            }
+            Ok(Ok(response)) => {
+                let http_status = response.status().as_u16();
+                jobs.record_callback_failure(job_id, Some(http_status), None)
+                    .await;
+                metrics.record_callback(CallbackLabels {
+                    kind,
+                    status,
+                    outcome: "failure".into(),
+                    http_status,
+                });
+                false
+            }
+            Ok(Err(error)) => {
+                jobs.record_callback_failure(job_id, None, Some(error.to_string()))
+                    .await;
+                metrics.record_callback(CallbackLabels {
+                    kind,
+                    status,
+                    outcome: "failure".into(),
+                    http_status: 0,
+                });
+                false
+            }
+            Err(_) => {
+                jobs.record_callback_failure(job_id, None, Some("callback timed out".into()))
+                    .await;
+                metrics.record_callback(CallbackLabels {
+                    kind,
+                    status,
+                    outcome: "failure".into(),
+                    http_status: 0,
+                });
+                false
+            }
+        };
+
+        if success || attempt == max_attempts {
+            break;
+        }
+
+        if !policy.retry_delay.is_zero() {
+            tokio::time::sleep(policy.retry_delay).await;
+        }
+    }
 }
 
 #[cfg(test)]

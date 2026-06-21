@@ -85,8 +85,7 @@ The worker result endpoints let that same lease holder complete a job or report
 retryable/non-retryable failure. Expired leases record timeout state and
 terminal jobs emit duration metrics. Durable SQLite state and callback delivery
 are now implemented for the single-process local deployment shape; richer
-process-level recovery harnesses and durable callback-attempt state remain
-future work.
+process-level recovery harnesses remain future work.
 
 ---
 

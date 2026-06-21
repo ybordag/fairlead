@@ -1405,9 +1405,11 @@ The current code does not:
 - Estimate token count or memory use.
 - Manage CUDA memory.
 - Enforce complete pool-aware routing and placement policies.
-- Push-dispatch jobs to workers or deliver callbacks.
+- Push-dispatch jobs to workers.
 - Reserve GPU memory for a request; resource reports are cooperative control-plane
   hints, not allocator-level reservations.
 
-Push dispatch, callbacks, durable state, completed-job pruning, and complete
-pool-aware placement are future roadmap phases, not current behavior.
+Push dispatch, completed-job pruning, complete pool-aware placement, and
+process-level restart harnesses are future roadmap phases, not current
+behavior. Durable job state and terminal callbacks are current behavior when the
+relevant job store and callback settings are configured.

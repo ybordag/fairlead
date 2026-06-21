@@ -58,8 +58,9 @@ cargo watch -x run
 **Phase 6E complete** (shackle → main). **Phase 6F is in progress on stay**:
 callback delivery and async finalization. Stay currently adds asynchronous
 callbacks for terminal jobs with `callback_url`, bounded retry/timeout policy,
-and callback delivery metrics by job type, terminal status, outcome, and HTTP
-status.
+callback delivery metrics by job type, terminal status, outcome, and HTTP
+status, and SQLite-backed at-least-once callback recovery across ordinary
+Fairlead restarts.
 
 | Phase | Branch | Status |
 |---|---|---|
@@ -166,9 +167,9 @@ implemented. Phase 6E adds opt-in SQLite persistence for job records, queue
 order, claim/lease state, attempts, callback metadata, and terminal state.
 Expired running leases loaded from SQLite are requeued when attempts remain and
 failed when attempts are exhausted. Phase 6F adds asynchronous terminal
-callbacks with bounded retry/timeout policy. Worker deregistration, completed-job
-pruning, durable callback-attempt state, and process-level restart e2e tests are
-still planned.
+callbacks with bounded retry/timeout policy and durable callback delivery state
+in SQLite. Worker deregistration, completed-job pruning, and process-level
+restart e2e tests are still planned.
 
 Job request body:
 ```json

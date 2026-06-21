@@ -7,7 +7,6 @@ use axum::{
 use serde::Serialize;
 
 use crate::{
-    callbacks::dispatch_job_callback,
     jobs::{
         CompleteJobRequest, FailJobRequest, FinishJobResult, JobFailure, JobRecord, JobRegistry,
         RenewJobLeaseResult,
@@ -131,11 +130,12 @@ pub async fn complete_worker_job_handler(
     {
         FinishJobResult::Completed(job) => {
             state.workers.release_slot(&worker.id).await;
-            dispatch_job_callback(
+            state.callback_dispatcher.dispatch(
                 state.client.clone(),
                 state.metrics.clone(),
                 state.callback_policy,
-                job.clone(),
+                state.jobs.clone(),
+                job.id.clone(),
             );
             Json(JobResultResponse { job }).into_response()
         }
@@ -180,11 +180,12 @@ pub async fn fail_worker_job_handler(
         }
         FinishJobResult::Failed(job) => {
             state.workers.release_slot(&worker.id).await;
-            dispatch_job_callback(
+            state.callback_dispatcher.dispatch(
                 state.client.clone(),
                 state.metrics.clone(),
                 state.callback_policy,
-                job.clone(),
+                state.jobs.clone(),
+                job.id.clone(),
             );
             Json(JobResultResponse { job }).into_response()
         }
@@ -204,11 +205,12 @@ pub async fn sweep_expired_leases(state: &AppState) {
         state.workers.release_slot(&worker_id).await;
     }
     for job in report.failed_jobs {
-        dispatch_job_callback(
+        state.callback_dispatcher.dispatch(
             state.client.clone(),
             state.metrics.clone(),
             state.callback_policy,
-            job,
+            state.jobs.clone(),
+            job.id,
         );
     }
 }
@@ -263,7 +265,7 @@ mod tests {
     use std::{
         collections::VecDeque,
         sync::{Arc, Mutex},
-        time::Duration,
+        time::{Duration, SystemTime, UNIX_EPOCH},
     };
     use tokio::sync::mpsc;
     use tower::ServiceExt;
@@ -283,12 +285,21 @@ mod tests {
             affinity: SessionAffinity::default(),
             metrics: RoutingMetrics::default(),
             callback_policy,
+            callback_dispatcher: crate::callbacks::CallbackDispatcher::default(),
             resources: ResourceRegistry::default(),
             resource_policy: ResourceRoutingPolicy::default(),
             priority_limiter: PriorityLimiter::default(),
             jobs,
             workers,
         }
+    }
+
+    fn unique_db_path(prefix: &str) -> std::path::PathBuf {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!("fairlead-scheduler-{prefix}-{unique}.sqlite3"))
     }
 
     async fn start_callback_target(status: StatusCode) -> (String, mpsc::Receiver<Value>) {
@@ -384,6 +395,26 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
         panic!("metric not found: {needle}");
+    }
+
+    async fn wait_for_callback_status(
+        jobs: &JobRegistry,
+        job_id: &str,
+        status: crate::jobs::JobCallbackStatus,
+        attempts: u32,
+    ) {
+        for _ in 0..50 {
+            let job = jobs.get(job_id).await.unwrap();
+            if job
+                .callback
+                .as_ref()
+                .is_some_and(|callback| callback.status == status && callback.attempts == attempts)
+            {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("callback status not observed for {job_id}");
     }
 
     #[tokio::test]
@@ -1146,6 +1177,146 @@ mod tests {
         wait_for_metric(
             app,
             "fairlead_job_callbacks_total{type=\"cluster\",status=\"failed\",outcome=\"failure\",http_status=\"0\"} 1",
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn pending_sqlite_callback_is_delivered_after_registry_restart() {
+        let (callback_url, mut callbacks) = start_callback_target(StatusCode::OK).await;
+        let path = unique_db_path("callback-restart");
+        let jobs =
+            JobRegistry::with_store(crate::storage::SqliteJobStore::open(&path).unwrap()).unwrap();
+        let submitted = jobs
+            .submit(SubmitJobRequest {
+                kind: JobKind::VisionAnalysis,
+                priority: Priority::Batch,
+                payload: Value::Null,
+                callback_url: Some(callback_url),
+            })
+            .await
+            .unwrap();
+        jobs.claim_next_for_worker("vision-worker", &[submitted.kind], 30_000)
+            .await
+            .unwrap();
+        jobs.complete_lease(&submitted.id, "vision-worker", json!({"ok": true}))
+            .await;
+
+        let restored =
+            JobRegistry::with_store(crate::storage::SqliteJobStore::open(&path).unwrap()).unwrap();
+        assert_eq!(restored.pending_callback_jobs().await.len(), 1);
+
+        crate::callbacks::dispatch_pending_callbacks(
+            crate::callbacks::CallbackDispatcher::default(),
+            reqwest::Client::new(),
+            RoutingMetrics::default(),
+            crate::callbacks::CallbackPolicy {
+                max_attempts: 1,
+                timeout: Duration::from_secs(1),
+                retry_delay: Duration::from_millis(0),
+            },
+            restored.clone(),
+        )
+        .await;
+
+        let callback = tokio::time::timeout(Duration::from_secs(2), callbacks.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(callback["job"]["id"], submitted.id);
+        wait_for_callback_status(
+            &restored,
+            &submitted.id,
+            crate::jobs::JobCallbackStatus::Delivered,
+            1,
+        )
+        .await;
+
+        let persisted =
+            JobRegistry::with_store(crate::storage::SqliteJobStore::open(&path).unwrap()).unwrap();
+        assert!(persisted.pending_callback_jobs().await.is_empty());
+        assert_eq!(
+            persisted
+                .get(&submitted.id)
+                .await
+                .unwrap()
+                .callback
+                .unwrap()
+                .status,
+            crate::jobs::JobCallbackStatus::Delivered
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_sqlite_callback_attempt_retries_after_registry_restart() {
+        let (callback_url, mut callbacks) =
+            start_sequence_callback_target(vec![StatusCode::INTERNAL_SERVER_ERROR, StatusCode::OK])
+                .await;
+        let path = unique_db_path("callback-retry-restart");
+        let jobs =
+            JobRegistry::with_store(crate::storage::SqliteJobStore::open(&path).unwrap()).unwrap();
+        let submitted = jobs
+            .submit(SubmitJobRequest {
+                kind: JobKind::Cluster,
+                priority: Priority::Background,
+                payload: Value::Null,
+                callback_url: Some(callback_url),
+            })
+            .await
+            .unwrap();
+        jobs.claim_next_for_worker("cluster-worker", &[submitted.kind], 30_000)
+            .await
+            .unwrap();
+        jobs.complete_lease(&submitted.id, "cluster-worker", json!({"ok": true}))
+            .await;
+
+        crate::callbacks::dispatch_pending_callbacks(
+            crate::callbacks::CallbackDispatcher::default(),
+            reqwest::Client::new(),
+            RoutingMetrics::default(),
+            crate::callbacks::CallbackPolicy {
+                max_attempts: 1,
+                timeout: Duration::from_secs(1),
+                retry_delay: Duration::from_millis(0),
+            },
+            jobs.clone(),
+        )
+        .await;
+        tokio::time::timeout(Duration::from_secs(2), callbacks.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        wait_for_callback_status(
+            &jobs,
+            &submitted.id,
+            crate::jobs::JobCallbackStatus::Pending,
+            1,
+        )
+        .await;
+
+        let restored =
+            JobRegistry::with_store(crate::storage::SqliteJobStore::open(&path).unwrap()).unwrap();
+        crate::callbacks::dispatch_pending_callbacks(
+            crate::callbacks::CallbackDispatcher::default(),
+            reqwest::Client::new(),
+            RoutingMetrics::default(),
+            crate::callbacks::CallbackPolicy {
+                max_attempts: 1,
+                timeout: Duration::from_secs(1),
+                retry_delay: Duration::from_millis(0),
+            },
+            restored.clone(),
+        )
+        .await;
+        tokio::time::timeout(Duration::from_secs(2), callbacks.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        wait_for_callback_status(
+            &restored,
+            &submitted.id,
+            crate::jobs::JobCallbackStatus::Delivered,
+            2,
         )
         .await;
     }

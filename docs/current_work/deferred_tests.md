@@ -188,15 +188,18 @@ registry boundary directly.
 
 Phase 6F now covers successful terminal callbacks, transient callback retry,
 terminal callback failure metrics, callback timeout handling, callback
-success/failure metrics, cancellation callbacks, and no callback on retryable
-job requeue. Remaining deferred tests:
+success/failure metrics, cancellation callbacks, no callback on retryable job
+requeue, SQLite-backed pending callback delivery after registry restart, and
+SQLite-backed failed callback attempt retry after registry restart. Remaining
+deferred tests:
 
-- Durable callback delivery state if callback attempts are persisted to SQLite.
-- Callback retry recovery across Fairlead process restart.
+- Callback retry recovery across a full Fairlead OS-process restart.
+- Duplicate callback behavior when Fairlead crashes after the receiver handles
+  the callback but before Fairlead records delivery success.
 - Process-level e2e callback delivery with an actual Fairlead process and
   callback receiver.
 - Deployment-level callback delivery on Thor/Loki.
 
-**Why deferred:** These need durable callback-attempt state or a larger
-process/deployment harness. The current Stay tests cover the in-process
-delivery boundary directly.
+**Why deferred:** These need a larger process/deployment harness or controlled
+crash injection. The current Stay tests cover the durable registry boundary
+directly.

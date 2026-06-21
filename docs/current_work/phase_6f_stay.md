@@ -12,6 +12,7 @@ Stay includes:
 - Callback delivery when a terminal job has `callback_url`.
 - Callback delivery metrics separate from compute job state.
 - Retry and timeout policy for callback delivery.
+- Durable callback delivery state for SQLite-backed restart recovery.
 - Final async demo and documentation updates.
 
 Stay does not include:
@@ -52,7 +53,28 @@ Implemented:
 - Added tests for transient failure followed by success, timeout handling, and
   callback config validation.
 
+## Third Slice
+
+Implemented:
+
+- Added durable callback delivery state to each terminal job:
+  - `pending` until a callback receives a 2xx response.
+  - `delivered` after a successful callback.
+  - attempt count, last attempt timestamp, delivered timestamp, last HTTP
+    status, and last error.
+- Persisted callback delivery state in the SQLite job store.
+- Added a callback dispatcher that keeps an in-process in-flight guard so a
+  recovery sweep does not dispatch the same callback twice concurrently.
+- Added a recovery loop that scans pending callback jobs after startup and
+  retries delivery.
+- Preserved at-least-once callback semantics across restarts. If Fairlead
+  crashes after the receiver handles a callback but before Fairlead records
+  success, the callback can be sent again after restart.
+- Added SQLite restart tests for:
+  - pending callback delivery after registry restart.
+  - failed callback attempt retry after registry restart.
+- Updated storage migration coverage for `callback_state_json`.
+
 Remaining Stay work:
 
-- Decide whether callback state should become durable in SQLite.
 - Add process-level or demo-level callback e2e coverage.

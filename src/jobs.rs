@@ -13,9 +13,7 @@ use std::{
 };
 use tokio::sync::RwLock;
 
-use crate::{
-    callbacks::dispatch_job_callback, config::Priority, storage::SqliteJobStore, AppState,
-};
+use crate::{config::Priority, storage::SqliteJobStore, AppState};
 
 pub const ATTEMPT_TIMEOUT_ERROR: &str = "attempt timed out";
 
@@ -88,11 +86,38 @@ pub struct JobRecord {
     pub callback_url: Option<String>,
     pub result: Option<Value>,
     pub error: Option<JobFailure>,
+    pub callback: Option<JobCallbackState>,
     pub attempts: u32,
     pub max_attempts: u32,
     pub lease: Option<JobLease>,
     pub created_at_unix_ms: u128,
     pub updated_at_unix_ms: u128,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum JobCallbackStatus {
+    Pending,
+    Delivered,
+}
+
+impl JobCallbackStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Pending => "pending",
+            Self::Delivered => "delivered",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct JobCallbackState {
+    pub status: JobCallbackStatus,
+    pub attempts: u32,
+    pub last_attempt_at_unix_ms: Option<u128>,
+    pub delivered_at_unix_ms: Option<u128>,
+    pub last_http_status: Option<u16>,
+    pub last_error: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -242,6 +267,7 @@ impl JobRegistry {
             callback_url,
             result: None,
             error: None,
+            callback: None,
             attempts: 0,
             max_attempts: 3,
             lease: None,
@@ -409,6 +435,72 @@ impl JobRegistry {
         jobs
     }
 
+    pub async fn pending_callback_jobs(&self) -> Vec<JobRecord> {
+        let guard = self.inner.read().await;
+        guard
+            .order
+            .iter()
+            .filter_map(|id| guard.jobs.get(id))
+            .filter(|job| job.callback_url.is_some() && job.status.is_terminal())
+            .filter(|job| {
+                job.callback
+                    .as_ref()
+                    .is_some_and(|callback| callback.status == JobCallbackStatus::Pending)
+            })
+            .cloned()
+            .collect()
+    }
+
+    pub async fn begin_callback_attempt(&self, id: &str) -> Option<JobRecord> {
+        let mut guard = self.inner.write().await;
+        let job = guard.jobs.get_mut(id)?;
+        if job.callback_url.is_none() || !job.status.is_terminal() {
+            return None;
+        }
+        let callback = job.callback.as_mut()?;
+        if callback.status != JobCallbackStatus::Pending {
+            return None;
+        }
+
+        callback.attempts += 1;
+        callback.last_attempt_at_unix_ms = Some(unix_ms());
+        let job = job.clone();
+        self.persist_locked(&guard).ok()?;
+        Some(job)
+    }
+
+    pub async fn record_callback_success(&self, id: &str, http_status: u16) -> Option<JobRecord> {
+        let mut guard = self.inner.write().await;
+        let job = guard.jobs.get_mut(id)?;
+        let callback = job.callback.as_mut()?;
+        callback.status = JobCallbackStatus::Delivered;
+        callback.delivered_at_unix_ms = Some(unix_ms());
+        callback.last_http_status = Some(http_status);
+        callback.last_error = None;
+        let job = job.clone();
+        self.persist_locked(&guard).ok()?;
+        Some(job)
+    }
+
+    pub async fn record_callback_failure(
+        &self,
+        id: &str,
+        http_status: Option<u16>,
+        error: Option<String>,
+    ) -> Option<JobRecord> {
+        let mut guard = self.inner.write().await;
+        let job = guard.jobs.get_mut(id)?;
+        let callback = job.callback.as_mut()?;
+        if callback.status != JobCallbackStatus::Pending {
+            return None;
+        }
+        callback.last_http_status = http_status;
+        callback.last_error = error;
+        let job = job.clone();
+        self.persist_locked(&guard).ok()?;
+        Some(job)
+    }
+
     pub async fn claim_next_for_worker(
         &self,
         worker_id: &str,
@@ -525,6 +617,7 @@ impl JobRegistry {
             job.error = None;
             job.lease = None;
             job.updated_at_unix_ms = now;
+            prepare_callback(job);
             job.clone()
         };
         if self.persist_locked(&guard).is_err() {
@@ -578,6 +671,7 @@ impl JobRegistry {
             FinishJobResult::Requeued(job)
         } else {
             job.status = JobStatus::Failed;
+            prepare_callback(job);
             let job = job.clone();
             if self.persist_locked(&guard).is_err() {
                 return FinishJobResult::NotFound;
@@ -598,7 +692,9 @@ impl JobRegistry {
 
         let priority = job.priority;
         job.status = JobStatus::Cancelled;
-        job.updated_at_unix_ms = unix_ms();
+        let now = unix_ms();
+        job.updated_at_unix_ms = now;
+        prepare_callback(job);
         let job = job.clone();
         guard.queues.remove(priority, id);
         if self.persist_locked(&guard).is_err() {
@@ -614,6 +710,33 @@ impl JobRegistry {
                 .map_err(|err| err.to_string())?;
         }
         Ok(())
+    }
+}
+
+fn prepare_callback(job: &mut JobRecord) {
+    if job.callback_url.is_none() || !job.status.is_terminal() {
+        return;
+    }
+    if job
+        .callback
+        .as_ref()
+        .is_some_and(|callback| callback.status == JobCallbackStatus::Delivered)
+    {
+        return;
+    }
+    job.callback.get_or_insert(JobCallbackState {
+        status: JobCallbackStatus::Pending,
+        attempts: 0,
+        last_attempt_at_unix_ms: None,
+        delivered_at_unix_ms: None,
+        last_http_status: None,
+        last_error: None,
+    });
+    if let Some(callback) = job.callback.as_mut() {
+        callback.status = JobCallbackStatus::Pending;
+        callback.delivered_at_unix_ms = None;
+        callback.last_error = None;
+        callback.last_http_status = None;
     }
 }
 
@@ -652,6 +775,7 @@ fn requeue_expired_leases_locked(inner: &mut JobRegistryInner) -> LeaseExpiryRep
             report.requeued += 1;
         } else {
             job.status = JobStatus::Failed;
+            prepare_callback(job);
             report.failed_jobs.push(job.clone());
             report.failed += 1;
         }
@@ -720,11 +844,12 @@ pub async fn cancel_job(State(state): State<AppState>, Path(id): Path<String>) -
             if let Some(lease) = &job.lease {
                 state.workers.release_slot(&lease.worker_id).await;
             }
-            dispatch_job_callback(
+            state.callback_dispatcher.dispatch(
                 state.client.clone(),
                 state.metrics.clone(),
                 state.callback_policy,
-                job.clone(),
+                state.jobs.clone(),
+                job.id.clone(),
             );
             Json(JobResponse { job }).into_response()
         }
@@ -817,6 +942,7 @@ mod tests {
             affinity: SessionAffinity::default(),
             metrics: RoutingMetrics::default(),
             callback_policy: crate::callbacks::CallbackPolicy::default(),
+            callback_dispatcher: crate::callbacks::CallbackDispatcher::default(),
             resources: ResourceRegistry::default(),
             resource_policy: ResourceRoutingPolicy::default(),
             priority_limiter: PriorityLimiter::default(),

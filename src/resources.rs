@@ -380,6 +380,7 @@ mod tests {
             affinity: SessionAffinity::default(),
             metrics: RoutingMetrics::default(),
             callback_policy: crate::callbacks::CallbackPolicy::default(),
+            callback_dispatcher: crate::callbacks::CallbackDispatcher::default(),
             resources,
             resource_policy: ResourceRoutingPolicy::default(),
             priority_limiter: crate::priority::PriorityLimiter::default(),
