@@ -126,11 +126,6 @@ Fairlead currently provides:
 
 It does not yet provide:
 
-- Shared sync/async pool demos and finalized pool deployment notes. Synchronous
-  backend pool configuration and ordered fallback chains are implemented in
-  Phase 7B; async worker pool placement and per-pool metrics are implemented in
-  Phase 7C; optional strict worker/workload pool validation is implemented in
-  Phase 7D.
 - CPU resource accounting and richer resource dimensions beyond coarse VRAM/load.
 - Durable starvation/fairness policy beyond current priority queue ordering.
 - Worker deregistration, graceful shutdown, or completed-job pruning.
@@ -502,7 +497,7 @@ Hard parts:
 Async jobs need durable-enough state to survive normal service behavior without
 turning Fairlead into the system of record for business data.
 
-Proposed API surface:
+Implemented initial API surface:
 
 ```text
 POST   /v1/jobs
@@ -539,7 +534,7 @@ Implemented early Phase 6B scope:
 - Non-dispatching scheduler preview endpoint for matching queued jobs to fresh
   workers.
 
-Future Phase 6C+ scope:
+Scheduler boundary that guided Phase 6C+ work:
 
 - Start with bounded compute jobs, not arbitrary long-running workflows.
 - Treat a multi-minute image-processing attempt as timed out unless the workload
@@ -557,11 +552,13 @@ rationale, and Temporal deferral rule.
 
 General workloads require workers that can announce what they can do.
 
-Proposed API surface:
+Implemented API surface:
 
 ```text
 POST   /v1/workers/register
 POST   /v1/workers/{id}/heartbeat
+POST   /v1/workers/{id}/drain
+POST   /v1/workers/{id}/reactivate
 DELETE /v1/workers/{id}
 GET    /v1/workers
 ```
@@ -848,13 +845,27 @@ async workers.
 Goal: make the async job manager more operationally complete without adding new
 workload protocols.
 
-- Add worker deregistration API and graceful drain semantics.
-- Add completed-job pruning policy.
-- Add stronger idempotency semantics for submit, complete, fail, cancel, and
-  callback handling where needed.
-- Add background expiry/recovery loops if claim-time sweeps are not enough.
-- Add process-level restart e2e harnesses for jobs, leases, callbacks, and
-  metrics.
+- **8A Bowline: Worker Lifecycle**
+  - [x] Add worker drain/reactivate endpoints.
+  - [x] Add worker deregistration API.
+  - [x] Idle deregistration removes workers immediately.
+  - [x] Busy deregistration marks workers draining so held leases can finish.
+  - [x] Preview and claim skip draining workers for new work.
+  - [x] Audit worker lifecycle edge tests and deferred e2e coverage.
+  - [x] Add final 8A docs/readiness pass before PR.
+- **8B Stopper: Retention And Pruning**
+  - Add completed-job pruning policy.
+  - Add configurable retention limits.
+  - Add SQLite pruning behavior and metrics.
+- **8C Splice: Idempotency**
+  - Add stronger idempotency semantics for submit, complete, fail, cancel, and
+    callback handling where needed.
+- **8D Clove: Background Maintenance Loops**
+  - Add background expiry/recovery loops if claim-time sweeps are not enough.
+  - Add optional background pruning loop if 8B needs it.
+- **8E Reef: Process-Level E2E Harness**
+  - Add process-level restart e2e harnesses for jobs, leases, callbacks, and
+    metrics.
 - Keep Temporal deferred unless application workflows need durable multi-step
   orchestration beyond bounded compute jobs.
 

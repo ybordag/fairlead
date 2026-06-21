@@ -145,13 +145,14 @@ from one of those paths.
 
 ```rust
 use axum::{
-    routing::{get, post},
+    routing::{delete, get, post},
     Router,
 };
 ```
 
-This imports three Axum items into `src/main.rs`:
+This imports four Axum items into `src/main.rs`:
 
+- `delete`, from `axum::routing::delete`.
 - `get`, from `axum::routing::get`.
 - `post`, from `axum::routing::post`.
 - `Router`, from `axum::Router`.
@@ -677,6 +678,9 @@ Router::new()
     .route("/v1/scheduler/preview", get(scheduler::preview_next_assignment_handler))
     .route("/v1/workers", get(workers::list_workers))
     .route("/v1/workers/register", post(workers::register_worker))
+    .route("/v1/workers/:id", delete(workers::deregister_worker))
+    .route("/v1/workers/:id/drain", post(workers::drain_worker))
+    .route("/v1/workers/:id/reactivate", post(workers::reactivate_worker))
     .route("/v1/workers/:id/claim", post(scheduler::claim_worker_job_handler))
     .route(
         "/v1/workers/:worker_id/jobs/:job_id/renew",
@@ -711,6 +715,9 @@ This means:
   `scheduler::preview_next_assignment_handler`.
 - `GET /v1/workers` calls `workers::list_workers`.
 - `POST /v1/workers/register` calls `workers::register_worker`.
+- `DELETE /v1/workers/{id}` calls `workers::deregister_worker`.
+- `POST /v1/workers/{id}/drain` calls `workers::drain_worker`.
+- `POST /v1/workers/{id}/reactivate` calls `workers::reactivate_worker`.
 - `POST /v1/workers/{id}/claim` calls `scheduler::claim_worker_job_handler`.
 - `POST /v1/workers/{worker_id}/jobs/{job_id}/renew` calls
   `scheduler::renew_worker_job_lease_handler`.

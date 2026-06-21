@@ -7,12 +7,13 @@ health, circuit state, and session affinity.
 
 The name comes from sailing: a fairlead is a fitting that guides lines in exactly the right direction without friction or fouling.
 
-**Status:** Phase 7C is complete on `tactician`. Phase 7 adds pool-aware
-placement: first the shared pool/workload policy model, then synchronous backend
-routing, then async worker placement.
+**Status:** Phase 8A is complete on `bowline`. Phase 8 hardens the async
+scheduler after the completed Phase 7 pool-aware placement work.
 Fairlead currently runs as an Axum HTTP service with `/health`, `/metrics`,
 `/v1/models`, `/v1/resources`, `/v1/resources/report`, `/v1/jobs`,
-`/v1/jobs/{id}`, `/v1/workers`, `/v1/workers/{id}/claim`,
+`/v1/jobs/{id}`, `/v1/workers`, `/v1/workers/{id}`,
+`/v1/workers/{id}/drain`, `/v1/workers/{id}/reactivate`,
+`/v1/workers/{id}/claim`,
 `/v1/workers/{worker_id}/jobs/{job_id}/renew`,
 `/v1/workers/{worker_id}/jobs/{job_id}/complete`,
 `/v1/workers/{worker_id}/jobs/{job_id}/fail`, `/v1/scheduler/preview`,
@@ -108,11 +109,13 @@ Implemented generalization work includes:
   `STRICT_WORKER_POOLS=true` bounds worker registration to configured or derived
   pools, and `STRICT_WORKLOAD_POOLS=true` requires explicit policy for every
   known workload.
+- **Worker lifecycle controls** so operators can drain, reactivate, and
+  deregister async workers without dropping held leases.
 
-Phase 7D closes the shared pool model with strict validation flags, shared local
-demos, and DGX/shared deployment notes. Future phases add scheduler hardening,
-adapter boundaries, richer resource policy, external scale/overflow, and
-transport/SDK hardening.
+Phase 8A adds graceful worker lifecycle controls. Future Phase 8 work adds
+completed-job pruning, stronger idempotency semantics, background maintenance
+loops, and process-level e2e harnesses. Later phases add adapter boundaries,
+richer resource policy, external scale/overflow, and transport/SDK hardening.
 
 See [`docs/planning/roadmap.md`](docs/planning/roadmap.md) for the
 implementation plan and acceptance criteria.

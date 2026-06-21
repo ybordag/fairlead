@@ -312,9 +312,10 @@ claim path: Fairlead grants a bounded lease, marks the job running, and returns
 it to the worker. Phase 6D adds worker completion/failure, retryable requeue,
 worker capacity accounting, duration metrics, and explicit timeout state for
 expired attempts. Fairlead also opportunistically requeues expired running
-leases before fresh workers claim more work. Persistence and callback delivery
-are later Phase 6 work. The design belongs in the architecture because it
-defines Fairlead's boundary: Fairlead should be a compute control plane, not a
+leases before fresh workers claim more work. Later Phase 6 slices add opt-in
+SQLite persistence and bounded terminal callback delivery. Phase 8A adds worker
+lifecycle controls. The design belongs in the architecture because it defines
+Fairlead's boundary: Fairlead should be a compute control plane, not a
 general-purpose workflow engine.
 
 ```
@@ -325,6 +326,9 @@ DELETE /v1/jobs/{id} — cancel queued or running work when supported
 GET  /v1/scheduler/preview    — preview next job/worker match without mutation
 POST /v1/workers/register       — register or update worker capabilities
 POST /v1/workers/{id}/heartbeat — refresh worker liveness
+POST /v1/workers/{id}/drain     — stop assigning new jobs to a worker
+POST /v1/workers/{id}/reactivate — let a drained worker accept new jobs again
+DELETE /v1/workers/{id}         — remove idle workers or drain busy workers
 POST /v1/workers/{id}/claim     — lease a compatible queued job to a worker
 POST /v1/workers/{worker_id}/jobs/{job_id}/renew — renew a held lease
 POST /v1/workers/{worker_id}/jobs/{job_id}/complete — complete a held job
@@ -332,7 +336,7 @@ POST /v1/workers/{worker_id}/jobs/{job_id}/fail — fail or requeue a held job
 GET  /v1/workers                — list registered workers
 ```
 
-Current Phase 6 behavior:
+Current async scheduler behavior:
 
 - submitted jobs enter `queued`
 - submitted jobs are tracked in in-memory per-priority queues
@@ -344,10 +348,18 @@ Current Phase 6 behavior:
   `fairlead_job_duration_seconds_count{priority,type,status}`,
   `fairlead_job_duration_seconds_sum{priority,type,status}`, and
   `fairlead_job_duration_seconds_max{priority,type,status}`
-- job state is in memory and is lost on process restart
+- job state is in memory by default; opt-in SQLite state persists jobs, queue
+  order, leases, terminal state, callback metadata, and callback delivery state
+  across ordinary Fairlead restarts
 - cancellation marks queued jobs `cancelled`
 - cancellation removes queued jobs from queue depth and wait-time accounting
-- registered workers are listed with stale status
+- registered workers are listed with stale and draining status
+- workers can be drained, reactivated, or deregistered
+- draining workers remain registered but are skipped by scheduler preview and
+  worker-pull claims for new work
+- busy deregistration marks the worker draining and returns `202 Accepted` so
+  held leases can renew, complete, or fail; idle deregistration removes the
+  worker immediately
 - `/metrics` exposes `fairlead_workers{type,status}`
 - worker snapshots track `in_flight_jobs`, optional `max_concurrent_jobs`, and
   optional `available_job_slots`
@@ -377,8 +389,7 @@ Current Phase 6 behavior:
   retry and timeout policy
 - SQLite-backed callback state gives at-least-once delivery across ordinary
   Fairlead restarts by retrying pending callbacks after startup
-- durable job state is available through opt-in SQLite, but there is no
-  background scheduler loop yet
+- there is no background scheduler loop yet
 
 Current worker-pull execution flow:
 
@@ -407,6 +418,12 @@ job submitted
 - `POST /v1/workers/register` — workers announce capabilities, endpoint, node
   metadata, and pool metadata
 - `POST /v1/workers/{id}/heartbeat` — workers refresh liveness
+- `POST /v1/workers/{id}/drain` — workers remain registered but stop receiving
+  new claims
+- `POST /v1/workers/{id}/reactivate` — drained workers can receive new claims
+  again
+- `DELETE /v1/workers/{id}` — idle workers are removed; busy workers are marked
+  draining so held leases can finish
 - `GET /v1/workers` — current in-memory worker registry
 - `POST /v1/workers/{id}/claim` — worker-pull claim endpoint
 - `POST /v1/workers/{worker_id}/jobs/{job_id}/renew` — lease renewal
