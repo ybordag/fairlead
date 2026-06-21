@@ -18,7 +18,7 @@ detail.
 
 - [`planning/design.md`](planning/design.md) — design horizon and longer-term
   product shape.
-- [`planning/roadmap.md`](planning/roadmap.md) — completed phases, current Trim
+- [`planning/roadmap.md`](planning/roadmap.md) — completed phases, current Clew
   scope, future phases, acceptance criteria, and deferred work.
 
 ## Implementation And Examples
@@ -32,10 +32,11 @@ detail.
 
 ## Current Work
 
+- [`current_work/phase_6a_clew.md`](current_work/phase_6a_clew.md) — active
+  Phase 6A scope and progress notes.
 - [`current_work/deferred_tests.md`](current_work/deferred_tests.md) — useful
   tests intentionally deferred until there is a CI-friendly integration harness.
 - Current phase notes should live in `current_work/` while a phase is active.
-  Trim is finished, so there is no active phase note right now.
 
 ## Maintenance Rule
 

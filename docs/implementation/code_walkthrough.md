@@ -101,6 +101,7 @@ mod config;
 mod error;
 mod health;
 mod metrics;
+mod models;
 mod priority;
 mod proxy;
 mod resources;
@@ -376,6 +377,7 @@ mod config;
 mod error;
 mod health;
 mod metrics;
+mod models;
 mod priority;
 mod proxy;
 mod resources;
@@ -404,7 +406,7 @@ pub struct AppState {
 - `client` is the reusable outbound HTTP client.
 - `backends` is the ordered list of backend runtime states: URL, stable backend
   ID, optional node ID, pool, supported workloads, and circuit breaker.
-- `affinity` maps thread IDs to preferred backend indexes.
+- `affinity` maps workload-scoped thread IDs to preferred backend indexes.
 - `metrics` stores in-process request/retry/fallback aggregates.
 - `resources` stores cooperative VRAM/load reports.
 - `resource_policy` controls whether resource-aware eligibility is active.
@@ -611,6 +613,7 @@ let app = build_router(state);
 Router::new()
     .route("/health", get(health::health))
     .route("/metrics", get(metrics::metrics))
+    .route("/v1/models", get(models::list_models))
     .route("/v1/resources", get(resources::list_resources))
     .route("/v1/resources/report", post(resources::report_resources))
     .route("/v1/chat/completions", post(proxy::chat_completions))
@@ -622,6 +625,7 @@ This means:
 
 - `GET /health` calls `health::health`.
 - `GET /metrics` calls `metrics::metrics`.
+- `GET /v1/models` calls `models::list_models`.
 - `GET /v1/resources` calls `resources::list_resources`.
 - `POST /v1/resources/report` calls `resources::report_resources`.
 - `POST /v1/chat/completions` calls `proxy::chat_completions`.
@@ -774,17 +778,23 @@ priority capacity on synchronous proxy requests.
 ### 6. Look Up Preferred Backend
 
 ```rust
-let preferred = match thread_id {
-    Some(ref tid) => state.affinity.preferred(tid).await,
+let affinity_key = thread_id
+    .as_deref()
+    .map(|tid| affinity_key(workload_kind, tid));
+
+let preferred = match affinity_key {
+    Some(ref key) => state.affinity.preferred(key).await,
     None => None,
 };
 ```
 
 If the request has a thread ID, Fairlead asks the affinity map whether that
-thread already has a preferred backend index.
+thread already has a preferred backend index for this workload. The public header
+is still `X-Fairlead-Thread-Id`, but the stored key is scoped, for example
+`chat_completions:abc` or `embeddings:abc`.
 
 The `ref` means "borrow the string inside `Some` rather than moving it." We still
-need `thread_id` later when recording affinity.
+need `affinity_key` later when recording affinity.
 
 ### 7. Build Resource Selection State
 
@@ -946,7 +956,7 @@ http://spark-a:8000/v1/chat/completions
 let upstream = match state
     .client
     .post(&url)
-    .header("content-type", "application/json")
+    .with_upstream_headers(headers)
     .body(body)
     .send()
     .await
@@ -965,6 +975,17 @@ let upstream = match state
 ```
 
 This uses `reqwest` to send the raw request body to the selected backend.
+
+`with_upstream_headers` applies Fairlead's request-header policy:
+
+- Preserve incoming `content-type`, or default to `application/json` if it is
+  missing.
+- Forward `authorization`.
+- Forward allowlisted provider opt-in headers such as `openai-organization`,
+  `openai-project`, `anthropic-version`, `anthropic-beta`, and `x-goog-api-key`.
+- Do not forward Fairlead routing/control headers such as
+  `x-fairlead-thread-id`, `x-fairlead-origin-node`, or
+  `x-fairlead-priority`.
 
 The `match` handles success or failure:
 
@@ -990,8 +1011,8 @@ if status.is_server_error() {
     return upstream_response(upstream, status);
 } else {
     backend.circuit.write().await.record_success();
-    if let Some(ref tid) = thread_id {
-        state.affinity.record(tid, idx).await;
+    if let Some(ref key) = affinity_key {
+        state.affinity.record(key, idx).await;
     }
 }
 ```
@@ -1012,7 +1033,7 @@ the backend's circuit breaker.
 On success, if there was a thread ID, Fairlead records:
 
 ```text
-thread_id -> backend_index
+workload:thread_id -> backend_index
 ```
 
 That is session affinity.
@@ -1191,7 +1212,8 @@ Fairlead does:
 4. `forward` extracts origin node `spark-a` and thread ID `abc`.
 5. `forward` checks that backends exist.
 6. `forward` acquires a realtime priority admission slot.
-7. `SessionAffinity::preferred("abc")` returns a preferred index or `None`.
+7. `SessionAffinity::preferred("chat_completions:abc")` returns a preferred
+   index or `None`.
 8. `resource_selection_state` marks resource-ineligible backends if resource-aware
    routing is enabled.
 9. `select_backend_excluding_resource` prefers an available backend on `spark-a`,
@@ -1199,7 +1221,8 @@ Fairlead does:
 10. `forward` builds the upstream URL.
 11. `reqwest` sends the request body to vLLM or another compatible backend.
 12. Fairlead records success or failure on that backend's circuit breaker.
-13. On success, Fairlead records `abc -> selected_backend_index`.
+13. On success, Fairlead records
+    `chat_completions:abc -> selected_backend_index`.
 14. Fairlead streams the backend response back to the caller.
 
 ## What Is Not Happening Yet
@@ -1210,7 +1233,7 @@ The current code does not:
 - Inspect model-specific request JSON.
 - Estimate token count or memory use.
 - Manage CUDA memory.
-- Keep separate backend pools per workload.
+- Enforce complete pool-aware routing and placement policies.
 - Implement job queues or worker registration.
 - Reserve GPU memory for a request; resource reports are cooperative control-plane
   hints, not allocator-level reservations.

@@ -51,8 +51,10 @@ cargo watch -x run
 
 ## Current status
 
-**Phase 4 complete** (spinnaker → main). **Phase 5 scoped on trim**: resource-aware
-synchronous routing plus priority admission, without durable queues or async jobs.
+**Phase 5 complete** (trim → main). **Phase 6A is implementation-complete on
+clew and in final review**: synchronous surface cleanup, including workload
+metadata, backend-pool metadata, header forwarding policy, and configured model
+metadata.
 
 | Phase | Branch | Status |
 |---|---|---|
@@ -60,22 +62,24 @@ synchronous routing plus priority admission, without durable queues or async job
 | 2 — Transparent proxy | telltale → main | ✅ complete |
 | 3 — Circuit breaker + health | batten → main | ✅ complete |
 | 4 — Fallback chain + session affinity | spinnaker → main | ✅ complete |
-| 5 — VRAM accounting + priority admission | trim | ready for PR |
-| 6A — Synchronous surface cleanup | — | pending |
+| 5 — VRAM accounting + priority admission | trim → main | ✅ complete |
+| 6A — Synchronous surface cleanup | clew | final review |
 | 6B — Async job dispatch | — | pending |
+| 7A — Pool-aware routing + placement | — | pending |
 | 7 — Advanced compute + full metrics | — | pending |
 
 ## Project layout
 
-**What exists now (Phases 1–5):**
+**What exists now (Phases 1–6A):**
 
 ```
 src/
   main.rs           — tokio::main, AppState, build_router(), health probe startup
-  config.rs         — Config from env (PORT, BACKENDS, CIRCUIT_*, HEALTH_PROBE_INTERVAL_SECS)
+  config.rs         — Config from env, backend metadata, workload route metadata
   error.rs          — FairleadError enum with IntoResponse impl
   health.rs         — GET /health → {"status":"ok"}
   metrics.rs        — GET /metrics → Prometheus circuit_state gauge per backend
+  models.rs         — GET /v1/models → configured backend/model metadata
   priority.rs       — per-priority synchronous admission limiter
   resources.rs      — POST/GET resource reports for VRAM/load control-plane state
   router/
@@ -118,11 +122,6 @@ src/
 ```
 POST /v1/chat/completions    — OpenAI-compatible, streaming supported
 POST /v1/embeddings          — OpenAI-compatible embedding generation
-```
-
-Planned for Phase 6A:
-
-```text
 GET  /v1/models              — list available backends/models
 ```
 
@@ -298,15 +297,16 @@ WORKER_HEARTBEAT_SECS        — interval before a worker is considered stale
 
 ### Phase 6A — Synchronous surface cleanup
 
-- Move route-specific behavior into workload metadata.
-- Add route metadata: path, method, streaming behavior, retry policy, backend
+- [x] Move route-specific behavior into workload metadata.
+- [x] Add route metadata: path, method, streaming behavior, retry policy, backend
   pool, and metric labels.
-- Split backend configuration by pool so different synchronous workloads can
-  target different backend sets.
-- Decide whether session affinity is global, per workload, or per backend pool.
-- Add provider/header forwarding policy for content type, authorization,
+- [x] Decide whether session affinity is global, per workload, or per backend pool.
+- [x] Add provider/header forwarding policy for content type, authorization,
   organization/project headers, and provider-specific opt-in headers.
-- Add `GET /v1/models` backed by configured workloads and backend metadata.
+- [x] Add `GET /v1/models` backed by configured workloads and backend metadata.
+- Full pool-aware backend configuration, pool fallback chains, and placement
+  policies are deferred to Phase 7A so the design can cover both synchronous
+  backends and async workers.
 - Keep cloud-provider fallback and provider credentials deferred unless a demo or
   deployment path needs external overflow capacity.
 

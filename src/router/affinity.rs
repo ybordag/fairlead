@@ -1,7 +1,7 @@
 use std::{collections::HashMap, sync::Arc};
 use tokio::sync::RwLock;
 
-/// Maps conversation thread IDs to their last-used backend index.
+/// Maps caller-provided affinity keys to their last-used backend index.
 ///
 /// Affinity is soft: if the preferred backend is unavailable the fallback
 /// chain picks a different one and updates the map so subsequent requests

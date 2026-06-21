@@ -215,11 +215,6 @@ Two distinct surfaces.
 ```
 POST /v1/chat/completions   — receive, select backend, proxy, stream back
 POST /v1/embeddings         — same pattern for embedding requests
-```
-
-Planned synchronous surface:
-
-```text
 GET /v1/models              — list configured backend/model metadata
 ```
 
@@ -453,12 +448,15 @@ scheduling remain future scheduler work.
 | 3 | Circuit breaker, health checks, basic /metrics | Automatic failover when vLLM crashes |
 | 4 | Fallback chain, session affinity, same-request retry | Local resilience across configured backends |
 | 5 | Resource registry, VRAM accounting, priority admission | Synchronous inference avoids oversubscribed local GPUs and fails fast by priority |
-| 6A | Synchronous surface cleanup: workload metadata, backend pools, header policy, `/v1/models` | More synchronous workloads can share the proxy cleanly |
+| 6A | Synchronous surface cleanup: workload metadata, pool metadata, header policy, `/v1/models` | More synchronous workloads can share the proxy cleanly |
 | 6B | Async job API, durable priority queues, worker registration, leases, callbacks | Vision and embedding jobs go through Fairlead |
+| 7A | Pool-aware routing and placement policies for sync backends and async workers | Workloads can target named local, peer, or overflow compute pools consistently |
 | 7 | Adapter boundaries, index/cluster job types, FAISS/GPU, cloud fallback, full metrics | Advanced RAG indexing, external overflow, complete observability |
 
 Phases 1–3 give you a working proxy in a few days. Phases 4–5 give you
-production resilience. Phases 6–7 complete the async compute platform.
+production resilience. Phase 6 completes the core sync/async control-plane
+surfaces. Phase 7A adds complete pool-aware placement. Phase 7 completes the
+advanced compute platform.
 
 Temporal is intentionally deferred. Fairlead's scheduler should handle bounded
 compute jobs with leases, retries, cancellation, callbacks, and recoverable job
@@ -497,7 +495,7 @@ Fairlead's shared state objects, each `Arc`-wrapped and cloned into each handler
 and background task:
 - `Arc<RwLock<BackendMap>>` — backend states and circuit breakers
 - `Arc<RwLock<ResourceRegistry>>` — cooperative resource reports per node/backend
-- `Arc<RwLock<AffinityMap>>` — thread_id → preferred backend
+- `Arc<RwLock<AffinityMap>>` — workload-scoped thread ID → preferred backend
 - `Arc<RwLock<WorkerRegistry>>` — registered job workers
 
 ### 2. The async model requires structure, not just `async fn`

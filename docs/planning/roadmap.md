@@ -108,9 +108,8 @@ Fairlead currently provides:
 
 It does not yet provide:
 
-- Workload-aware route selection.
-- Separate backend pools by workload type.
-- Provider-specific auth/header policies.
+- Complete pool-aware backend configuration, fallback chains, or placement
+  policy across sync backends and async workers.
 - CPU resource accounting and richer resource dimensions beyond coarse VRAM/load.
 - Durable priority queues.
 - Async job submission, status, cancellation, worker registration, or callbacks.
@@ -146,29 +145,31 @@ system.
 
 - [x] Introduce a `WorkloadKind` enum for synchronous proxy workloads, starting
   with `chat_completions` and `embeddings`.
-- [ ] Move route-specific behavior out of the stringly typed
+- [x] Move route-specific behavior out of the stringly typed
   `forward(state, path, headers, body)` call and into workload metadata.
-- [ ] Add route metadata for:
+- [x] Add route metadata for:
   path,
   allowed HTTP method,
   streaming behavior,
   retry policy,
   backend pool name,
   metric labels.
-- [ ] Split backend configuration by pool so different workloads can target
-  different backend sets.
+- [ ] Complete pool-aware backend configuration and routing policy. Deferred to
+  **Phase 7A: Pool-Aware Routing and Placement Policies** so the design can
+  cover both synchronous backends and async workers.
 - [x] Preserve a default backend pool for today's simple `BACKENDS` config.
-- [ ] Add provider/header forwarding policy:
+- [x] Add provider/header forwarding policy:
   content type,
   authorization,
   organization/project headers,
   and provider-specific opt-in headers.
-- [ ] Add `/v1/models` for the synchronous proxy surface, backed by configured
+- [x] Add `/v1/models` for the synchronous proxy surface, backed by configured
   workloads and backend metadata.
 - [ ] Add an adapter boundary for non-OpenAI-compatible synchronous endpoints,
-  such as `/v1/rerank` or `/v1/images/generations`.
+  such as `/v1/rerank` or `/v1/images/generations`. Deferred to
+  **Phase 7: Advanced Workloads**.
 - [x] Add metrics labels for workload kind and selected backend.
-- [ ] Decide whether session affinity should be keyed globally, per workload, or
+- [x] Decide whether session affinity should be keyed globally, per workload, or
   per backend pool.
 - [x] Make health probes target an explicit backend health endpoint such as
   `/health` or `/v1/models`, rather than relying on the backend base URL.
@@ -368,7 +369,8 @@ Scope:
 Proposed decision pipeline:
 
 ```text
-candidates = backends in workload's backend pool
+candidates = backends eligible for the workload
+candidates = backends in workload's backend pool (Phase 7A)
 candidates = remove circuit-open backends
 candidates = remove backends without enough reported capacity
 rank by origin-node locality
@@ -610,12 +612,11 @@ Docker, or the provider accounts themselves.
 - [x] Add basic same-request retry for safe synchronous upstream failures.
 - [x] Add workload-aware routing metrics and retry/fallback counters.
 - [x] Add a repeatable local mock demo.
-- [ ] Move route-specific behavior into workload metadata. Deferred to
-  **Phase 6A: Synchronous Surface Cleanup**.
-- [ ] Add backend pools. Deferred to **Phase 6A: Synchronous Surface Cleanup**.
-- [ ] Add provider/header policy. Deferred to **Phase 6A: Synchronous Surface
-  Cleanup**.
-- [ ] Add `/v1/models`. Deferred to **Phase 6A: Synchronous Surface Cleanup**.
+- [x] Move route-specific behavior into workload metadata.
+- [ ] Add complete backend pools. Deferred to
+  **Phase 7A: Pool-Aware Routing and Placement Policies**.
+- [x] Add provider/header policy.
+- [x] Add `/v1/models`.
 
 ### Phase 5/Trim: Resource-Aware Routing and Priority Admission
 
@@ -631,16 +632,17 @@ Docker, or the provider accounts themselves.
 This phase keeps the synchronous proxy surface clean before adding async jobs.
 It should not introduce queues, workers, or job state.
 
-- Move route-specific behavior out of `forward(state, path, headers, body)` and
+- [x] Move route-specific behavior out of `forward(state, path, headers, body)` and
   into workload metadata.
-- Add route metadata for path, method, streaming behavior, retry policy, backend
+- [x] Add route metadata for path, method, streaming behavior, retry policy, backend
   pool, and metric labels.
-- Split backend configuration by pool so different synchronous workloads can
-  target different backend sets.
-- Decide whether session affinity is global, per workload, or per backend pool.
-- Add provider/header forwarding policy for content type, authorization,
+- [x] Decide whether session affinity is global, per workload, or per backend pool.
+- [x] Add provider/header forwarding policy for content type, authorization,
   organization/project headers, and provider-specific opt-in headers.
-- Add `GET /v1/models` backed by configured workloads and backend metadata.
+- [x] Add `GET /v1/models` backed by configured workloads and backend metadata.
+- Full pool-aware backend configuration, pool fallback chains, and placement
+  policies are deferred to **Phase 7A** so they can cover both synchronous
+  backends and async workers.
 - Keep cloud-provider fallback and provider credentials deferred unless a clear
   demo need appears.
 
@@ -659,6 +661,20 @@ It should not introduce queues, workers, or job state.
 - Add async workload metrics.
 - Document Temporal as deferred unless Rhizome needs durable multi-step workflow
   orchestration beyond compute dispatch.
+
+### Phase 7A: Pool-Aware Routing and Placement Policies
+
+- Add named backend and worker pools as first-class routing boundaries.
+- Let workloads target one or more pools, with explicit validation for missing
+  or empty pools.
+- Add pool fallback chains, such as local GPU pool -> peer local pool -> cloud
+  overflow pool.
+- Add per-pool metrics for candidate counts, selected backend or worker, fallback
+  reason, and capacity pressure.
+- Apply the same pool model to synchronous OpenAI-compatible backends and async
+  registered workers.
+- Document local DGX pools, shared Fairlead deployments, and future cloud
+  overflow pools.
 
 ### Phase 7: Advanced Workloads
 

@@ -4,11 +4,34 @@ use std::env::VarError;
 
 pub const DEFAULT_BACKEND_POOL: &str = "default";
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WorkloadKind {
     ChatCompletions,
     Embeddings,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WorkloadRoute {
+    pub kind: WorkloadKind,
+    pub upstream_path: &'static str,
+    pub backend_pool: BackendPoolPolicy,
+    pub retry_server_errors: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BackendPoolPolicy {
+    Any,
+    Named(&'static str),
+}
+
+impl BackendPoolPolicy {
+    pub fn allows(self, pool: &str) -> bool {
+        match self {
+            Self::Any => true,
+            Self::Named(expected) => pool == expected,
+        }
+    }
 }
 
 impl WorkloadKind {
@@ -20,6 +43,23 @@ impl WorkloadKind {
         match self {
             Self::ChatCompletions => "chat_completions",
             Self::Embeddings => "embeddings",
+        }
+    }
+
+    pub fn route(self) -> WorkloadRoute {
+        match self {
+            Self::ChatCompletions => WorkloadRoute {
+                kind: self,
+                upstream_path: "chat/completions",
+                backend_pool: BackendPoolPolicy::Any,
+                retry_server_errors: true,
+            },
+            Self::Embeddings => WorkloadRoute {
+                kind: self,
+                upstream_path: "embeddings",
+                backend_pool: BackendPoolPolicy::Any,
+                retry_server_errors: true,
+            },
         }
     }
 }
@@ -340,6 +380,28 @@ mod tests {
     }
 
     #[test]
+    fn workload_route_metadata_defines_upstream_paths() {
+        let chat = WorkloadKind::ChatCompletions.route();
+        assert_eq!(chat.kind, WorkloadKind::ChatCompletions);
+        assert_eq!(chat.upstream_path, "chat/completions");
+        assert_eq!(chat.backend_pool, BackendPoolPolicy::Any);
+        assert!(chat.retry_server_errors);
+
+        let embeddings = WorkloadKind::Embeddings.route();
+        assert_eq!(embeddings.kind, WorkloadKind::Embeddings);
+        assert_eq!(embeddings.upstream_path, "embeddings");
+        assert_eq!(embeddings.backend_pool, BackendPoolPolicy::Any);
+        assert!(embeddings.retry_server_errors);
+    }
+
+    #[test]
+    fn backend_pool_policy_matches_named_or_any_pool() {
+        assert!(BackendPoolPolicy::Any.allows("local-llm"));
+        assert!(BackendPoolPolicy::Named("local-llm").allows("local-llm"));
+        assert!(!BackendPoolPolicy::Named("local-llm").allows("vision"));
+    }
+
+    #[test]
     fn backends_empty_by_default() {
         let cfg = Config::from_lookup(env(&[])).unwrap();
         assert!(cfg.backends.is_empty());
@@ -553,6 +615,58 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("duplicate backend id"));
+    }
+
+    #[test]
+    fn empty_backend_id_returns_err() {
+        let result = Config::from_lookup(env(&[(
+            "BACKENDS_JSON",
+            r#"[{"id":"   ","url":"http://node-a:8000/v1"}]"#,
+        )]));
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("backend id cannot be empty"));
+    }
+
+    #[test]
+    fn empty_backend_url_returns_err() {
+        let result = Config::from_lookup(env(&[(
+            "BACKENDS_JSON",
+            r#"[{"id":"node-a-vllm","url":"   "}]"#,
+        )]));
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("url cannot be empty"));
+    }
+
+    #[test]
+    fn empty_backend_pool_returns_err() {
+        let result = Config::from_lookup(env(&[(
+            "BACKENDS_JSON",
+            r#"[{"id":"node-a-vllm","url":"http://node-a:8000/v1","pool":"   "}]"#,
+        )]));
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("pool cannot be empty"));
+    }
+
+    #[test]
+    fn empty_backend_workloads_returns_err() {
+        let result = Config::from_lookup(env(&[(
+            "BACKENDS_JSON",
+            r#"[{"id":"node-a-vllm","url":"http://node-a:8000/v1","workloads":[]}]"#,
+        )]));
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("must support at least one workload"));
     }
 
     #[test]

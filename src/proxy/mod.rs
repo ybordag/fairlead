@@ -3,7 +3,10 @@ pub mod types;
 use axum::{
     body::Body,
     extract::State,
-    http::{header::CONTENT_TYPE, HeaderMap, StatusCode},
+    http::{
+        header::{AUTHORIZATION, CONTENT_TYPE},
+        HeaderMap, StatusCode,
+    },
     response::{IntoResponse, Response},
 };
 use bytes::Bytes;
@@ -12,12 +15,21 @@ use std::time::Instant;
 use tracing::{info, warn};
 
 use crate::{
-    config::{Priority, WorkloadKind},
+    config::{Priority, WorkloadKind, WorkloadRoute},
     metrics::{FallbackLabels, RequestLabels, RetryLabels},
     priority::PriorityPermit,
     router::{select_backend_excluding_resource, BackendState, ResourceRank},
     AppState,
 };
+
+const DEFAULT_UPSTREAM_CONTENT_TYPE: &str = "application/json";
+const FORWARDED_UPSTREAM_HEADERS: &[&str] = &[
+    "openai-organization",
+    "openai-project",
+    "anthropic-version",
+    "anthropic-beta",
+    "x-goog-api-key",
+];
 
 pub async fn chat_completions(
     State(state): State<AppState>,
@@ -26,8 +38,7 @@ pub async fn chat_completions(
 ) -> Response {
     forward(
         &state,
-        WorkloadKind::ChatCompletions,
-        "chat/completions",
+        WorkloadKind::ChatCompletions.route(),
         &headers,
         body,
     )
@@ -39,23 +50,16 @@ pub async fn embeddings(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    forward(
-        &state,
-        WorkloadKind::Embeddings,
-        "embeddings",
-        &headers,
-        body,
-    )
-    .await
+    forward(&state, WorkloadKind::Embeddings.route(), &headers, body).await
 }
 
 async fn forward(
     state: &AppState,
-    workload_kind: WorkloadKind,
-    path: &str,
+    route: WorkloadRoute,
     headers: &HeaderMap,
     body: Bytes,
 ) -> Response {
+    let workload_kind = route.kind;
     let workload = workload_kind.as_str();
     let started = Instant::now();
     let priority = match parse_priority(headers) {
@@ -73,6 +77,10 @@ async fn forward(
         .get("x-fairlead-thread-id")
         .and_then(|v| v.to_str().ok())
         .map(str::to_owned);
+    let affinity_key = thread_id
+        .as_deref()
+        .map(|tid| affinity_key(workload_kind, tid));
+    let affinity_key_str = affinity_key.as_deref().unwrap_or("");
 
     // Extract optional origin node for locality-aware routing.
     let origin_node = headers
@@ -110,7 +118,7 @@ async fn forward(
             workload,
             priority = priority.as_str(),
             origin_node = origin_node.as_deref().unwrap_or(""),
-            affinity_key = thread_id.as_deref().unwrap_or(""),
+            affinity_key = affinity_key_str,
             selected_backend = "",
             retry_count = 0,
             fallback_reason = "",
@@ -122,14 +130,16 @@ async fn forward(
     };
 
     // Resolve preferred backend index (if any) then run the fallback chain.
-    let preferred = match thread_id {
-        Some(ref tid) => state.affinity.preferred(tid).await,
+    let preferred = match affinity_key {
+        Some(ref key) => state.affinity.preferred(key).await,
         None => None,
     };
 
     let mut attempted = Vec::new();
     let mut next_backend = None;
+    let route_ineligible = route_ineligible_backends(&state.backends, &route);
     let resource_state = resource_selection_state(state, &workload_kind).await;
+    let selection_ineligible = selection_ineligible(&route_ineligible, &resource_state.ineligible);
 
     loop {
         let idx = match next_backend.take() {
@@ -140,7 +150,7 @@ async fn forward(
                     preferred,
                     origin_node.as_deref(),
                     &attempted,
-                    &resource_state.ineligible,
+                    &selection_ineligible,
                     &resource_state.ranks,
                 )
                 .await
@@ -153,7 +163,11 @@ async fn forward(
                             None,
                             origin_node.as_deref(),
                             StatusCode::SERVICE_UNAVAILABLE,
-                            unavailable_outcome(&resource_state.ineligible),
+                            unavailable_outcome(
+                                &route_ineligible,
+                                &resource_state.ineligible,
+                                state.backends.len(),
+                            ),
                             started,
                         );
                         info!(
@@ -161,18 +175,29 @@ async fn forward(
                             workload,
                             priority = priority.as_str(),
                             origin_node = origin_node.as_deref().unwrap_or(""),
-                            affinity_key = thread_id.as_deref().unwrap_or(""),
+                            affinity_key = affinity_key_str,
                             selected_backend = "",
                             retry_count = attempted.len(),
-                            fallback_reason =
-                                unavailable_fallback_reason(&resource_state.ineligible),
+                            fallback_reason = unavailable_fallback_reason(
+                                &route_ineligible,
+                                &resource_state.ineligible,
+                                state.backends.len(),
+                            ),
                             status = StatusCode::SERVICE_UNAVAILABLE.as_u16(),
-                            outcome = unavailable_outcome(&resource_state.ineligible),
+                            outcome = unavailable_outcome(
+                                &route_ineligible,
+                                &resource_state.ineligible,
+                                state.backends.len(),
+                            ),
                             "request completed"
                         );
                         return (
                             StatusCode::SERVICE_UNAVAILABLE,
-                            unavailable_message(&resource_state.ineligible),
+                            unavailable_message(
+                                &route_ineligible,
+                                &resource_state.ineligible,
+                                state.backends.len(),
+                            ),
                         )
                             .into_response();
                     }
@@ -191,7 +216,7 @@ async fn forward(
                         workload,
                         priority = priority.as_str(),
                         origin_node = origin_node.as_deref().unwrap_or(""),
-                        affinity_key = thread_id.as_deref().unwrap_or(""),
+                        affinity_key = affinity_key_str,
                         selected_backend = "",
                         retry_count = attempted.len(),
                         fallback_reason = "",
@@ -211,6 +236,7 @@ async fn forward(
             idx,
             preferred,
             origin_node.as_deref(),
+            &route_ineligible,
             &resource_state.ineligible,
         );
         if let Some(reason) = fallback_reason {
@@ -223,12 +249,16 @@ async fn forward(
                 reason,
             );
         }
-        let url = format!("{}/{}", backend.url.trim_end_matches('/'), path);
+        let url = format!(
+            "{}/{}",
+            backend.url.trim_end_matches('/'),
+            route.upstream_path
+        );
 
         let upstream = match state
             .client
             .post(&url)
-            .header("content-type", "application/json")
+            .with_upstream_headers(headers)
             .body(body.clone())
             .send()
             .await
@@ -249,7 +279,7 @@ async fn forward(
                     workload,
                     priority = priority.as_str(),
                     origin_node = origin_node.as_deref().unwrap_or(""),
-                    affinity_key = thread_id.as_deref().unwrap_or(""),
+                    affinity_key = affinity_key_str,
                     failed_backend = backend.id,
                     retry_count = attempted.len() + 1,
                     reason = "connection_error",
@@ -261,7 +291,7 @@ async fn forward(
                     preferred,
                     origin_node.as_deref(),
                     &attempted,
-                    &resource_state.ineligible,
+                    &selection_ineligible,
                     &resource_state.ranks,
                 )
                 .await;
@@ -283,7 +313,7 @@ async fn forward(
                     workload,
                     priority = priority.as_str(),
                     origin_node = origin_node.as_deref().unwrap_or(""),
-                    affinity_key = thread_id.as_deref().unwrap_or(""),
+                    affinity_key = affinity_key_str,
                     selected_backend = backend.id,
                     retry_count = attempted.len(),
                     fallback_reason = fallback_reason.unwrap_or(""),
@@ -297,7 +327,7 @@ async fn forward(
 
         let status = upstream.status();
 
-        if status.is_server_error() {
+        if route.retry_server_errors && status.is_server_error() {
             backend.circuit.write().await.record_failure();
             record_retry(
                 state,
@@ -312,7 +342,7 @@ async fn forward(
                 workload,
                 priority = priority.as_str(),
                 origin_node = origin_node.as_deref().unwrap_or(""),
-                affinity_key = thread_id.as_deref().unwrap_or(""),
+                affinity_key = affinity_key_str,
                 failed_backend = backend.id,
                 retry_count = attempted.len() + 1,
                 status = status.as_u16(),
@@ -325,7 +355,7 @@ async fn forward(
                 preferred,
                 origin_node.as_deref(),
                 &attempted,
-                &resource_state.ineligible,
+                &selection_ineligible,
                 &resource_state.ranks,
             )
             .await;
@@ -347,7 +377,7 @@ async fn forward(
                 workload,
                 priority = priority.as_str(),
                 origin_node = origin_node.as_deref().unwrap_or(""),
-                affinity_key = thread_id.as_deref().unwrap_or(""),
+                affinity_key = affinity_key_str,
                 selected_backend = backend.id,
                 retry_count = attempted.len(),
                 fallback_reason = fallback_reason.unwrap_or(""),
@@ -359,10 +389,10 @@ async fn forward(
         }
 
         backend.circuit.write().await.record_success();
-        // Update affinity so the next request from this thread prefers the
-        // same backend — including after a fallback re-route.
-        if let Some(ref tid) = thread_id {
-            state.affinity.record(tid, idx).await;
+        // Update workload-scoped affinity so the next request from this thread
+        // and workload prefers the same backend, including after fallback.
+        if let Some(ref key) = affinity_key {
+            state.affinity.record(key, idx).await;
         }
 
         let outcome = if attempted.is_empty() {
@@ -385,7 +415,7 @@ async fn forward(
             workload,
             priority = priority.as_str(),
             origin_node = origin_node.as_deref().unwrap_or(""),
-            affinity_key = thread_id.as_deref().unwrap_or(""),
+            affinity_key = affinity_key_str,
             selected_backend = backend.id,
             retry_count = attempted.len(),
             fallback_reason = fallback_reason.unwrap_or(""),
@@ -398,11 +428,45 @@ async fn forward(
     }
 }
 
+fn affinity_key(workload: WorkloadKind, thread_id: &str) -> String {
+    format!("{}:{thread_id}", workload.as_str())
+}
+
+trait UpstreamHeaderPolicy {
+    fn with_upstream_headers(self, headers: &HeaderMap) -> Self;
+}
+
+impl UpstreamHeaderPolicy for reqwest::RequestBuilder {
+    fn with_upstream_headers(mut self, headers: &HeaderMap) -> Self {
+        match headers.get(CONTENT_TYPE) {
+            Some(content_type) => {
+                self = self.header(CONTENT_TYPE, content_type.clone());
+            }
+            None => {
+                self = self.header(CONTENT_TYPE, DEFAULT_UPSTREAM_CONTENT_TYPE);
+            }
+        }
+
+        if let Some(authorization) = headers.get(AUTHORIZATION) {
+            self = self.header(AUTHORIZATION, authorization.clone());
+        }
+
+        for name in FORWARDED_UPSTREAM_HEADERS {
+            if let Some(value) = headers.get(*name) {
+                self = self.header(*name, value.clone());
+            }
+        }
+
+        self
+    }
+}
+
 fn fallback_reason(
     backends: &[BackendState],
     selected_idx: usize,
     preferred: Option<usize>,
     origin_node: Option<&str>,
+    route_ineligible: &[usize],
     resource_ineligible: &[usize],
 ) -> Option<&'static str> {
     let selected = backends.get(selected_idx)?;
@@ -419,6 +483,12 @@ fn fallback_reason(
         if has_origin_backend && selected.node_id.as_deref() != Some(origin) {
             if origin_indexes
                 .iter()
+                .any(|idx| route_ineligible.contains(idx))
+            {
+                return Some("workload_unavailable");
+            }
+            if origin_indexes
+                .iter()
                 .any(|idx| resource_ineligible.contains(idx))
             {
                 return Some("resource_unavailable");
@@ -429,11 +499,21 @@ fn fallback_reason(
 
     if let Some(preferred_idx) = preferred {
         if preferred_idx != selected_idx && backends.get(preferred_idx).is_some() {
+            if route_ineligible.contains(&preferred_idx) {
+                return Some("workload_unavailable");
+            }
             if resource_ineligible.contains(&preferred_idx) {
                 return Some("resource_unavailable");
             }
             return Some("affinity_unavailable");
         }
+    }
+
+    if route_ineligible
+        .iter()
+        .any(|idx| *idx < selected_idx && backends.get(*idx).is_some())
+    {
+        return Some("workload_unavailable");
     }
 
     if resource_ineligible
@@ -444,6 +524,28 @@ fn fallback_reason(
     }
 
     None
+}
+
+fn route_ineligible_backends(backends: &[BackendState], route: &WorkloadRoute) -> Vec<usize> {
+    backends
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, backend)| (!route_allows_backend(backend, route)).then_some(idx))
+        .collect()
+}
+
+fn route_allows_backend(backend: &BackendState, route: &WorkloadRoute) -> bool {
+    route.backend_pool.allows(&backend.pool) && backend.workloads.contains(&route.kind)
+}
+
+fn selection_ineligible(route_ineligible: &[usize], resource_ineligible: &[usize]) -> Vec<usize> {
+    let mut ineligible = route_ineligible.to_vec();
+    for idx in resource_ineligible {
+        if !ineligible.contains(idx) {
+            ineligible.push(*idx);
+        }
+    }
+    ineligible
 }
 
 fn parse_priority(headers: &HeaderMap) -> Result<Priority, &'static str> {
@@ -509,27 +611,45 @@ async fn resource_selection_state(
     selection
 }
 
-fn unavailable_outcome(resource_ineligible: &[usize]) -> &'static str {
-    if resource_ineligible.is_empty() {
+fn unavailable_outcome(
+    route_ineligible: &[usize],
+    resource_ineligible: &[usize],
+    backend_count: usize,
+) -> &'static str {
+    if backend_count > 0 && route_ineligible.len() == backend_count {
+        "unsupported_workload"
+    } else if !resource_ineligible.is_empty() {
+        "resource_unavailable"
+    } else {
         "unavailable"
-    } else {
-        "resource_unavailable"
     }
 }
 
-fn unavailable_fallback_reason(resource_ineligible: &[usize]) -> &'static str {
-    if resource_ineligible.is_empty() {
+fn unavailable_fallback_reason(
+    route_ineligible: &[usize],
+    resource_ineligible: &[usize],
+    backend_count: usize,
+) -> &'static str {
+    if backend_count > 0 && route_ineligible.len() == backend_count {
+        "workload_unavailable"
+    } else if !resource_ineligible.is_empty() {
+        "resource_unavailable"
+    } else {
         ""
-    } else {
-        "resource_unavailable"
     }
 }
 
-fn unavailable_message(resource_ineligible: &[usize]) -> &'static str {
-    if resource_ineligible.is_empty() {
-        "all backends unavailable (circuits open)"
-    } else {
+fn unavailable_message(
+    route_ineligible: &[usize],
+    resource_ineligible: &[usize],
+    backend_count: usize,
+) -> &'static str {
+    if backend_count > 0 && route_ineligible.len() == backend_count {
+        "no backends configured for workload"
+    } else if !resource_ineligible.is_empty() {
         "all backends unavailable (circuits open or insufficient resources)"
+    } else {
+        "all backends unavailable (circuits open)"
     }
 }
 
@@ -800,13 +920,22 @@ mod tests {
     }
 
     fn backend_with_id(url: String, id: &str) -> BackendState {
+        backend_with_workloads(url, id, "default", WorkloadKind::default_proxy_workloads())
+    }
+
+    fn backend_with_workloads(
+        url: String,
+        id: &str,
+        pool: &str,
+        workloads: Vec<WorkloadKind>,
+    ) -> BackendState {
         BackendState::from_config(
             BackendConfig {
                 id: id.to_string(),
                 url,
                 node_id: None,
-                pool: "default".into(),
-                workloads: WorkloadKind::default_proxy_workloads(),
+                pool: pool.to_string(),
+                workloads,
                 health_path: None,
             },
             10,
@@ -857,6 +986,107 @@ mod tests {
         assert_eq!(resp.status(), 200);
         let received: serde_json::Value = resp.json().await.unwrap();
         assert_eq!(received["choices"][0]["message"]["content"], "Hello!");
+    }
+
+    #[tokio::test]
+    async fn upstream_header_policy_forwards_only_allowed_headers() {
+        let mock = Router::new().route(
+            "/v1/chat/completions",
+            post(|headers: HeaderMap| async move {
+                axum::Json(json!({
+                    "content_type": headers
+                        .get(CONTENT_TYPE)
+                        .and_then(|v| v.to_str().ok()),
+                    "authorization": headers
+                        .get(AUTHORIZATION)
+                        .and_then(|v| v.to_str().ok()),
+                    "openai_organization": headers
+                        .get("openai-organization")
+                        .and_then(|v| v.to_str().ok()),
+                    "openai_project": headers
+                        .get("openai-project")
+                        .and_then(|v| v.to_str().ok()),
+                    "anthropic_version": headers
+                        .get("anthropic-version")
+                        .and_then(|v| v.to_str().ok()),
+                    "anthropic_beta": headers
+                        .get("anthropic-beta")
+                        .and_then(|v| v.to_str().ok()),
+                    "google_api_key": headers
+                        .get("x-goog-api-key")
+                        .and_then(|v| v.to_str().ok()),
+                    "fairlead_thread": headers
+                        .get("x-fairlead-thread-id")
+                        .and_then(|v| v.to_str().ok()),
+                    "fairlead_origin": headers
+                        .get("x-fairlead-origin-node")
+                        .and_then(|v| v.to_str().ok()),
+                    "request_id": headers
+                        .get("x-request-id")
+                        .and_then(|v| v.to_str().ok()),
+                }))
+            }),
+        );
+        let backend = start_mock(mock).await;
+        let fairlead = start_fairlead(&[&backend]).await;
+
+        let resp = reqwest::Client::new()
+            .post(format!("{}/v1/chat/completions", fairlead))
+            .header("content-type", "application/json; charset=utf-8")
+            .header("authorization", "Bearer upstream-token")
+            .header("openai-organization", "org-test")
+            .header("openai-project", "project-test")
+            .header("anthropic-version", "2023-06-01")
+            .header("anthropic-beta", "tools-2024-04-04")
+            .header("x-goog-api-key", "google-key")
+            .header("x-fairlead-thread-id", "thread-1")
+            .header("x-fairlead-origin-node", "node-a")
+            .header("x-fairlead-priority", "batch")
+            .header("x-request-id", "request-1")
+            .body(r#"{"model":"m","messages":[]}"#)
+            .send()
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), 200);
+        let received: serde_json::Value = resp.json().await.unwrap();
+        assert_eq!(received["content_type"], "application/json; charset=utf-8");
+        assert_eq!(received["authorization"], "Bearer upstream-token");
+        assert_eq!(received["openai_organization"], "org-test");
+        assert_eq!(received["openai_project"], "project-test");
+        assert_eq!(received["anthropic_version"], "2023-06-01");
+        assert_eq!(received["anthropic_beta"], "tools-2024-04-04");
+        assert_eq!(received["google_api_key"], "google-key");
+        assert_eq!(received["fairlead_thread"], serde_json::Value::Null);
+        assert_eq!(received["fairlead_origin"], serde_json::Value::Null);
+        assert_eq!(received["request_id"], serde_json::Value::Null);
+    }
+
+    #[tokio::test]
+    async fn upstream_header_policy_defaults_missing_content_type_to_json() {
+        let mock = Router::new().route(
+            "/v1/chat/completions",
+            post(|headers: HeaderMap| async move {
+                axum::Json(json!({
+                    "content_type": headers
+                        .get(CONTENT_TYPE)
+                        .and_then(|v| v.to_str().ok()),
+                }))
+            }),
+        );
+        let backend = start_mock(mock).await;
+        let fairlead = start_fairlead(&[&backend]).await;
+
+        let resp = reqwest::Client::new()
+            .post(format!("{}/v1/chat/completions", fairlead))
+            .body(r#"{"model":"m","messages":[]}"#)
+            .send()
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), 200);
+        let received: serde_json::Value = resp.json().await.unwrap();
+        assert_eq!(received["content_type"], DEFAULT_UPSTREAM_CONTENT_TYPE);
     }
 
     #[tokio::test]
@@ -1414,6 +1644,160 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn chat_completions_skips_backend_without_chat_workload() {
+        let skipped_hits = Arc::new(AtomicUsize::new(0));
+        let skipped_hits_for_route = skipped_hits.clone();
+        let skipped = Router::new().route(
+            "/v1/chat/completions",
+            post(move || {
+                let hits = skipped_hits_for_route.clone();
+                async move {
+                    hits.fetch_add(1, Ordering::SeqCst);
+                    axum::Json(json!({"source":"wrong-workload"}))
+                }
+            }),
+        );
+        let selected = Router::new().route(
+            "/v1/chat/completions",
+            post(|| async { axum::Json(json!({"source":"chat"})) }),
+        );
+        let skipped_url = start_mock(skipped).await;
+        let selected_url = start_mock(selected).await;
+        let fairlead = start_fairlead_with_backends(vec![
+            backend_with_workloads(
+                skipped_url,
+                "embedding-only",
+                "local-llm",
+                vec![WorkloadKind::Embeddings],
+            ),
+            backend_with_workloads(
+                selected_url,
+                "chat",
+                "local-llm",
+                vec![WorkloadKind::ChatCompletions],
+            ),
+        ])
+        .await;
+
+        let resp = reqwest::Client::new()
+            .post(format!("{}/v1/chat/completions", fairlead))
+            .json(&json!({"model":"m","messages":[]}))
+            .send()
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), 200);
+        assert_eq!(
+            resp.json::<serde_json::Value>().await.unwrap()["source"],
+            "chat"
+        );
+        assert_eq!(skipped_hits.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn embeddings_skips_backend_without_embeddings_workload() {
+        let skipped_hits = Arc::new(AtomicUsize::new(0));
+        let skipped_hits_for_route = skipped_hits.clone();
+        let skipped = Router::new().route(
+            "/v1/embeddings",
+            post(move || {
+                let hits = skipped_hits_for_route.clone();
+                async move {
+                    hits.fetch_add(1, Ordering::SeqCst);
+                    axum::Json(json!({
+                        "object":"list",
+                        "data":[{"object":"embedding","index":0,"embedding":[9.9]}],
+                        "model":"wrong-workload"
+                    }))
+                }
+            }),
+        );
+        let selected = Router::new().route(
+            "/v1/embeddings",
+            post(|| async {
+                axum::Json(json!({
+                    "object":"list",
+                    "data":[{"object":"embedding","index":0,"embedding":[0.2]}],
+                    "model":"embedding"
+                }))
+            }),
+        );
+        let skipped_url = start_mock(skipped).await;
+        let selected_url = start_mock(selected).await;
+        let fairlead = start_fairlead_with_backends(vec![
+            backend_with_workloads(
+                skipped_url,
+                "chat-only",
+                "local-llm",
+                vec![WorkloadKind::ChatCompletions],
+            ),
+            backend_with_workloads(
+                selected_url,
+                "embedding",
+                "local-llm",
+                vec![WorkloadKind::Embeddings],
+            ),
+        ])
+        .await;
+
+        let resp = reqwest::Client::new()
+            .post(format!("{}/v1/embeddings", fairlead))
+            .json(&json!({"model":"m","input":"hello"}))
+            .send()
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), 200);
+        assert_eq!(
+            resp.json::<serde_json::Value>().await.unwrap()["model"],
+            "embedding"
+        );
+        assert_eq!(skipped_hits.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn unsupported_workload_returns_503_without_trying_backend() {
+        let hits = Arc::new(AtomicUsize::new(0));
+        let hits_for_route = hits.clone();
+        let backend = Router::new().route(
+            "/v1/embeddings",
+            post(move || {
+                let hits = hits_for_route.clone();
+                async move {
+                    hits.fetch_add(1, Ordering::SeqCst);
+                    axum::Json(json!({
+                        "object":"list",
+                        "data":[{"object":"embedding","index":0,"embedding":[9.9]}],
+                        "model":"wrong-workload"
+                    }))
+                }
+            }),
+        );
+        let backend_url = start_mock(backend).await;
+        let fairlead = start_fairlead_with_backends(vec![backend_with_workloads(
+            backend_url,
+            "chat-only",
+            "local-llm",
+            vec![WorkloadKind::ChatCompletions],
+        )])
+        .await;
+
+        let resp = reqwest::Client::new()
+            .post(format!("{}/v1/embeddings", fairlead))
+            .json(&json!({"model":"m","input":"hello"}))
+            .send()
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            resp.text().await.unwrap(),
+            "no backends configured for workload"
+        );
+        assert_eq!(hits.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
     async fn embeddings_uses_fallback_chain_when_first_backend_open() {
         let first = Router::new().route(
             "/v1/embeddings",
@@ -1856,6 +2240,73 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn origin_node_falls_back_when_same_node_backend_cannot_serve_workload() {
+        let node_a_hits = Arc::new(AtomicUsize::new(0));
+        let node_a_hits_for_route = node_a_hits.clone();
+        let node_a = Router::new().route(
+            "/v1/chat/completions",
+            post(move || {
+                let hits = node_a_hits_for_route.clone();
+                async move {
+                    hits.fetch_add(1, Ordering::SeqCst);
+                    axum::Json(json!({"source":"wrong-workload"}))
+                }
+            }),
+        );
+        let node_b = Router::new().route(
+            "/v1/chat/completions",
+            post(|| async { axum::Json(json!({"source":"node-b"})) }),
+        );
+        let node_a_url = start_mock(node_a).await;
+        let node_b_url = start_mock(node_b).await;
+
+        let fairlead = start_fairlead_with_backends(vec![
+            BackendState::from_config(
+                BackendConfig {
+                    id: "node-a-embed".into(),
+                    url: node_a_url,
+                    node_id: Some("node-a".into()),
+                    pool: "local-llm".into(),
+                    workloads: vec![WorkloadKind::Embeddings],
+                    health_path: None,
+                },
+                10,
+                Duration::from_secs(60),
+            ),
+            backend_on_node(node_b_url, "node-b"),
+        ])
+        .await;
+
+        let client = reqwest::Client::new();
+        let resp = client
+            .post(format!("{}/v1/chat/completions", fairlead))
+            .header("x-fairlead-origin-node", "node-a")
+            .json(&json!({"model":"m","messages":[]}))
+            .send()
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), 200);
+        assert_eq!(
+            resp.json::<serde_json::Value>().await.unwrap()["source"],
+            "node-b"
+        );
+        assert_eq!(node_a_hits.load(Ordering::SeqCst), 0);
+
+        let metrics = client
+            .get(format!("{}/metrics", fairlead))
+            .send()
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap();
+        assert!(metrics.contains(
+            "fairlead_fallbacks_total{workload=\"chat_completions\",priority=\"realtime\",backend=\"node-b-vllm\",node=\"node-b\",pool=\"local-llm\",origin_node=\"node-a\",reason=\"workload_unavailable\"} 1"
+        ));
+    }
+
+    #[tokio::test]
     async fn resource_aware_routing_skips_local_backend_without_headroom() {
         let node_a = Router::new().route(
             "/v1/chat/completions",
@@ -2167,7 +2618,7 @@ mod tests {
         assert_eq!(fields["request_id"], "trace-test-1");
         assert_eq!(fields["workload"], "chat_completions");
         assert_eq!(fields["origin_node"], "node-a");
-        assert_eq!(fields["affinity_key"], "thread-trace");
+        assert_eq!(fields["affinity_key"], "chat_completions:thread-trace");
         assert_eq!(fields["selected_backend"], "node-b-vllm");
         assert_eq!(fields["retry_count"], 0);
         assert_eq!(fields["fallback_reason"], "origin_unavailable");
@@ -2387,6 +2838,170 @@ mod tests {
 
         assert_eq!(resp.status(), 200);
         assert_eq!(affinity.len().await, 0);
+    }
+
+    #[test]
+    fn affinity_key_is_scoped_by_workload() {
+        assert_eq!(
+            affinity_key(WorkloadKind::ChatCompletions, "thread-1"),
+            "chat_completions:thread-1"
+        );
+        assert_eq!(
+            affinity_key(WorkloadKind::Embeddings, "thread-1"),
+            "embeddings:thread-1"
+        );
+    }
+
+    #[tokio::test]
+    async fn affinity_is_scoped_per_workload_for_same_thread_id() {
+        let chat_a = Router::new().route(
+            "/v1/chat/completions",
+            post(|| async { axum::Json(json!({"source":"chat-a"})) }),
+        );
+        let embed_a = Router::new().route(
+            "/v1/embeddings",
+            post(|| async {
+                axum::Json(json!({
+                    "object":"list",
+                    "data":[{"object":"embedding","index":0,"embedding":[0.1]}],
+                    "model":"embed-a"
+                }))
+            }),
+        );
+        let chat_b = Router::new().route(
+            "/v1/chat/completions",
+            post(|| async { axum::Json(json!({"source":"chat-b"})) }),
+        );
+        let embed_b = Router::new().route(
+            "/v1/embeddings",
+            post(|| async {
+                axum::Json(json!({
+                    "object":"list",
+                    "data":[{"object":"embedding","index":0,"embedding":[0.2]}],
+                    "model":"embed-b"
+                }))
+            }),
+        );
+
+        let chat_a_url = start_mock(chat_a).await;
+        let embed_a_url = start_mock(embed_a).await;
+        let chat_b_url = start_mock(chat_b).await;
+        let embed_b_url = start_mock(embed_b).await;
+
+        let chat_a_backend = BackendState::from_config(
+            BackendConfig {
+                id: "chat-a".into(),
+                url: chat_a_url,
+                node_id: None,
+                pool: "local-llm".into(),
+                workloads: vec![WorkloadKind::ChatCompletions],
+                health_path: None,
+            },
+            1,
+            Duration::from_secs(60),
+        );
+        let chat_a_handle = chat_a_backend.clone();
+        chat_a_handle.circuit.write().await.record_failure();
+
+        let embed_a_backend = BackendState::from_config(
+            BackendConfig {
+                id: "embed-a".into(),
+                url: embed_a_url,
+                node_id: None,
+                pool: "embedding".into(),
+                workloads: vec![WorkloadKind::Embeddings],
+                health_path: None,
+            },
+            10,
+            Duration::from_secs(60),
+        );
+        let chat_b_backend = BackendState::from_config(
+            BackendConfig {
+                id: "chat-b".into(),
+                url: chat_b_url,
+                node_id: None,
+                pool: "local-llm".into(),
+                workloads: vec![WorkloadKind::ChatCompletions],
+                health_path: None,
+            },
+            10,
+            Duration::from_secs(60),
+        );
+        let embed_b_backend = BackendState::from_config(
+            BackendConfig {
+                id: "embed-b".into(),
+                url: embed_b_url,
+                node_id: None,
+                pool: "embedding".into(),
+                workloads: vec![WorkloadKind::Embeddings],
+                health_path: None,
+            },
+            10,
+            Duration::from_secs(60),
+        );
+
+        let fairlead = start_fairlead_with_backends(vec![
+            chat_a_backend,
+            embed_a_backend,
+            chat_b_backend,
+            embed_b_backend,
+        ])
+        .await;
+        let client = reqwest::Client::new();
+        let chat_url = format!("{}/v1/chat/completions", fairlead);
+        let embed_url = format!("{}/v1/embeddings", fairlead);
+
+        let chat_first = client
+            .post(&chat_url)
+            .header("x-fairlead-thread-id", "thread-1")
+            .json(&json!({"model":"m","messages":[]}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            chat_first.json::<serde_json::Value>().await.unwrap()["source"],
+            "chat-b"
+        );
+
+        let embed_first = client
+            .post(&embed_url)
+            .header("x-fairlead-thread-id", "thread-1")
+            .json(&json!({"model":"m","input":"hello"}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            embed_first.json::<serde_json::Value>().await.unwrap()["model"],
+            "embed-a"
+        );
+
+        chat_a_handle.circuit.write().await.record_success();
+
+        let chat_second = client
+            .post(&chat_url)
+            .header("x-fairlead-thread-id", "thread-1")
+            .json(&json!({"model":"m","messages":[]}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            chat_second.json::<serde_json::Value>().await.unwrap()["source"],
+            "chat-b",
+            "chat should keep its own workload-scoped affinity"
+        );
+
+        let embed_second = client
+            .post(&embed_url)
+            .header("x-fairlead-thread-id", "thread-1")
+            .json(&json!({"model":"m","input":"hello"}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            embed_second.json::<serde_json::Value>().await.unwrap()["model"],
+            "embed-a",
+            "embeddings should not inherit chat affinity"
+        );
     }
 
     /// Affinity is only updated on success, never on failure. When a preferred
