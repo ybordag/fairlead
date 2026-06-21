@@ -55,10 +55,10 @@ cargo watch -x run
 
 ## Current status
 
-**Phase 6C complete** (cleat → main). **Phase 6D is complete on halyard** and
-pending final review/PR merge. Halyard adds worker completion/failure
-reporting, retries, worker capacity accounting, duration metrics, and
-per-attempt timeout state before durable state and callbacks.
+**Phase 6D complete** (halyard → main). **Phase 6E is in progress on shackle**:
+durable job state and restart recovery. The first Shackle slice keeps
+`JOB_STORE=memory` as the default and adds opt-in `JOB_STORE=sqlite` schema
+bootstrap through `JOB_DB_PATH`.
 
 | Phase | Branch | Status |
 |---|---|---|
@@ -70,8 +70,8 @@ per-attempt timeout state before durable state and callbacks.
 | 6A — Synchronous surface cleanup | clew → main | ✅ complete |
 | 6B — Async API + scheduler preview | tackle → main | ✅ complete |
 | 6C — Worker-pull claims + leases | cleat → main | ✅ complete |
-| 6D — Worker execution + retries | halyard | complete, pending PR |
-| 6E — Durable job state + recovery | — | pending |
+| 6D — Worker execution + retries | halyard → main | ✅ complete |
+| 6E — Durable job state + recovery | shackle | in progress |
 | 6F — Callback delivery + finalization | — | pending |
 | 7A — Pool-aware routing + placement | — | pending |
 | 7 — Advanced compute + full metrics | — | pending |
@@ -92,6 +92,7 @@ src/
   priority.rs       — per-priority synchronous admission limiter
   resources.rs      — POST/GET resource reports for VRAM/load control-plane state
   scheduler.rs      — scheduler preview, worker-pull claims, lease renewal, completion/failure
+  storage.rs        — job-store config bootstrap and SQLite schema foundation
   workers.rs        — worker registration, heartbeat, stale status, capacity accounting
   router/
     mod.rs          — module entry point

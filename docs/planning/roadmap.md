@@ -741,7 +741,8 @@ observable.
 Scope: make async job state survive ordinary Fairlead restarts without making
 Fairlead the application source of truth.
 
-- Add durable-enough job state, with SQLite as the first persistent backend.
+- [x] Add job store configuration with `memory` default and `sqlite` opt-in.
+- [x] Add SQLite schema bootstrap as the first persistent backend.
 - Persist jobs, queue position, status, attempts, lease metadata, timestamps,
   callback metadata, and terminal state.
 - Recover queued jobs after restart.

@@ -9,6 +9,7 @@ mod proxy;
 mod resources;
 mod router;
 mod scheduler;
+mod storage;
 mod workers;
 
 use axum::{
@@ -55,6 +56,7 @@ async fn main() -> anyhow::Result<()> {
     let cfg = config::Config::from_env()?;
 
     init_tracing(&cfg);
+    storage::bootstrap_job_store(&cfg.job_store)?;
 
     let client = reqwest::Client::new();
 
