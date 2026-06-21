@@ -697,15 +697,22 @@ or execute work yet.
 Scope: turn preview selection into atomic worker-pull claims while keeping worker
 execution simple and bounded.
 
-- Add worker-pull claim endpoint.
-- Mark selected jobs `running` only when a lease is granted.
-- Store lease metadata: worker ID, lease expiry, attempt number, and claimed-at
+- [x] Add worker-pull claim endpoint.
+- [x] Mark selected jobs `running` only when a lease is granted.
+- [x] Store lease metadata: worker ID, lease expiry, attempt number, and claimed-at
   timestamp.
-- Prevent duplicate claims for the same job.
-- Requeue expired leases when attempts remain.
-- Define cancellation semantics for queued, claimed, and running jobs.
-- Add tests for priority ordering, stale worker exclusion, unsupported job types,
-  duplicate-claim prevention, lease expiry, and cancellation races.
+- [x] Prevent duplicate claims for the same job.
+- [x] Requeue expired leases when attempts remain.
+- [x] Mark expired leases `failed` when retry attempts are exhausted.
+- [x] Add worker-scoped lease renewal for the worker holding the running lease.
+- [x] Define initial cancellation semantics for queued and running jobs.
+- [x] Add tests for priority ordering, FIFO ordering, stale worker exclusion,
+  unsupported job types, and duplicate-claim prevention.
+- [x] Add tests for lease expiry.
+- [x] Add tests for lease renewal and lease ownership.
+- [x] Add tests for cancellation ordering around running leases and requeued
+  jobs.
+- Defer true cancellation races with worker complete/fail endpoints until 6D.
 
 ### Phase 6D: Worker Execution, Retries, and Utilization
 
@@ -765,6 +772,8 @@ polling forever.
 
 - Add adapter boundaries for non-OpenAI-compatible synchronous and async
   endpoints, such as `/v1/rerank`, image generation, and vision analysis.
+- Evaluate optional gRPC transport for stable Fairlead client and worker APIs
+  while preserving HTTP/OpenAI compatibility for LLM endpoints.
 - Add concrete adapters for rerank, image, vision, batch embeddings, index
   builds, and clustering.
 - Add cancellation and idempotency.
@@ -775,3 +784,14 @@ polling forever.
 - Add cloud-provider fallback and provider credential policy if local/edge
   deployment needs external overflow capacity.
 - Add deployment documentation for multiple applications sharing Fairlead.
+
+### Future Phase 8: Transport and SDK Hardening
+
+- Add optional gRPC service definitions for stable job, worker, and callback
+  contracts if HTTP/JSON starts limiting typed client development.
+- Generate Rust and Python clients for Fairlead's stable APIs.
+- Support gRPC worker/backend adapters where workers expose typed RPC services.
+- Keep HTTP/OpenAI-compatible endpoints as the canonical LLM compatibility
+  surface.
+- Add parity tests so HTTP and gRPC APIs produce the same scheduling and job
+  state transitions when both are supported.

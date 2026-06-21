@@ -99,21 +99,29 @@ synchronous and async compute.
 
 ### `phase_6c_worker_claims_and_leases`
 
-When Phase 6C implements worker-pull claims and leases, add tests for:
+When later phases build on Phase 6C worker-pull claims and leases, add tests
+for:
 
-- cancellation of queued and running jobs
-- duplicate-claim prevention when two workers ask for the same job
-- lease timeout and retry
-- lease heartbeat or renewal behavior, if implemented
-- stale worker exclusion during claim
-- unsupported job types returning no claim
-- priority ordering across realtime, batch, and background queues at claim time
-- FIFO ordering within a priority at claim time
+- cancellation races between cancel and future complete/fail endpoints
+- lease ownership checks for future complete/fail endpoints
+- background lease sweep behavior, if Fairlead adds a scheduler loop instead of
+  claim-time opportunistic sweeps only
+- opt-in local multi-process e2e: start Fairlead, register two fake workers,
+  submit jobs, claim/renew/cancel/requeue through HTTP, and assert final job
+  state and metrics
+- opt-in DGX Spark e2e: run Fairlead with workers on the two connected DGX Spark
+  nodes, verify claim/renew behavior across nodes, then cancel and reclaim
+  expired work without requiring real model execution
 
 **Why deferred:** Phase 6B now has the in-memory job API, worker registry, queue
 metrics, and non-mutating scheduler preview. These tests require mutating claims,
-lease metadata, running-job state, and timeout behavior, which are Phase 6C
-scope.
+lease metadata, running-job state, and later worker execution endpoints. Cleat
+now covers the claim endpoint, duplicate-claim prevention, stale worker
+exclusion, unsupported job types, priority ordering, FIFO ordering,
+queued/running cancellation basics, claim-time expired lease requeue/failure,
+lease renewal, renewal ownership checks, and cancellation ordering around
+running leases and requeued jobs. The remaining race tests need future
+complete/fail endpoints or a heavier multi-process/deployment harness.
 
 ### `phase_6d_worker_execution_and_utilization`
 

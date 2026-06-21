@@ -236,11 +236,13 @@ request arrives
 ### Surface 2: Async job dispatch
 
 Phase 6B implements the HTTP job surface, non-dispatching worker registration,
-queue visibility, and scheduler preview with in-memory state. Worker-pull
-claims, leases, execution, persistence, and callback delivery are Phase 6C+
-work. The design belongs in the architecture because it defines Fairlead's
-boundary: Fairlead should be a compute control plane, not a general-purpose
-workflow engine.
+queue visibility, and scheduler preview with in-memory state. Phase 6C adds the
+first worker-pull claim path: Fairlead grants a bounded lease, marks the job
+running, and returns it to the worker. Fairlead also opportunistically requeues
+expired running leases before fresh workers claim more work. Worker execution,
+persistence, and callback delivery are later Phase 6 work. The design belongs
+in the architecture because it defines Fairlead's boundary: Fairlead should be a
+compute control plane, not a general-purpose workflow engine.
 
 ```
 POST /v1/jobs        — submit, get job_id immediately
@@ -250,10 +252,12 @@ DELETE /v1/jobs/{id} — cancel queued or running work when supported
 GET  /v1/scheduler/preview    — preview next job/worker match without mutation
 POST /v1/workers/register       — register or update worker capabilities
 POST /v1/workers/{id}/heartbeat — refresh worker liveness
+POST /v1/workers/{id}/claim     — lease a compatible queued job to a worker
+POST /v1/workers/{worker_id}/jobs/{job_id}/renew — renew a held lease
 GET  /v1/workers                — list registered workers
 ```
 
-Current early Phase 6B behavior:
+Current Phase 6B/6C behavior:
 
 - submitted jobs enter `queued`
 - submitted jobs are tracked in in-memory per-priority queues
@@ -268,11 +272,18 @@ Current early Phase 6B behavior:
 - `/metrics` exposes `fairlead_workers{type,status}`
 - `GET /v1/scheduler/preview` selects the next queued job and fresh compatible
   worker without changing job state
+- `POST /v1/workers/{id}/claim` validates the worker, grants a lease for a
+  compatible queued job, marks it `running`, and removes it from queue metrics
+- worker claims first sweep expired leases: expired jobs reenter their priority
+  queue if attempts remain, otherwise they become `failed`
+- `POST /v1/workers/{worker_id}/jobs/{job_id}/renew` validates the worker,
+  sweeps expired leases, and extends the lease only if that worker still holds
+  the running job
 - no job is dispatched to a worker yet
 - no callback is delivered yet
-- no durable queue, lease, or scheduler loop exists yet
+- no durable queue or background scheduler loop exists yet
 
-Future Phase 6C+ behavior:
+Future Phase 6C+ behavior after lease expiry and execution support:
 
 ```
 job submitted
@@ -280,7 +291,7 @@ job submitted
   → scheduler selects a registered worker with matching job type + VRAM headroom
   → Fairlead records a bounded lease for the running attempt
   → worker processes async
-  → worker completes or heartbeats before the lease expires
+  → worker completes or renews the job lease before it expires
   → callback fires to caller on completion
 ```
 
@@ -295,10 +306,85 @@ job submitted
   node metadata
 - `POST /v1/workers/{id}/heartbeat` — workers refresh liveness
 - `GET /v1/workers` — current in-memory worker registry
+- `POST /v1/workers/{id}/claim` — Phase 6C worker-pull claim endpoint
+- `POST /v1/workers/{worker_id}/jobs/{job_id}/renew` — Phase 6C lease renewal
 - `POST /v1/resources/report` — GPU consumers and workers report capacity
 - `GET /v1/resources` — current resource control-plane state
 - `GET /metrics` — Prometheus: queue depth/wait, circuit states, VRAM per node
 - Persistent job state for running attempts, retries, callbacks, and pruning.
+
+### Worker-pull claim decision
+
+Phase 6C uses a worker-scoped claim endpoint:
+
+```text
+POST /v1/workers/{id}/claim
+```
+
+This is a worker-pull API shape, but it does not make workers the scheduler.
+Workers only announce readiness by asking for work. Fairlead remains the central
+controller: it validates the worker, checks freshness and capabilities, scans
+queued jobs by priority/FIFO order, applies lease/resource policy, and either
+returns a leased job or returns no work.
+
+The alternative would be a job-scoped claim endpoint such as:
+
+```text
+POST /v1/jobs/claim
+{ "worker_id": "vision-a" }
+```
+
+That can work, but it treats claiming as a generic queue operation and pushes
+worker authority into the request body. The worker-scoped route makes the actor
+explicit and keeps the lifecycle clear:
+
+```text
+register -> heartbeat -> claim -> execute -> complete/fail
+```
+
+This choice has useful downstream consequences:
+
+- Worker identity, freshness, auth, and draining all attach naturally to the
+  route.
+- Fairlead can enforce that only the worker holding a lease may renew,
+  complete, or fail that job.
+- Worker utilization metrics can count claims and in-flight leases per worker.
+- Backpressure remains simple: a worker asks only when ready, while Fairlead
+  still controls assignment.
+- Workers do not need to expose externally reachable HTTP dispatch endpoints for
+  Fairlead to push jobs.
+
+The internal implementation may still live in scheduler/job modules and must
+mutate job state atomically. The route shape describes the actor; it does not
+weaken Fairlead's central scheduling authority.
+
+### Future gRPC transport
+
+Fairlead currently exposes HTTP/JSON APIs and forwards synchronous LLM requests
+to OpenAI-compatible HTTP backends such as vLLM. That should remain the default
+compatibility surface because it works with existing OpenAI clients, vLLM, demos,
+and simple service-to-service calls.
+
+gRPC can still be useful later as an optional transport layer once the job and
+worker contracts stabilize. The important split is:
+
+- inbound client transport: Rhizome or another caller talks to Fairlead
+- scheduling core: Fairlead validates, queues, leases, retries, and records jobs
+- outbound backend adapter: Fairlead talks to vLLM, a vision worker, or another
+  compute service
+
+Possible later shapes:
+
+```text
+Rhizome --gRPC--> Fairlead --HTTP/OpenAI--> vLLM
+worker  --gRPC--> Fairlead claim/heartbeat/complete APIs
+Fairlead --gRPC--> worker service, if that worker exposes typed RPCs
+```
+
+This is not Phase 6C scope. Adding gRPC well means defining protobuf contracts,
+generating Rust/Python clients, testing HTTP/gRPC parity, deciding streaming
+semantics, and preserving OpenAI-compatible HTTP behavior for LLM endpoints.
+It fits better in Phase 7 adapter work or a later transport/SDK hardening phase.
 
 ### Scheduler boundaries
 
@@ -367,11 +453,13 @@ leased/running
 ```
 
 The key mechanism is a lease. When a worker starts a job, Fairlead records the
-worker ID and a `lease_expires_at` timestamp. The worker must complete or
-heartbeat before the lease expires. If it does not, Fairlead releases any
+worker ID and a `lease_expires_at` timestamp. The worker must complete the job
+or renew that job lease before it expires. If it does not, Fairlead releases any
 resource reservation and either retries the job on another worker or marks it
-failed. This avoids holding an open process relationship for days; Fairlead only
-stores job state and watches bounded leases.
+failed. This is separate from worker heartbeat, which only proves worker
+liveness. Job renewal proves that the leased attempt is still making progress.
+This avoids holding an open process relationship for days; Fairlead only stores
+job state and watches bounded leases.
 
 The first useful workload is `vision_analysis`: a user-triggered image workflow
 that should outrank background indexing but yield to realtime chat or retrieval.

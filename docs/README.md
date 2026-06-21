@@ -32,7 +32,9 @@ detail.
 
 ## Current Work
 
-- [`current_work/phase_6b_tackle.md`](current_work/phase_6b_tackle.md) — active
+- [`current_work/phase_6c_cleat.md`](current_work/phase_6c_cleat.md) — active
+  Phase 6C worker-pull claims and leases notes.
+- [`current_work/phase_6b_tackle.md`](current_work/phase_6b_tackle.md) — completed
   Phase 6B scope and progress notes.
 - [`current_work/phase_6a_clew.md`](current_work/phase_6a_clew.md) — completed
   Phase 6A scope and progress notes.
