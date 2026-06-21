@@ -272,6 +272,8 @@ Current early Phase 6B behavior:
 - no callback is delivered yet
 - no durable queue, lease, or scheduler loop exists yet
 
+Future Phase 6C+ behavior:
+
 ```
 job submitted
   → queued by priority (realtime > batch > background)
