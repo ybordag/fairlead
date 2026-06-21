@@ -83,8 +83,10 @@ bounded lease and marks a compatible job running. The worker lease renewal
 endpoint extends a running lease only for the worker currently holding it.
 The worker result endpoints let that same lease holder complete a job or report
 retryable/non-retryable failure. Expired leases record timeout state and
-terminal jobs emit duration metrics. Durable queues, richer recovery behavior,
-and callback delivery are future Phase 6 subphases.
+terminal jobs emit duration metrics. Durable SQLite state and callback delivery
+are now implemented for the single-process local deployment shape; richer
+process-level recovery harnesses and durable callback-attempt state remain
+future work.
 
 ---
 

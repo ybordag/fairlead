@@ -306,8 +306,10 @@ Current Phase 6B/6C/6D behavior:
   lease, records an error, then requeues retryable failures when attempts remain
   or marks the job `failed`; both paths release worker capacity
 - no push dispatch exists yet; workers must pull by calling the claim endpoint
-- no callback is delivered yet
-- no durable queue or background scheduler loop exists yet
+- terminal jobs with `callback_url` dispatch asynchronous callbacks with bounded
+  retry and timeout policy
+- durable job state is available through opt-in SQLite, but there is no
+  background scheduler loop yet
 
 Current worker-pull execution flow:
 
@@ -342,9 +344,9 @@ job submitted
 - `POST /v1/resources/report` — GPU consumers and workers report capacity
 - `GET /v1/resources` — current resource control-plane state
 - `GET /metrics` — Prometheus: queue depth/wait, circuit states, VRAM per node,
-  worker availability, and worker in-flight capacity
-- Future persistent job state for running attempts, retries, callbacks, and
-  pruning.
+  worker availability, worker in-flight capacity, job duration, and callback
+  delivery outcomes
+- Future persistent callback-attempt state and completed-job pruning.
 
 ### Worker-pull claim decision
 

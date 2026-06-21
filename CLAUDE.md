@@ -57,8 +57,9 @@ cargo watch -x run
 
 **Phase 6E complete** (shackle → main). **Phase 6F is in progress on stay**:
 callback delivery and async finalization. Stay currently adds asynchronous
-one-shot callbacks for terminal jobs with `callback_url` and records callback
-delivery metrics by job type, terminal status, outcome, and HTTP status.
+callbacks for terminal jobs with `callback_url`, bounded retry/timeout policy,
+and callback delivery metrics by job type, terminal status, outcome, and HTTP
+status.
 
 | Phase | Branch | Status |
 |---|---|---|
@@ -164,8 +165,10 @@ exhausted. Worker utilization and terminal job duration metrics are
 implemented. Phase 6E adds opt-in SQLite persistence for job records, queue
 order, claim/lease state, attempts, callback metadata, and terminal state.
 Expired running leases loaded from SQLite are requeued when attempts remain and
-failed when attempts are exhausted. Worker deregistration, callback delivery,
-completed-job pruning, and process-level restart e2e tests are still planned.
+failed when attempts are exhausted. Phase 6F adds asynchronous terminal
+callbacks with bounded retry/timeout policy. Worker deregistration, completed-job
+pruning, durable callback-attempt state, and process-level restart e2e tests are
+still planned.
 
 Job request body:
 ```json
@@ -269,6 +272,9 @@ EMBEDDINGS_REQUIRED_VRAM_MB  — coarse embedding request estimate (default: 512
 PRIORITY_REALTIME_LIMIT      — max concurrent realtime requests (default: 8)
 PRIORITY_BATCH_LIMIT         — max concurrent batch-priority sync requests (default: 4)
 PRIORITY_BACKGROUND_LIMIT    — max concurrent background-priority sync requests (default: 2)
+CALLBACK_MAX_ATTEMPTS        — max terminal callback attempts (default: 3)
+CALLBACK_TIMEOUT_SECS        — per-attempt callback timeout (default: 5)
+CALLBACK_RETRY_DELAY_MS      — delay between callback attempts (default: 250)
 ```
 
 Planned later phases may add:
@@ -276,7 +282,6 @@ Planned later phases may add:
 ```text
 CLOUD_PROVIDERS              — JSON array of cloud provider configs
 SESSION_AFFINITY             — configurable affinity key policy
-JOB_CALLBACK_TIMEOUT_SECS    — time to attempt callback delivery
 WORKER_HEARTBEAT_SECS        — interval before a worker is considered stale
 ```
 

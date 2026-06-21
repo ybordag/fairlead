@@ -71,6 +71,7 @@ mod tests {
             backends,
             affinity: SessionAffinity::default(),
             metrics: RoutingMetrics::default(),
+            callback_policy: crate::callbacks::CallbackPolicy::default(),
             resources: ResourceRegistry::default(),
             resource_policy: ResourceRoutingPolicy::default(),
             priority_limiter: PriorityLimiter::default(),

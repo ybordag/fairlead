@@ -93,10 +93,13 @@ Implemented generalization work includes:
   requeue while attempts remain, and fail when attempts are exhausted.
 - **Terminal job duration metrics** grouped by priority, job type, and terminal
   status.
+- **SQLite-backed durable job state** as an opt-in mode for local restart
+  recovery.
+- **Terminal job callbacks** with bounded retry/timeout policy and
+  success/failure metrics.
 
-Future Phase 6 subphases add durable job state, callback delivery, and callback
-success/failure metrics. Later phases add complete pool-aware routing, adapter
-boundaries, and cloud fallback.
+Future phases add process-level e2e coverage, durable callback-attempt state if
+needed, complete pool-aware routing, adapter boundaries, and cloud fallback.
 
 See [`docs/planning/roadmap.md`](docs/planning/roadmap.md) for the
 implementation plan and acceptance criteria.
@@ -196,6 +199,19 @@ With `JOB_STORE=sqlite`, Fairlead persists submitted jobs, queue order, claim an
 lease state, attempts, cancellation, completion, failure, payloads, callback
 metadata, and result/error state. On startup, already-expired running leases are
 requeued when attempts remain and failed when attempts are exhausted.
+
+Terminal async jobs with `callback_url` are delivered asynchronously. Callback
+delivery is bounded by:
+
+```bash
+CALLBACK_MAX_ATTEMPTS=3 \
+CALLBACK_TIMEOUT_SECS=5 \
+CALLBACK_RETRY_DELAY_MS=250 \
+cargo run
+```
+
+Each callback attempt is counted in `/metrics` by job type, terminal status,
+delivery outcome, and callback HTTP status.
 
 Health:
 

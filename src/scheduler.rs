@@ -131,7 +131,12 @@ pub async fn complete_worker_job_handler(
     {
         FinishJobResult::Completed(job) => {
             state.workers.release_slot(&worker.id).await;
-            dispatch_job_callback(state.client.clone(), state.metrics.clone(), job.clone());
+            dispatch_job_callback(
+                state.client.clone(),
+                state.metrics.clone(),
+                state.callback_policy,
+                job.clone(),
+            );
             Json(JobResultResponse { job }).into_response()
         }
         FinishJobResult::NotRunning(job)
@@ -175,7 +180,12 @@ pub async fn fail_worker_job_handler(
         }
         FinishJobResult::Failed(job) => {
             state.workers.release_slot(&worker.id).await;
-            dispatch_job_callback(state.client.clone(), state.metrics.clone(), job.clone());
+            dispatch_job_callback(
+                state.client.clone(),
+                state.metrics.clone(),
+                state.callback_policy,
+                job.clone(),
+            );
             Json(JobResultResponse { job }).into_response()
         }
         FinishJobResult::NotRunning(job)
@@ -194,7 +204,12 @@ pub async fn sweep_expired_leases(state: &AppState) {
         state.workers.release_slot(&worker_id).await;
     }
     for job in report.failed_jobs {
-        dispatch_job_callback(state.client.clone(), state.metrics.clone(), job);
+        dispatch_job_callback(
+            state.client.clone(),
+            state.metrics.clone(),
+            state.callback_policy,
+            job,
+        );
     }
 }
 
@@ -245,16 +260,29 @@ mod tests {
         Json, Router,
     };
     use serde_json::{json, Value};
-    use std::time::Duration;
+    use std::{
+        collections::VecDeque,
+        sync::{Arc, Mutex},
+        time::Duration,
+    };
     use tokio::sync::mpsc;
     use tower::ServiceExt;
 
     fn test_state(jobs: JobRegistry, workers: WorkerRegistry) -> AppState {
+        test_state_with_callback_policy(jobs, workers, crate::callbacks::CallbackPolicy::default())
+    }
+
+    fn test_state_with_callback_policy(
+        jobs: JobRegistry,
+        workers: WorkerRegistry,
+        callback_policy: crate::callbacks::CallbackPolicy,
+    ) -> AppState {
         AppState {
             client: reqwest::Client::new(),
             backends: vec![],
             affinity: SessionAffinity::default(),
             metrics: RoutingMetrics::default(),
+            callback_policy,
             resources: ResourceRegistry::default(),
             resource_policy: ResourceRoutingPolicy::default(),
             priority_limiter: PriorityLimiter::default(),
@@ -271,6 +299,58 @@ mod tests {
                 let tx = tx.clone();
                 async move {
                     tx.send(value).await.unwrap();
+                    status
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        (format!("http://{addr}/callback"), rx)
+    }
+
+    async fn start_sequence_callback_target(
+        statuses: Vec<StatusCode>,
+    ) -> (String, mpsc::Receiver<Value>) {
+        let (tx, rx) = mpsc::channel(8);
+        let statuses = Arc::new(Mutex::new(VecDeque::from(statuses)));
+        let app = Router::new().route(
+            "/callback",
+            post(move |Json(value): Json<Value>| {
+                let tx = tx.clone();
+                let statuses = statuses.clone();
+                async move {
+                    tx.send(value).await.unwrap();
+                    statuses
+                        .lock()
+                        .expect("callback statuses mutex poisoned")
+                        .pop_front()
+                        .unwrap_or(StatusCode::OK)
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        (format!("http://{addr}/callback"), rx)
+    }
+
+    async fn start_delayed_callback_target(
+        delay: Duration,
+        status: StatusCode,
+    ) -> (String, mpsc::Receiver<Value>) {
+        let (tx, rx) = mpsc::channel(8);
+        let app = Router::new().route(
+            "/callback",
+            post(move |Json(value): Json<Value>| {
+                let tx = tx.clone();
+                async move {
+                    tx.send(value).await.unwrap();
+                    tokio::time::sleep(delay).await;
                     status
                 }
             }),
@@ -927,6 +1007,145 @@ mod tests {
         wait_for_metric(
             app,
             "fairlead_job_callbacks_total{type=\"cluster\",status=\"failed\",outcome=\"failure\",http_status=\"500\"} 1",
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn callback_delivery_retries_after_transient_failure() {
+        let (callback_url, mut callbacks) =
+            start_sequence_callback_target(vec![StatusCode::INTERNAL_SERVER_ERROR, StatusCode::OK])
+                .await;
+        let jobs = JobRegistry::default();
+        let workers = WorkerRegistry::default();
+        jobs.submit(SubmitJobRequest {
+            kind: JobKind::VisionAnalysis,
+            priority: Priority::Batch,
+            payload: Value::Null,
+            callback_url: Some(callback_url),
+        })
+        .await
+        .unwrap();
+        jobs.claim_next_for_worker("vision-worker", &[JobKind::VisionAnalysis], 30_000)
+            .await
+            .unwrap();
+        workers
+            .register(RegisterWorkerRequest {
+                id: "vision-worker".into(),
+                endpoint_url: "http://vision-worker:9000".into(),
+                node_id: None,
+                job_types: vec![JobKind::VisionAnalysis],
+                max_concurrent_jobs: None,
+                available_vram_mb: None,
+            })
+            .await
+            .unwrap();
+
+        let app = build_router(test_state_with_callback_policy(
+            jobs,
+            workers,
+            crate::callbacks::CallbackPolicy {
+                max_attempts: 2,
+                timeout: Duration::from_secs(1),
+                retry_delay: Duration::from_millis(1),
+            },
+        ));
+        let complete = app
+            .clone()
+            .oneshot(
+                Request::post("/v1/workers/vision-worker/jobs/job-1/complete")
+                    .header("content-type", "application/json")
+                    .body(Body::from(json!({"result": {"ok": true}}).to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(complete.status(), StatusCode::OK);
+
+        let first = tokio::time::timeout(Duration::from_secs(2), callbacks.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        let second = tokio::time::timeout(Duration::from_secs(2), callbacks.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(first["job"]["id"], "job-1");
+        assert_eq!(second["job"]["id"], "job-1");
+
+        wait_for_metric(
+            app.clone(),
+            "fairlead_job_callbacks_total{type=\"vision_analysis\",status=\"complete\",outcome=\"failure\",http_status=\"500\"} 1",
+        )
+        .await;
+        wait_for_metric(
+            app,
+            "fairlead_job_callbacks_total{type=\"vision_analysis\",status=\"complete\",outcome=\"success\",http_status=\"200\"} 1",
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn callback_delivery_timeout_records_failure_metric() {
+        let (callback_url, mut callbacks) =
+            start_delayed_callback_target(Duration::from_millis(200), StatusCode::OK).await;
+        let jobs = JobRegistry::default();
+        let workers = WorkerRegistry::default();
+        jobs.submit(SubmitJobRequest {
+            kind: JobKind::Cluster,
+            priority: Priority::Background,
+            payload: Value::Null,
+            callback_url: Some(callback_url),
+        })
+        .await
+        .unwrap();
+        jobs.claim_next_for_worker("cluster-worker", &[JobKind::Cluster], 30_000)
+            .await
+            .unwrap();
+        workers
+            .register(RegisterWorkerRequest {
+                id: "cluster-worker".into(),
+                endpoint_url: "http://cluster-worker:9000".into(),
+                node_id: None,
+                job_types: vec![JobKind::Cluster],
+                max_concurrent_jobs: None,
+                available_vram_mb: None,
+            })
+            .await
+            .unwrap();
+
+        let app = build_router(test_state_with_callback_policy(
+            jobs,
+            workers,
+            crate::callbacks::CallbackPolicy {
+                max_attempts: 1,
+                timeout: Duration::from_millis(10),
+                retry_delay: Duration::from_millis(0),
+            },
+        ));
+        let fail = app
+            .clone()
+            .oneshot(
+                Request::post("/v1/workers/cluster-worker/jobs/job-1/fail")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({"error": "bad input", "retryable": false}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(fail.status(), StatusCode::OK);
+
+        let callback = tokio::time::timeout(Duration::from_secs(2), callbacks.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(callback["job"]["id"], "job-1");
+
+        wait_for_metric(
+            app,
+            "fairlead_job_callbacks_total{type=\"cluster\",status=\"failed\",outcome=\"failure\",http_status=\"0\"} 1",
         )
         .await;
     }

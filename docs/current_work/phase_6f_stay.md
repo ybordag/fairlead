@@ -34,9 +34,25 @@ Implemented:
 - Added tests for successful completion callbacks, failed callback metrics,
   cancellation callbacks, and no callback on retryable requeue.
 
+## Second Slice
+
+Implemented:
+
+- Added bounded callback retry policy.
+- Added per-attempt callback timeout policy.
+- Added config for callback delivery:
+  - `CALLBACK_MAX_ATTEMPTS`, default `3`.
+  - `CALLBACK_TIMEOUT_SECS`, default `5`.
+  - `CALLBACK_RETRY_DELAY_MS`, default `250`.
+- Records callback metrics for each delivery attempt, so transient failures
+  before a later success remain visible.
+- Retries failed callback attempts after non-2xx responses, request errors, or
+  timeouts.
+- Stops retrying after the first successful 2xx response.
+- Added tests for transient failure followed by success, timeout handling, and
+  callback config validation.
+
 Remaining Stay work:
 
-- Add callback retry policy.
-- Add callback timeout policy.
 - Decide whether callback state should become durable in SQLite.
 - Add process-level or demo-level callback e2e coverage.

@@ -40,6 +40,8 @@ pub struct AppState {
     pub affinity: SessionAffinity,
     /// In-process routing metrics rendered by `/metrics`.
     pub metrics: RoutingMetrics,
+    /// Callback delivery retry and timeout settings.
+    pub callback_policy: callbacks::CallbackPolicy,
     /// Cooperative resource reports from model servers and compute workers.
     pub resources: ResourceRegistry,
     /// Policy for using resource reports during backend selection.
@@ -93,6 +95,11 @@ async fn main() -> anyhow::Result<()> {
         backends,
         affinity: SessionAffinity::default(),
         metrics: RoutingMetrics::default(),
+        callback_policy: callbacks::CallbackPolicy {
+            max_attempts: cfg.callback_max_attempts,
+            timeout: Duration::from_secs(cfg.callback_timeout_secs),
+            retry_delay: Duration::from_millis(cfg.callback_retry_delay_ms),
+        },
         resources: ResourceRegistry::new(Duration::from_secs(cfg.resource_report_ttl_secs)),
         resource_policy: ResourceRoutingPolicy {
             enabled: cfg.resource_aware_routing,
@@ -178,6 +185,7 @@ mod tests {
             backends: vec![],
             affinity: SessionAffinity::default(),
             metrics: RoutingMetrics::default(),
+            callback_policy: callbacks::CallbackPolicy::default(),
             resources: ResourceRegistry::default(),
             resource_policy: ResourceRoutingPolicy::default(),
             priority_limiter: PriorityLimiter::default(),

@@ -720,7 +720,12 @@ pub async fn cancel_job(State(state): State<AppState>, Path(id): Path<String>) -
             if let Some(lease) = &job.lease {
                 state.workers.release_slot(&lease.worker_id).await;
             }
-            dispatch_job_callback(state.client.clone(), state.metrics.clone(), job.clone());
+            dispatch_job_callback(
+                state.client.clone(),
+                state.metrics.clone(),
+                state.callback_policy,
+                job.clone(),
+            );
             Json(JobResponse { job }).into_response()
         }
         CancelJobResult::AlreadyTerminal(job) => {
@@ -811,6 +816,7 @@ mod tests {
             backends: vec![],
             affinity: SessionAffinity::default(),
             metrics: RoutingMetrics::default(),
+            callback_policy: crate::callbacks::CallbackPolicy::default(),
             resources: ResourceRegistry::default(),
             resource_policy: ResourceRoutingPolicy::default(),
             priority_limiter: PriorityLimiter::default(),

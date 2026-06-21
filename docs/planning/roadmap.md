@@ -412,7 +412,7 @@ Scope:
 - [x] Add worker availability.
 - [x] Add worker utilization.
 - [x] Add job duration.
-- [ ] Add callback success/failure.
+- [x] Add callback success/failure.
 
 Acceptance criteria:
 
@@ -763,7 +763,7 @@ polling forever.
 - [x] Deliver callbacks for terminal job states when `callback_url` is present.
 - [x] Track callback success/failure separately from compute job status.
 - [x] Add callback success/failure metrics.
-- Add callback retry and timeout policy.
+- [x] Add callback retry and timeout policy.
 - Add final async end-to-end demo and documentation.
 - Document Temporal as deferred unless Rhizome needs durable multi-step workflow
   orchestration beyond compute dispatch.
