@@ -397,6 +397,62 @@ the endpoint response, and metrics. This e2e needs process lifecycle
 management, port allocation, callback receiver processes, SQLite restart
 assertions, and timing control around retention age.
 
+### `phase_8c_idempotency_process_e2e`
+
+Add an opt-in process-level e2e for async job idempotency:
+
+- start Fairlead with `JOB_STORE=sqlite`
+- submit a job with `idempotency_key`, simulate a client retry with the same
+  body, and verify both responses return the same job ID
+- restart Fairlead and retry the same submission again, verifying the recovered
+  SQLite registry still returns the original job instead of enqueueing a
+  duplicate
+- fire many concurrent `POST /v1/jobs` requests with the same `idempotency_key`
+  against a real Fairlead process and verify only one job is created
+- reuse the same key with a different payload, callback URL, priority, or job
+  type and verify Fairlead rejects the request without mutating queue depth
+- submit an overlong or blank `idempotency_key` through the process-level API
+  and verify Fairlead rejects the request without mutating queue depth
+- complete, fail, or cancel the original job, then retry the original submit
+  and verify it still returns the retained terminal job while that job has not
+  been pruned
+- cancel a queued job, retry `DELETE /v1/jobs/{id}` before and after restart,
+  and verify the existing cancelled job is returned without duplicate callback
+  delivery or queue metric mutation
+- attempt to cancel completed and failed jobs and verify the process-level API
+  still returns conflict
+- complete a leased job with `attempt`, retry the same completion before and
+  after restart, and verify Fairlead returns the existing terminal job without
+  duplicate callback delivery or worker capacity mutation
+- retry terminal completion with the same worker/attempt but a different result
+  payload and verify Fairlead returns conflict
+- terminally fail a leased job with `attempt`, retry the same failure before and
+  after restart, and verify Fairlead returns the existing terminal job without
+  duplicate callback delivery or worker capacity mutation
+- retry terminal failure with the same worker/attempt but a different error or
+  retryable flag and verify Fairlead returns conflict
+- report complete/fail with a mismatched running lease attempt and verify
+  Fairlead rejects the report
+- prune the retained terminal job after it becomes eligible, then reuse the
+  same idempotency key and verify Fairlead creates a new job
+- run the same sequence while fake workers are concurrently claiming jobs to
+  verify duplicate submits never create duplicate running leases
+- race duplicate terminal result reports against fresh worker claims and verify
+  idempotent replay never releases capacity for a different in-flight job
+- simulate a crash after a worker terminal result is accepted but before the
+  worker receives the HTTP response, then retry the result after restart and
+  verify terminal-attempt metadata makes the retry idempotent
+- scrape `/metrics` during the flow and verify queue depth, queue wait, terminal
+  duration, and prune metrics remain internally consistent
+- run the submit/retry/restart sequence against the DGX Spark two-node setup
+  with fake async workers so network retries and process restarts are exercised
+  without real model execution
+
+**Why deferred:** In-process tests cover the registry, SQLite recovery, mismatch
+rejection, and pruning behavior. This e2e needs process lifecycle management,
+port allocation, SQLite restart assertions, fake workers, and optional DGX Spark
+access.
+
 ### `phase_8d_background_maintenance_process_e2e`
 
 When Phase 8D adds background maintenance loops, add opt-in process-level e2e

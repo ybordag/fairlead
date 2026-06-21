@@ -515,6 +515,7 @@ Needed concepts:
 - Attempt count and retry limit.
 - Per-job timeout and worker lease expiration.
 - Callback URL and callback delivery state.
+- Optional submit idempotency key for safe caller retries.
 - Resource reservation and release for running attempts.
 - Retry policy.
 - Expiration and cleanup.
@@ -523,7 +524,6 @@ Open questions:
 
 - Does the first implementation use in-memory state only, or SQLite-backed state?
 - Are completed results stored, or only status plus callback outcome?
-- How are duplicate submissions made idempotent?
 - How are cancellations propagated to workers?
 
 Implemented early Phase 6B scope:
@@ -860,8 +860,21 @@ workload protocols.
   - [x] Audit test coverage and deferred process-level pruning tests before PR.
   - [x] Add final 8B docs/readiness pass before PR.
 - **8C Splice: Idempotency**
-  - Add stronger idempotency semantics for submit, complete, fail, cancel, and
-    callback handling where needed.
+  - [x] Add optional `idempotency_key` for async job submission retries.
+  - [x] Persist submit idempotency keys in SQLite-backed job state.
+  - [x] Release submit idempotency keys when terminal jobs are pruned.
+  - [x] Make repeated cancellation idempotent for already-cancelled jobs while
+    preserving conflict responses for completed or failed jobs.
+  - [x] Add optional worker-reported `attempt` to complete/fail requests.
+  - [x] Store terminal attempt metadata for completed and terminally failed
+    worker attempts.
+  - [x] Make exact duplicate terminal complete/fail reports idempotent when
+    worker ID, attempt, and result/error payload match.
+  - [x] Preserve conflict responses for contradictory terminal result reports.
+  - [x] Review callback idempotency and keep the at-least-once receiver contract
+    documented.
+  - [x] Audit test coverage and deferred process-level e2e cases before PR.
+  - [x] Add final 8C docs/readiness pass before PR.
 - **8D Clove: Background Maintenance Loops**
   - Add background expiry/recovery loops if claim-time sweeps are not enough.
   - Add optional background pruning loop that invokes the 8B terminal-job

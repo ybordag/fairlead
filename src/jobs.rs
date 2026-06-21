@@ -73,6 +73,8 @@ pub struct SubmitJobRequest {
     pub payload: Value,
     #[serde(default)]
     pub callback_url: Option<String>,
+    #[serde(default)]
+    pub idempotency_key: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -84,12 +86,14 @@ pub struct JobRecord {
     pub status: JobStatus,
     pub payload: Value,
     pub callback_url: Option<String>,
+    pub idempotency_key: Option<String>,
     pub result: Option<Value>,
     pub error: Option<JobFailure>,
     pub callback: Option<JobCallbackState>,
     pub attempts: u32,
     pub max_attempts: u32,
     pub lease: Option<JobLease>,
+    pub terminal_attempt: Option<JobTerminalAttempt>,
     pub created_at_unix_ms: u128,
     pub updated_at_unix_ms: u128,
 }
@@ -134,6 +138,12 @@ pub struct JobLease {
     pub expires_at_unix_ms: u128,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct JobTerminalAttempt {
+    pub worker_id: String,
+    pub attempt: u32,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct JobResponse {
     pub job: JobRecord,
@@ -143,6 +153,8 @@ pub struct JobResponse {
 pub struct CompleteJobRequest {
     #[serde(default)]
     pub result: Value,
+    #[serde(default)]
+    pub attempt: Option<u32>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -150,6 +162,8 @@ pub struct FailJobRequest {
     pub error: String,
     #[serde(default = "default_retryable_failure")]
     pub retryable: bool,
+    #[serde(default)]
+    pub attempt: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -255,6 +269,7 @@ pub struct JobRegistry {
 pub(crate) struct JobRegistryInner {
     pub(crate) next_id: u64,
     pub(crate) jobs: HashMap<String, JobRecord>,
+    pub(crate) idempotency_keys: HashMap<String, String>,
     pub(crate) order: Vec<String>,
     pub(crate) queues: JobQueues,
 }
@@ -323,7 +338,25 @@ impl JobRegistry {
 
     pub async fn submit(&self, request: SubmitJobRequest) -> Result<JobRecord, String> {
         let callback_url = normalize_callback_url(request.callback_url)?;
+        let idempotency_key = normalize_idempotency_key(request.idempotency_key)?;
         let mut guard = self.inner.write().await;
+
+        if let Some(key) = &idempotency_key {
+            if let Some(existing_id) = guard.idempotency_keys.get(key).cloned() {
+                if let Some(existing) = guard.jobs.get(&existing_id) {
+                    if existing.kind == request.kind
+                        && existing.priority == request.priority
+                        && existing.payload == request.payload
+                        && existing.callback_url == callback_url
+                    {
+                        return Ok(existing.clone());
+                    }
+                    return Err("idempotency_key already used for a different job request".into());
+                }
+                guard.idempotency_keys.remove(key);
+            }
+        }
+
         guard.next_id += 1;
         let now = unix_ms();
         let job = JobRecord {
@@ -333,16 +366,21 @@ impl JobRegistry {
             status: JobStatus::Queued,
             payload: request.payload,
             callback_url,
+            idempotency_key: idempotency_key.clone(),
             result: None,
             error: None,
             callback: None,
             attempts: 0,
             max_attempts: 3,
             lease: None,
+            terminal_attempt: None,
             created_at_unix_ms: now,
             updated_at_unix_ms: now,
         };
         guard.jobs.insert(job.id.clone(), job.clone());
+        if let Some(key) = idempotency_key {
+            guard.idempotency_keys.insert(key, job.id.clone());
+        }
         guard.order.push(job.id.clone());
         guard
             .queues
@@ -616,6 +654,7 @@ impl JobRegistry {
         job.status = JobStatus::Running;
         job.attempts += 1;
         job.result = None;
+        job.terminal_attempt = None;
         job.lease = Some(JobLease {
             worker_id: worker_id.to_string(),
             attempt: job.attempts,
@@ -682,6 +721,7 @@ impl JobRegistry {
         &self,
         id: &str,
         worker_id: &str,
+        attempt: Option<u32>,
         result: Value,
     ) -> FinishJobResult {
         let mut guard = self.inner.write().await;
@@ -690,6 +730,12 @@ impl JobRegistry {
         };
 
         if job.status != JobStatus::Running {
+            if job.status == JobStatus::Complete
+                && terminal_attempt_matches(job, worker_id, attempt)
+                && job.result.as_ref() == Some(&result)
+            {
+                return FinishJobResult::IdempotentCompleted(job.clone());
+            }
             return FinishJobResult::NotRunning(job.clone());
         }
 
@@ -700,6 +746,9 @@ impl JobRegistry {
         if lease.worker_id != worker_id {
             return FinishJobResult::LeaseNotHeld(job.clone());
         }
+        if attempt.is_some_and(|reported| reported != lease.attempt) {
+            return FinishJobResult::LeaseNotHeld(job.clone());
+        }
 
         let now = unix_ms();
         if lease.expires_at_unix_ms <= now {
@@ -707,10 +756,15 @@ impl JobRegistry {
         }
 
         let job = {
+            let attempt = job.lease.as_ref().expect("lease checked above").attempt;
             job.status = JobStatus::Complete;
             job.result = Some(result);
             job.error = None;
             job.lease = None;
+            job.terminal_attempt = Some(JobTerminalAttempt {
+                worker_id: worker_id.to_string(),
+                attempt,
+            });
             job.updated_at_unix_ms = now;
             prepare_callback(job);
             job.clone()
@@ -725,6 +779,7 @@ impl JobRegistry {
         &self,
         id: &str,
         worker_id: &str,
+        attempt: Option<u32>,
         failure: JobFailure,
     ) -> FinishJobResult {
         let mut guard = self.inner.write().await;
@@ -733,6 +788,12 @@ impl JobRegistry {
         };
 
         if job.status != JobStatus::Running {
+            if job.status == JobStatus::Failed
+                && terminal_attempt_matches(job, worker_id, attempt)
+                && job.error.as_ref() == Some(&failure)
+            {
+                return FinishJobResult::IdempotentFailed(job.clone());
+            }
             return FinishJobResult::NotRunning(job.clone());
         }
 
@@ -743,12 +804,16 @@ impl JobRegistry {
         if lease.worker_id != worker_id {
             return FinishJobResult::LeaseNotHeld(job.clone());
         }
+        if attempt.is_some_and(|reported| reported != lease.attempt) {
+            return FinishJobResult::LeaseNotHeld(job.clone());
+        }
 
         let now = unix_ms();
         if lease.expires_at_unix_ms <= now {
             return FinishJobResult::Expired(job.clone());
         }
 
+        let attempt = job.lease.as_ref().expect("lease checked above").attempt;
         job.result = None;
         job.error = Some(failure.clone());
         job.lease = None;
@@ -756,6 +821,7 @@ impl JobRegistry {
 
         if failure.retryable && job.attempts < job.max_attempts {
             job.status = JobStatus::Queued;
+            job.terminal_attempt = None;
             let priority = job.priority;
             let id = job.id.clone();
             let job = job.clone();
@@ -766,6 +832,10 @@ impl JobRegistry {
             FinishJobResult::Requeued(job)
         } else {
             job.status = JobStatus::Failed;
+            job.terminal_attempt = Some(JobTerminalAttempt {
+                worker_id: worker_id.to_string(),
+                attempt,
+            });
             prepare_callback(job);
             let job = job.clone();
             if self.persist_locked(&guard).is_err() {
@@ -789,6 +859,7 @@ impl JobRegistry {
         job.status = JobStatus::Cancelled;
         let now = unix_ms();
         job.updated_at_unix_ms = now;
+        job.terminal_attempt = None;
         prepare_callback(job);
         let job = job.clone();
         guard.queues.remove(priority, id);
@@ -864,7 +935,11 @@ fn prune_terminal_jobs_locked(
     }
 
     for (id, priority, status) in remove_ids {
-        inner.jobs.remove(&id);
+        if let Some(job) = inner.jobs.remove(&id) {
+            if let Some(key) = job.idempotency_key {
+                inner.idempotency_keys.remove(&key);
+            }
+        }
         inner.queues.remove(priority, &id);
         report.record_removed(status);
     }
@@ -951,8 +1026,10 @@ pub enum RenewJobLeaseResult {
 
 pub enum FinishJobResult {
     Completed(JobRecord),
+    IdempotentCompleted(JobRecord),
     Requeued(JobRecord),
     Failed(JobRecord),
+    IdempotentFailed(JobRecord),
     NotRunning(JobRecord),
     LeaseNotHeld(JobRecord),
     Expired(JobRecord),
@@ -1004,7 +1081,11 @@ pub async fn cancel_job(State(state): State<AppState>, Path(id): Path<String>) -
             Json(JobResponse { job }).into_response()
         }
         CancelJobResult::AlreadyTerminal(job) => {
-            (StatusCode::CONFLICT, Json(JobResponse { job })).into_response()
+            if job.status == JobStatus::Cancelled {
+                Json(JobResponse { job }).into_response()
+            } else {
+                (StatusCode::CONFLICT, Json(JobResponse { job })).into_response()
+            }
         }
         CancelJobResult::NotFound => (StatusCode::NOT_FOUND, "job not found").into_response(),
     }
@@ -1017,6 +1098,29 @@ fn normalize_callback_url(callback_url: Option<String>) -> Result<Option<String>
     let trimmed = callback_url.trim();
     if trimmed.is_empty() {
         return Err("callback_url cannot be empty".into());
+    }
+    Ok(Some(trimmed.to_string()))
+}
+
+fn terminal_attempt_matches(job: &JobRecord, worker_id: &str, attempt: Option<u32>) -> bool {
+    let Some(reported_attempt) = attempt else {
+        return false;
+    };
+    job.terminal_attempt.as_ref().is_some_and(|terminal| {
+        terminal.worker_id == worker_id && terminal.attempt == reported_attempt
+    })
+}
+
+fn normalize_idempotency_key(idempotency_key: Option<String>) -> Result<Option<String>, String> {
+    let Some(idempotency_key) = idempotency_key else {
+        return Ok(None);
+    };
+    let trimmed = idempotency_key.trim();
+    if trimmed.is_empty() {
+        return Err("idempotency_key cannot be empty".into());
+    }
+    if trimmed.len() > 256 {
+        return Err("idempotency_key cannot exceed 256 bytes".into());
     }
     Ok(Some(trimmed.to_string()))
 }
@@ -1139,6 +1243,145 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn submit_job_reuses_existing_job_for_matching_idempotency_key() {
+        let app = build_router(test_state());
+
+        let body = json!({
+            "type": "vision_analysis",
+            "priority": "batch",
+            "payload": {"image_id": "image-1"},
+            "callback_url": "http://rhizome/jobs/image-1",
+            "idempotency_key": " image-1 "
+        })
+        .to_string();
+
+        let first = app
+            .clone()
+            .oneshot(
+                Request::post("/v1/jobs")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.clone()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(first.status(), StatusCode::ACCEPTED);
+        let first_value = response_json(first).await;
+
+        let second = app
+            .clone()
+            .oneshot(
+                Request::post("/v1/jobs")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(second.status(), StatusCode::ACCEPTED);
+        let second_value = response_json(second).await;
+
+        assert_eq!(first_value["job"]["id"], "job-1");
+        assert_eq!(second_value["job"]["id"], "job-1");
+        assert_eq!(second_value["job"]["idempotency_key"], "image-1");
+
+        let listed = app
+            .oneshot(Request::get("/v1/jobs").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let listed = response_json(listed).await;
+        assert_eq!(listed["jobs"].as_array().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn submit_job_rejects_idempotency_key_reused_for_different_request() {
+        let jobs = JobRegistry::default();
+        let first = jobs
+            .submit(SubmitJobRequest {
+                kind: JobKind::VisionAnalysis,
+                priority: Priority::Batch,
+                payload: json!({"image_id": "image-1"}),
+                callback_url: None,
+                idempotency_key: Some("image-1".into()),
+            })
+            .await
+            .unwrap();
+
+        let duplicate = jobs
+            .submit(SubmitJobRequest {
+                kind: JobKind::VisionAnalysis,
+                priority: Priority::Batch,
+                payload: json!({"image_id": "image-2"}),
+                callback_url: None,
+                idempotency_key: Some("image-1".into()),
+            })
+            .await;
+
+        assert_eq!(first.id, "job-1");
+        assert_eq!(
+            duplicate.unwrap_err(),
+            "idempotency_key already used for a different job request"
+        );
+        assert_eq!(jobs.list().await.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn submit_job_rejects_overlong_idempotency_key() {
+        let jobs = JobRegistry::default();
+        let result = jobs
+            .submit(SubmitJobRequest {
+                kind: JobKind::VisionAnalysis,
+                priority: Priority::Batch,
+                payload: Value::Null,
+                callback_url: None,
+                idempotency_key: Some("x".repeat(257)),
+            })
+            .await;
+
+        assert_eq!(
+            result.unwrap_err(),
+            "idempotency_key cannot exceed 256 bytes"
+        );
+        assert!(jobs.list().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn submit_job_reuses_retained_terminal_job_for_idempotency_key() {
+        let jobs = JobRegistry::default();
+        let first = jobs
+            .submit(SubmitJobRequest {
+                kind: JobKind::VisionAnalysis,
+                priority: Priority::Batch,
+                payload: json!({"image": "rose.jpg"}),
+                callback_url: None,
+                idempotency_key: Some("rose-image".into()),
+            })
+            .await
+            .unwrap();
+        jobs.claim_next_for_worker("worker-a", &[JobKind::VisionAnalysis], 30_000)
+            .await
+            .unwrap();
+        jobs.complete_lease(&first.id, "worker-a", None, json!({"ok": true}))
+            .await;
+
+        let duplicate = jobs
+            .submit(SubmitJobRequest {
+                kind: JobKind::VisionAnalysis,
+                priority: Priority::Batch,
+                payload: json!({"image": "rose.jpg"}),
+                callback_url: None,
+                idempotency_key: Some("rose-image".into()),
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(duplicate.id, first.id);
+        assert_eq!(duplicate.status, JobStatus::Complete);
+        assert_eq!(duplicate.result, Some(json!({"ok": true})));
+        assert_eq!(jobs.list().await.len(), 1);
+    }
+
+    #[tokio::test]
     async fn sqlite_registry_recovers_queued_jobs_and_next_id() {
         let path = unique_db_path("queued");
         let jobs =
@@ -1149,6 +1392,7 @@ mod tests {
             priority: Priority::Background,
             payload: json!({"index": "nightly"}),
             callback_url: None,
+            idempotency_key: None,
         })
         .await
         .unwrap();
@@ -1157,6 +1401,7 @@ mod tests {
             priority: Priority::Realtime,
             payload: json!({"texts": ["a"]}),
             callback_url: Some("http://rhizome/jobs/job-2".into()),
+            idempotency_key: None,
         })
         .await
         .unwrap();
@@ -1186,10 +1431,47 @@ mod tests {
                 priority: Priority::Batch,
                 payload: Value::Null,
                 callback_url: None,
+                idempotency_key: None,
             })
             .await
             .unwrap();
         assert_eq!(next.id, "job-3");
+    }
+
+    #[tokio::test]
+    async fn sqlite_registry_recovers_submit_idempotency_keys() {
+        let path = unique_db_path("idempotency");
+        let jobs =
+            JobRegistry::with_store(crate::storage::SqliteJobStore::open(&path).unwrap()).unwrap();
+
+        let submitted = jobs
+            .submit(SubmitJobRequest {
+                kind: JobKind::VisionAnalysis,
+                priority: Priority::Batch,
+                payload: json!({"image": "rose.jpg"}),
+                callback_url: Some("http://rhizome/jobs/rose".into()),
+                idempotency_key: Some("rose-image".into()),
+            })
+            .await
+            .unwrap();
+        assert_eq!(submitted.id, "job-1");
+
+        let restored =
+            JobRegistry::with_store(crate::storage::SqliteJobStore::open(&path).unwrap()).unwrap();
+        let duplicate = restored
+            .submit(SubmitJobRequest {
+                kind: JobKind::VisionAnalysis,
+                priority: Priority::Batch,
+                payload: json!({"image": "rose.jpg"}),
+                callback_url: Some("http://rhizome/jobs/rose".into()),
+                idempotency_key: Some("rose-image".into()),
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(duplicate.id, "job-1");
+        assert_eq!(duplicate.idempotency_key.as_deref(), Some("rose-image"));
+        assert_eq!(restored.list().await.len(), 1);
     }
 
     #[tokio::test]
@@ -1204,6 +1486,7 @@ mod tests {
                 priority: Priority::Batch,
                 payload: json!({"image": "rose.jpg"}),
                 callback_url: None,
+                idempotency_key: None,
             })
             .await
             .unwrap();
@@ -1213,6 +1496,7 @@ mod tests {
                 priority: Priority::Realtime,
                 payload: Value::Null,
                 callback_url: None,
+                idempotency_key: None,
             })
             .await
             .unwrap();
@@ -1222,6 +1506,17 @@ mod tests {
                 priority: Priority::Background,
                 payload: Value::Null,
                 callback_url: None,
+                idempotency_key: None,
+            })
+            .await
+            .unwrap();
+        let failed = jobs
+            .submit(SubmitJobRequest {
+                kind: JobKind::Cluster,
+                priority: Priority::Batch,
+                payload: Value::Null,
+                callback_url: None,
+                idempotency_key: None,
             })
             .await
             .unwrap();
@@ -1233,8 +1528,21 @@ mod tests {
         jobs.claim_next_for_worker("worker-b", &[complete.kind], 30_000)
             .await
             .unwrap();
-        jobs.complete_lease(&complete.id, "worker-b", json!({"ok": true}))
+        jobs.complete_lease(&complete.id, "worker-b", None, json!({"ok": true}))
             .await;
+        jobs.claim_next_for_worker("worker-c", &[failed.kind], 30_000)
+            .await
+            .unwrap();
+        jobs.fail_lease(
+            &failed.id,
+            "worker-c",
+            None,
+            JobFailure {
+                message: "bad input".into(),
+                retryable: false,
+            },
+        )
+        .await;
 
         let restored =
             JobRegistry::with_store(crate::storage::SqliteJobStore::open(&path).unwrap()).unwrap();
@@ -1253,6 +1561,23 @@ mod tests {
         assert_eq!(complete.status, JobStatus::Complete);
         assert_eq!(complete.result, Some(json!({"ok": true})));
         assert!(complete.lease.is_none());
+        assert_eq!(
+            complete.terminal_attempt,
+            Some(JobTerminalAttempt {
+                worker_id: "worker-b".into(),
+                attempt: 1,
+            })
+        );
+
+        let failed = restored.get(&failed.id).await.unwrap();
+        assert_eq!(failed.status, JobStatus::Failed);
+        assert_eq!(
+            failed.terminal_attempt,
+            Some(JobTerminalAttempt {
+                worker_id: "worker-c".into(),
+                attempt: 1,
+            })
+        );
     }
 
     #[tokio::test]
@@ -1266,6 +1591,7 @@ mod tests {
                 priority: Priority::Batch,
                 payload: Value::Null,
                 callback_url: None,
+                idempotency_key: None,
             })
             .await
             .unwrap();
@@ -1307,6 +1633,7 @@ mod tests {
                 priority: Priority::Background,
                 payload: Value::Null,
                 callback_url: None,
+                idempotency_key: None,
             })
             .await
             .unwrap();
@@ -1390,6 +1717,7 @@ mod tests {
                 priority: Priority::Batch,
                 payload: Value::Null,
                 callback_url: None,
+                idempotency_key: None,
             })
             .await
             .unwrap();
@@ -1425,6 +1753,7 @@ mod tests {
                 priority: Priority::Batch,
                 payload: Value::Null,
                 callback_url: None,
+                idempotency_key: None,
             })
             .await
             .unwrap();
@@ -1434,6 +1763,7 @@ mod tests {
                 priority: Priority::Background,
                 payload: Value::Null,
                 callback_url: None,
+                idempotency_key: None,
             })
             .await
             .unwrap();
@@ -1444,6 +1774,7 @@ mod tests {
         jobs.fail_lease(
             &retryable.id,
             "worker-a",
+            None,
             JobFailure {
                 message: "transient worker error".into(),
                 retryable: true,
@@ -1456,6 +1787,7 @@ mod tests {
         jobs.fail_lease(
             &terminal.id,
             "worker-b",
+            None,
             JobFailure {
                 message: "bad input".into(),
                 retryable: false,
@@ -1629,6 +1961,7 @@ mod tests {
             priority: Priority::Realtime,
             payload: Value::Null,
             callback_url: None,
+            idempotency_key: None,
         })
         .await
         .unwrap();
@@ -1637,6 +1970,7 @@ mod tests {
             priority: Priority::Realtime,
             payload: Value::Null,
             callback_url: None,
+            idempotency_key: None,
         })
         .await
         .unwrap();
@@ -1645,6 +1979,7 @@ mod tests {
             priority: Priority::Batch,
             payload: Value::Null,
             callback_url: None,
+            idempotency_key: None,
         })
         .await
         .unwrap();
@@ -1714,6 +2049,7 @@ mod tests {
             priority: Priority::Background,
             payload: Value::Null,
             callback_url: None,
+            idempotency_key: None,
         })
         .await
         .unwrap();
@@ -1722,6 +2058,7 @@ mod tests {
             priority: Priority::Background,
             payload: Value::Null,
             callback_url: None,
+            idempotency_key: None,
         })
         .await
         .unwrap();
@@ -1746,6 +2083,7 @@ mod tests {
             priority: Priority::Background,
             payload: Value::Null,
             callback_url: None,
+            idempotency_key: None,
         })
         .await
         .unwrap();
@@ -1754,6 +2092,7 @@ mod tests {
             priority: Priority::Realtime,
             payload: Value::Null,
             callback_url: None,
+            idempotency_key: None,
         })
         .await
         .unwrap();
@@ -1762,6 +2101,7 @@ mod tests {
             priority: Priority::Batch,
             payload: Value::Null,
             callback_url: None,
+            idempotency_key: None,
         })
         .await
         .unwrap();
@@ -1783,6 +2123,7 @@ mod tests {
             priority: Priority::Batch,
             payload: Value::Null,
             callback_url: None,
+            idempotency_key: None,
         })
         .await
         .unwrap();
@@ -1811,6 +2152,7 @@ mod tests {
             priority: Priority::Background,
             payload: Value::Null,
             callback_url: None,
+            idempotency_key: None,
         })
         .await
         .unwrap();
@@ -1819,6 +2161,7 @@ mod tests {
             priority: Priority::Batch,
             payload: Value::Null,
             callback_url: None,
+            idempotency_key: None,
         })
         .await
         .unwrap();
@@ -1827,6 +2170,7 @@ mod tests {
             priority: Priority::Batch,
             payload: Value::Null,
             callback_url: None,
+            idempotency_key: None,
         })
         .await
         .unwrap();
@@ -1852,6 +2196,7 @@ mod tests {
             priority: Priority::Realtime,
             payload: Value::Null,
             callback_url: None,
+            idempotency_key: None,
         })
         .await
         .unwrap();
@@ -1875,6 +2220,7 @@ mod tests {
             priority: Priority::Batch,
             payload: Value::Null,
             callback_url: None,
+            idempotency_key: None,
         })
         .await
         .unwrap();
@@ -1900,6 +2246,7 @@ mod tests {
             priority: Priority::Batch,
             payload: Value::Null,
             callback_url: None,
+            idempotency_key: None,
         })
         .await
         .unwrap();
@@ -1951,6 +2298,7 @@ mod tests {
             priority: Priority::Background,
             payload: Value::Null,
             callback_url: None,
+            idempotency_key: None,
         })
         .await
         .unwrap();
@@ -1996,6 +2344,7 @@ mod tests {
             priority: Priority::Realtime,
             payload: Value::Null,
             callback_url: None,
+            idempotency_key: None,
         })
         .await
         .unwrap();
@@ -2004,6 +2353,7 @@ mod tests {
             priority: Priority::Background,
             payload: Value::Null,
             callback_url: None,
+            idempotency_key: None,
         })
         .await
         .unwrap();
@@ -2038,6 +2388,7 @@ mod tests {
             priority: Priority::Background,
             payload: Value::Null,
             callback_url: None,
+            idempotency_key: None,
         })
         .await
         .unwrap();
@@ -2069,6 +2420,7 @@ mod tests {
             priority: Priority::Batch,
             payload: Value::Null,
             callback_url: None,
+            idempotency_key: None,
         })
         .await
         .unwrap();
@@ -2105,6 +2457,7 @@ mod tests {
             priority: Priority::Batch,
             payload: Value::Null,
             callback_url: None,
+            idempotency_key: None,
         })
         .await
         .unwrap();
@@ -2129,6 +2482,7 @@ mod tests {
             priority: Priority::Realtime,
             payload: Value::Null,
             callback_url: None,
+            idempotency_key: None,
         })
         .await
         .unwrap();
@@ -2153,6 +2507,7 @@ mod tests {
             priority: Priority::Background,
             payload: Value::Null,
             callback_url: None,
+            idempotency_key: None,
         })
         .await
         .unwrap();
@@ -2187,6 +2542,7 @@ mod tests {
             priority: Priority::Batch,
             payload: Value::Null,
             callback_url: None,
+            idempotency_key: None,
         })
         .await
         .unwrap();
@@ -2195,7 +2551,7 @@ mod tests {
             .unwrap();
 
         let result = jobs
-            .complete_lease("job-1", "worker-a", json!({"ok": true}))
+            .complete_lease("job-1", "worker-a", None, json!({"ok": true}))
             .await;
         let FinishJobResult::Completed(job) = result else {
             panic!("expected completion");
@@ -2216,6 +2572,7 @@ mod tests {
             priority: Priority::Realtime,
             payload: Value::Null,
             callback_url: None,
+            idempotency_key: None,
         })
         .await
         .unwrap();
@@ -2223,14 +2580,21 @@ mod tests {
             .await
             .unwrap();
 
-        let wrong_worker = jobs.complete_lease("job-1", "worker-b", Value::Null).await;
+        let wrong_worker = jobs
+            .complete_lease("job-1", "worker-b", None, Value::Null)
+            .await;
         assert!(matches!(wrong_worker, FinishJobResult::LeaseNotHeld(_)));
+        let wrong_attempt = jobs
+            .complete_lease("job-1", "worker-a", Some(2), Value::Null)
+            .await;
+        assert!(matches!(wrong_attempt, FinishJobResult::LeaseNotHeld(_)));
 
         jobs.submit(SubmitJobRequest {
             kind: JobKind::Cluster,
             priority: Priority::Batch,
             payload: Value::Null,
             callback_url: None,
+            idempotency_key: None,
         })
         .await
         .unwrap();
@@ -2238,7 +2602,9 @@ mod tests {
             .await
             .unwrap();
 
-        let expired = jobs.complete_lease("job-2", "worker-a", Value::Null).await;
+        let expired = jobs
+            .complete_lease("job-2", "worker-a", None, Value::Null)
+            .await;
         assert!(matches!(expired, FinishJobResult::Expired(_)));
     }
 
@@ -2250,6 +2616,7 @@ mod tests {
             priority: Priority::Background,
             payload: Value::Null,
             callback_url: None,
+            idempotency_key: None,
         })
         .await
         .unwrap();
@@ -2261,6 +2628,7 @@ mod tests {
             .fail_lease(
                 "job-1",
                 "worker-a",
+                None,
                 JobFailure {
                     message: "transient oom".into(),
                     retryable: true,
@@ -2292,6 +2660,41 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn fail_lease_rejects_mismatched_running_attempt() {
+        let jobs = JobRegistry::default();
+        jobs.submit(SubmitJobRequest {
+            kind: JobKind::IndexBuild,
+            priority: Priority::Background,
+            payload: Value::Null,
+            callback_url: None,
+            idempotency_key: None,
+        })
+        .await
+        .unwrap();
+        jobs.claim_next_for_worker("worker-a", &[JobKind::IndexBuild], 30_000)
+            .await
+            .unwrap();
+
+        let result = jobs
+            .fail_lease(
+                "job-1",
+                "worker-a",
+                Some(2),
+                JobFailure {
+                    message: "wrong attempt".into(),
+                    retryable: false,
+                },
+            )
+            .await;
+
+        assert!(matches!(result, FinishJobResult::LeaseNotHeld(_)));
+        let job = jobs.get("job-1").await.unwrap();
+        assert_eq!(job.status, JobStatus::Running);
+        assert!(job.error.is_none());
+        assert!(job.lease.is_some());
+    }
+
+    #[tokio::test]
     async fn fail_lease_marks_non_retryable_or_exhausted_failure_failed() {
         let jobs = JobRegistry::default();
         jobs.submit(SubmitJobRequest {
@@ -2299,6 +2702,7 @@ mod tests {
             priority: Priority::Batch,
             payload: Value::Null,
             callback_url: None,
+            idempotency_key: None,
         })
         .await
         .unwrap();
@@ -2310,6 +2714,7 @@ mod tests {
             .fail_lease(
                 "job-1",
                 "worker-a",
+                None,
                 JobFailure {
                     message: "bad input".into(),
                     retryable: false,
@@ -2327,6 +2732,7 @@ mod tests {
             priority: Priority::Realtime,
             payload: Value::Null,
             callback_url: None,
+            idempotency_key: None,
         })
         .await
         .unwrap();
@@ -2338,6 +2744,7 @@ mod tests {
                 .fail_lease(
                     "job-2",
                     "worker-a",
+                    None,
                     JobFailure {
                         message: "temporary failure".into(),
                         retryable: true,
@@ -2353,6 +2760,7 @@ mod tests {
             .fail_lease(
                 "job-2",
                 "worker-a",
+                None,
                 JobFailure {
                     message: "temporary failure".into(),
                     retryable: true,
@@ -2376,6 +2784,7 @@ mod tests {
             priority: Priority::Batch,
             payload: Value::Null,
             callback_url: None,
+            idempotency_key: None,
         })
         .await
         .unwrap();
@@ -2384,6 +2793,7 @@ mod tests {
             priority: Priority::Batch,
             payload: Value::Null,
             callback_url: None,
+            idempotency_key: None,
         })
         .await
         .unwrap();
@@ -2408,6 +2818,7 @@ mod tests {
             priority: Priority::Batch,
             payload: Value::Null,
             callback_url: None,
+            idempotency_key: None,
         })
         .await
         .unwrap();
@@ -2416,6 +2827,7 @@ mod tests {
             priority: Priority::Realtime,
             payload: Value::Null,
             callback_url: None,
+            idempotency_key: None,
         })
         .await
         .unwrap();
@@ -2424,6 +2836,7 @@ mod tests {
             priority: Priority::Background,
             payload: Value::Null,
             callback_url: None,
+            idempotency_key: None,
         })
         .await
         .unwrap();
@@ -2433,7 +2846,7 @@ mod tests {
         jobs.claim_next_for_worker("worker-a", &[JobKind::VisionAnalysis], 30_000)
             .await
             .unwrap();
-        jobs.complete_lease("job-1", "worker-a", json!({"ok": true}))
+        jobs.complete_lease("job-1", "worker-a", None, json!({"ok": true}))
             .await;
         jobs.cancel("job-2").await;
 
@@ -2460,6 +2873,7 @@ mod tests {
             priority: Priority::Background,
             payload: Value::Null,
             callback_url: None,
+            idempotency_key: None,
         })
         .await
         .unwrap();
@@ -2468,6 +2882,7 @@ mod tests {
             priority: Priority::Background,
             payload: Value::Null,
             callback_url: None,
+            idempotency_key: None,
         })
         .await
         .unwrap();
@@ -2568,6 +2983,7 @@ mod tests {
             priority: Priority::Batch,
             payload: Value::Null,
             callback_url: None,
+            idempotency_key: None,
         })
         .await
         .unwrap();
@@ -2576,6 +2992,7 @@ mod tests {
             priority: Priority::Background,
             payload: Value::Null,
             callback_url: None,
+            idempotency_key: None,
         })
         .await
         .unwrap();
@@ -2584,6 +3001,7 @@ mod tests {
             priority: Priority::Realtime,
             payload: Value::Null,
             callback_url: None,
+            idempotency_key: None,
         })
         .await
         .unwrap();
@@ -2593,7 +3011,7 @@ mod tests {
         jobs.claim_next_for_worker("worker-a", &[JobKind::VisionAnalysis], 30_000)
             .await
             .unwrap();
-        jobs.complete_lease("job-1", "worker-a", json!({"ok": true}))
+        jobs.complete_lease("job-1", "worker-a", None, json!({"ok": true}))
             .await;
         jobs.claim_next_for_worker("worker-a", &[JobKind::Cluster], 30_000)
             .await
@@ -2601,6 +3019,7 @@ mod tests {
         jobs.fail_lease(
             "job-2",
             "worker-a",
+            None,
             JobFailure {
                 message: "bad input".into(),
                 retryable: false,
@@ -2651,6 +3070,7 @@ mod tests {
                 priority: Priority::Batch,
                 payload: Value::Null,
                 callback_url: None,
+                idempotency_key: None,
             })
             .await
             .unwrap();
@@ -2660,6 +3080,7 @@ mod tests {
             priority: Priority::Batch,
             payload: Value::Null,
             callback_url: Some("http://rhizome/jobs/job-7".into()),
+            idempotency_key: None,
         })
         .await
         .unwrap();
@@ -2667,7 +3088,7 @@ mod tests {
         jobs.claim_next_for_worker("worker-a", &[JobKind::VisionAnalysis], 30_000)
             .await
             .unwrap();
-        jobs.complete_lease("job-1", "worker-a", json!({"ok": true}))
+        jobs.complete_lease("job-1", "worker-a", None, json!({"ok": true}))
             .await;
         jobs.claim_next_for_worker("worker-a", &[JobKind::Cluster], 30_000)
             .await
@@ -2675,6 +3096,7 @@ mod tests {
         jobs.fail_lease(
             "job-2",
             "worker-a",
+            None,
             JobFailure {
                 message: "bad input".into(),
                 retryable: false,
@@ -2685,17 +3107,17 @@ mod tests {
         jobs.claim_next_for_worker("worker-a", &[JobKind::IndexBuild], 30_000)
             .await
             .unwrap();
-        jobs.complete_lease("job-4", "worker-a", json!({"ok": true}))
+        jobs.complete_lease("job-4", "worker-a", None, json!({"ok": true}))
             .await;
         jobs.claim_next_for_worker("worker-a", &[JobKind::VisionAnalysis], 30_000)
             .await
             .unwrap();
-        jobs.complete_lease("job-5", "worker-a", json!({"ok": true}))
+        jobs.complete_lease("job-5", "worker-a", None, json!({"ok": true}))
             .await;
         jobs.claim_next_for_worker("worker-a", &[JobKind::EmbedBatch], 30_000)
             .await
             .unwrap();
-        jobs.complete_lease("job-7", "worker-a", json!({"ok": true}))
+        jobs.complete_lease("job-7", "worker-a", None, json!({"ok": true}))
             .await;
 
         age_job_updated_at(&jobs, "job-1", 120_000).await;
@@ -2746,6 +3168,7 @@ mod tests {
                 priority: Priority::Batch,
                 payload: Value::Null,
                 callback_url: None,
+                idempotency_key: None,
             })
             .await
             .unwrap();
@@ -2754,7 +3177,7 @@ mod tests {
             jobs.claim_next_for_worker("worker-a", &[JobKind::VisionAnalysis], 30_000)
                 .await
                 .unwrap();
-            jobs.complete_lease(id, "worker-a", json!({"ok": true}))
+            jobs.complete_lease(id, "worker-a", None, json!({"ok": true}))
                 .await;
         }
 
@@ -2777,13 +3200,14 @@ mod tests {
             priority: Priority::Batch,
             payload: Value::Null,
             callback_url: Some("http://rhizome/jobs/job-1".into()),
+            idempotency_key: None,
         })
         .await
         .unwrap();
         jobs.claim_next_for_worker("worker-a", &[JobKind::VisionAnalysis], 30_000)
             .await
             .unwrap();
-        jobs.complete_lease("job-1", "worker-a", json!({"ok": true}))
+        jobs.complete_lease("job-1", "worker-a", None, json!({"ok": true}))
             .await;
 
         let pending = jobs.prune_terminal_jobs().await;
@@ -2796,6 +3220,71 @@ mod tests {
         assert_eq!(delivered.removed, 1);
         assert_eq!(delivered.retained_pending_callbacks, 0);
         assert!(jobs.get("job-1").await.is_none());
+    }
+
+    #[tokio::test]
+    async fn delivered_callback_jobs_are_not_dispatched_again() {
+        let jobs = JobRegistry::default();
+
+        jobs.submit(SubmitJobRequest {
+            kind: JobKind::VisionAnalysis,
+            priority: Priority::Batch,
+            payload: Value::Null,
+            callback_url: Some("http://rhizome/jobs/job-1".into()),
+            idempotency_key: None,
+        })
+        .await
+        .unwrap();
+        jobs.claim_next_for_worker("worker-a", &[JobKind::VisionAnalysis], 30_000)
+            .await
+            .unwrap();
+        jobs.complete_lease("job-1", "worker-a", None, json!({"ok": true}))
+            .await;
+
+        assert_eq!(jobs.pending_callback_jobs().await.len(), 1);
+        jobs.record_callback_success("job-1", 200).await.unwrap();
+
+        assert!(jobs.pending_callback_jobs().await.is_empty());
+        assert!(jobs.begin_callback_attempt("job-1").await.is_none());
+    }
+
+    #[tokio::test]
+    async fn prune_terminal_jobs_releases_submit_idempotency_key() {
+        let jobs = JobRegistry::new(JobRetentionPolicy {
+            terminal_retention_ms: 0,
+            max_pruned_jobs: 10,
+        });
+
+        jobs.submit(SubmitJobRequest {
+            kind: JobKind::VisionAnalysis,
+            priority: Priority::Batch,
+            payload: json!({"image": "rose.jpg"}),
+            callback_url: None,
+            idempotency_key: Some("rose-image".into()),
+        })
+        .await
+        .unwrap();
+        jobs.claim_next_for_worker("worker-a", &[JobKind::VisionAnalysis], 30_000)
+            .await
+            .unwrap();
+        jobs.complete_lease("job-1", "worker-a", None, json!({"ok": true}))
+            .await;
+
+        let report = jobs.prune_terminal_jobs().await;
+        assert_eq!(report.removed, 1);
+
+        let new_job = jobs
+            .submit(SubmitJobRequest {
+                kind: JobKind::VisionAnalysis,
+                priority: Priority::Batch,
+                payload: json!({"image": "rose-again.jpg"}),
+                callback_url: None,
+                idempotency_key: Some("rose-image".into()),
+            })
+            .await
+            .unwrap();
+        assert_eq!(new_job.id, "job-2");
+        assert_eq!(jobs.list().await.len(), 1);
     }
 
     #[tokio::test]
@@ -2815,6 +3304,7 @@ mod tests {
                 priority: Priority::Batch,
                 payload: Value::Null,
                 callback_url: None,
+                idempotency_key: None,
             })
             .await
             .unwrap();
@@ -2822,7 +3312,7 @@ mod tests {
         jobs.claim_next_for_worker("worker-a", &[JobKind::VisionAnalysis], 30_000)
             .await
             .unwrap();
-        jobs.complete_lease("job-1", "worker-a", json!({"ok": true}))
+        jobs.complete_lease("job-1", "worker-a", None, json!({"ok": true}))
             .await;
         jobs.claim_next_for_worker("worker-b", &[JobKind::EmbedBatch], 30_000)
             .await
@@ -2860,13 +3350,14 @@ mod tests {
             priority: Priority::Background,
             payload: Value::Null,
             callback_url: None,
+            idempotency_key: None,
         })
         .await
         .unwrap();
         jobs.claim_next_for_worker("worker-a", &[JobKind::Cluster], 30_000)
             .await
             .unwrap();
-        jobs.complete_lease("job-1", "worker-a", json!({"ok": true}))
+        jobs.complete_lease("job-1", "worker-a", None, json!({"ok": true}))
             .await;
 
         let report = jobs.prune_terminal_jobs().await;
@@ -2893,6 +3384,7 @@ mod tests {
                 priority: Priority::Batch,
                 payload: Value::Null,
                 callback_url: None,
+                idempotency_key: None,
             })
             .await
             .unwrap();
@@ -2900,7 +3392,7 @@ mod tests {
         jobs.claim_next_for_worker("worker-a", &[JobKind::VisionAnalysis], 30_000)
             .await
             .unwrap();
-        jobs.complete_lease("job-1", "worker-a", json!({"ok": true}))
+        jobs.complete_lease("job-1", "worker-a", None, json!({"ok": true}))
             .await;
         jobs.claim_next_for_worker("worker-a", &[JobKind::Cluster], 30_000)
             .await
@@ -2908,6 +3400,7 @@ mod tests {
         jobs.fail_lease(
             "job-2",
             "worker-a",
+            None,
             JobFailure {
                 message: "bad input".into(),
                 retryable: false,
@@ -2948,7 +3441,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cancel_terminal_job_returns_conflict() {
+    async fn cancel_already_cancelled_job_returns_existing_job() {
         let app = build_router(test_state());
 
         app.clone()
@@ -2983,9 +3476,44 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(response.status(), StatusCode::CONFLICT);
+        assert_eq!(response.status(), StatusCode::OK);
         let value = response_json(response).await;
         assert_eq!(value["job"]["status"], "cancelled");
+    }
+
+    #[tokio::test]
+    async fn cancel_completed_job_returns_conflict() {
+        let jobs = JobRegistry::default();
+        jobs.submit(SubmitJobRequest {
+            kind: JobKind::Cluster,
+            priority: Priority::Batch,
+            payload: Value::Null,
+            callback_url: None,
+            idempotency_key: None,
+        })
+        .await
+        .unwrap();
+        jobs.claim_next_for_worker("worker-a", &[JobKind::Cluster], 30_000)
+            .await
+            .unwrap();
+        jobs.complete_lease("job-1", "worker-a", None, json!({"ok": true}))
+            .await;
+        let app = build_router(test_state_with_jobs(jobs));
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::DELETE)
+                    .uri("/v1/jobs/job-1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        let value = response_json(response).await;
+        assert_eq!(value["job"]["status"], "complete");
     }
 
     #[tokio::test]
@@ -3031,6 +3559,7 @@ mod tests {
             json!({"priority": "batch"}).to_string(),
             json!({"type": "unknown"}).to_string(),
             json!({"type": "vision_analysis", "priority": "urgent"}).to_string(),
+            json!({"type": "vision_analysis", "idempotency_key": "   "}).to_string(),
             "{not-json".to_string(),
         ] {
             let response = app

@@ -340,6 +340,9 @@ GET  /v1/workers                — list registered workers
 Current async scheduler behavior:
 
 - submitted jobs enter `queued`
+- `POST /v1/jobs` accepts an optional `idempotency_key`; a retry with the same
+  key and same request body returns the original job instead of enqueueing a
+  duplicate, while reusing the key for a different request is rejected
 - submitted jobs are tracked in in-memory per-priority queues
 - `GET /v1/jobs` lists current in-memory job records
 - `/metrics` exposes `fairlead_job_queue_depth{priority,type}`
@@ -350,10 +353,13 @@ Current async scheduler behavior:
   `fairlead_job_duration_seconds_sum{priority,type,status}`, and
   `fairlead_job_duration_seconds_max{priority,type,status}`
 - job state is in memory by default; opt-in SQLite state persists jobs, queue
-  order, leases, terminal state, callback metadata, and callback delivery state
-  across ordinary Fairlead restarts
+  order, submit idempotency keys, leases, terminal worker-attempt metadata,
+  terminal state, callback metadata, and callback delivery state across ordinary
+  Fairlead restarts
 - cancellation marks queued jobs `cancelled`
 - cancellation removes queued jobs from queue depth and wait-time accounting
+- repeated cancellation returns the existing job when it is already `cancelled`;
+  cancellation still returns conflict for jobs that already completed or failed
 - registered workers are listed with stale and draining status
 - workers can be drained, reactivated, or deregistered
 - draining workers remain registered but are skipped by scheduler preview and
@@ -385,15 +391,23 @@ Current async scheduler behavior:
 - `POST /v1/workers/{worker_id}/jobs/{job_id}/fail` validates the worker and
   lease, records an error, then requeues retryable failures when attempts remain
   or marks the job `failed`; both paths release worker capacity
+- worker complete/fail requests may include the lease `attempt`; exact duplicate
+  terminal reports with the same worker, attempt, and payload return the
+  existing terminal job without releasing worker capacity or dispatching another
+  callback, while contradictory terminal reports still return conflict
 - no push dispatch exists yet; workers must pull by calling the claim endpoint
 - terminal jobs with `callback_url` dispatch asynchronous callbacks with bounded
   retry and timeout policy
-- SQLite-backed callback state gives at-least-once delivery across ordinary
-  Fairlead restarts by retrying pending callbacks after startup
+- callback dispatch deduplicates in-flight delivery by job ID and skips
+  delivered callbacks; SQLite-backed callback state gives at-least-once
+  delivery across ordinary Fairlead restarts by retrying pending callbacks after
+  startup
 - `POST /v1/jobs/prune` removes terminal jobs older than the configured
   retention age, up to the configured per-call limit
 - pruning skips terminal jobs with pending callbacks so callback delivery can
   continue
+- pruning removes submit idempotency-key mappings for removed jobs, allowing a
+  key to be reused after the retained job record is gone
 - pruning persists to SQLite when `JOB_STORE=sqlite` is enabled
 - `/metrics` exposes `fairlead_job_prunes_total{status}`
 - there is no background scheduler loop yet

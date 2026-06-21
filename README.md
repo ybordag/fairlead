@@ -114,10 +114,11 @@ Implemented generalization work includes:
 - **Terminal job pruning** through an explicit endpoint with configurable
   retention age, per-run limit, SQLite persistence, and Prometheus counters.
 
-Phase 8B is complete on `stopper` and adds terminal-job retention and pruning.
-Future Phase 8 work adds stronger idempotency semantics, background maintenance
-loops, and process-level e2e harnesses. Later phases add adapter boundaries,
-richer resource policy, external scale/overflow, and transport/SDK hardening.
+Phase 8C is complete on `splice` and adds stronger idempotency semantics for
+async job submission, cancellation retries, and terminal worker result retries.
+Remaining Phase 8 work adds background maintenance loops and process-level e2e
+harnesses. Later phases add adapter boundaries, richer resource policy,
+external scale/overflow, and transport/SDK hardening.
 
 See [`docs/planning/roadmap.md`](docs/planning/roadmap.md) for the
 implementation plan and acceptance criteria.
@@ -253,17 +254,33 @@ JOB_DB_PATH=fairlead_jobs.sqlite3 \
 cargo run
 ```
 
-With `JOB_STORE=sqlite`, Fairlead persists submitted jobs, queue order, claim and
-lease state, attempts, cancellation, completion, failure, payloads, callback
-metadata, callback delivery state, and result/error state. On startup,
+`POST /v1/jobs` accepts an optional `idempotency_key` for safe caller retries.
+When the same key is reused with the same request, Fairlead returns the existing
+job instead of enqueueing duplicate work; reusing the key for a different
+request is rejected.
+
+With `JOB_STORE=sqlite`, Fairlead persists submitted jobs, queue order, submit
+idempotency keys, claim and lease state, attempts, cancellation, completion,
+failure, terminal worker-attempt metadata, payloads, callback metadata,
+callback delivery state, and result/error state. On startup,
 already-expired running leases are requeued when attempts remain and failed when
 attempts are exhausted.
 
 Terminal async jobs can be pruned explicitly with `POST /v1/jobs/prune`.
 Pruning removes only terminal jobs older than `JOB_RETENTION_SECS`, up to
 `JOB_PRUNE_LIMIT` jobs per call. Jobs with pending callbacks are retained so
-callback delivery can continue. Removed jobs are also deleted from SQLite when
-`JOB_STORE=sqlite` is enabled.
+callback delivery can continue. Removed jobs are also deleted from SQLite, and
+their submit idempotency keys are released, when `JOB_STORE=sqlite` is enabled.
+
+`DELETE /v1/jobs/{id}` is idempotent for jobs that are already `cancelled`.
+Cancelling a job that already completed or failed still returns a conflict,
+because that work was not cancelled by the caller's earlier request.
+
+Worker complete/fail requests can include the lease `attempt` returned by the
+claim response. If a worker retries the same terminal complete/fail report with
+the same worker ID, attempt, and result/error payload, Fairlead returns the
+existing terminal job without releasing capacity or dispatching callbacks again.
+Contradictory terminal reports still return a conflict.
 
 ```bash
 JOB_RETENTION_SECS=86400 \
@@ -274,9 +291,10 @@ cargo run
 Terminal async jobs with `callback_url` are delivered asynchronously. Callback
 delivery is at-least-once when SQLite persistence is enabled: pending callback
 state survives ordinary Fairlead restarts and the recovery loop retries delivery
-until a 2xx response is recorded. Callback handlers should be idempotent by job
-ID because a crash after the receiver handles a callback but before Fairlead
-records success can produce a duplicate callback after restart.
+until a 2xx response is recorded. In-process callback dispatch is deduplicated
+by job ID and delivered callbacks are skipped. Callback handlers should still be
+idempotent by job ID because a crash after the receiver handles a callback but
+before Fairlead records success can produce a duplicate callback after restart.
 
 Callback delivery is bounded per delivery sweep by:
 

@@ -1340,6 +1340,31 @@ and compatible worker count. A no-compatible-job claim records how many queued
 jobs were skipped because the claiming worker supports their job type but its
 pool is not allowed by workload policy.
 
+`POST /v1/jobs` calls `jobs::submit_job`, which deserializes the async job
+request and delegates to `JobRegistry::submit()`:
+
+1. `callback_url` and optional `idempotency_key` are trimmed and validated.
+   Blank idempotency keys and keys longer than 256 bytes are rejected.
+2. If the idempotency key already maps to a matching existing job, the existing
+   job is returned and no new queue entry is created.
+3. If the key maps to a different request shape, the submit is rejected.
+4. Otherwise, Fairlead allocates the next `job-N` ID, stores the job record,
+   records the idempotency-key mapping when present, and appends the job to its
+   priority queue.
+5. With `JOB_STORE=sqlite`, the full registry snapshot includes the idempotency
+   key so a submit retry after restart still resolves to the original job.
+
+`DELETE /v1/jobs/{id}` calls `jobs::cancel_job`, which delegates to
+`JobRegistry::cancel()`:
+
+1. Queued and running jobs become `cancelled`.
+2. Queued jobs are removed from queue-depth and wait-time accounting.
+3. Running jobs release the worker slot held by their lease.
+4. Terminal jobs that are already `cancelled` return `200 OK` with the existing
+   job, making caller retries safe.
+5. Terminal jobs that are `complete` or `failed` return `409 Conflict`, because
+   those jobs finished by some path other than cancellation.
+
 `GET /v1/scheduler/preview` asks the scheduler to inspect the in-memory queues
 and registered workers:
 
@@ -1402,24 +1427,34 @@ attempts are exhausted, the job becomes `failed` with `retryable: false`.
 2. Fairlead sweeps expired leases before completion, so late completion cannot
    resurrect an expired attempt.
 3. `JobRegistry::complete_lease()` checks that the job exists, is still
-   `running`, and is leased to that worker.
+   `running`, and is leased to that worker. If the request includes `attempt`,
+   it must match the lease attempt number.
 4. If those checks pass, the job becomes `complete`, the result payload is
-   stored, error state is cleared, lease metadata is removed, and the worker's
-   in-flight slot is released.
-5. Missing jobs return `404`; stale workers, wrong workers, expired leases, and
-   non-running jobs return `409`.
+   stored, error state is cleared, terminal attempt metadata is recorded, lease
+   metadata is removed, and the worker's in-flight slot is released.
+5. If the same worker repeats the same terminal completion with the same
+   `attempt` and result payload, Fairlead returns the existing terminal job
+   without releasing capacity or dispatching another callback.
+6. Missing jobs return `404`; stale workers, wrong workers, wrong attempts,
+   expired leases, contradictory terminal reports, and non-running jobs return
+   `409`.
 
 `POST /v1/workers/{worker_id}/jobs/{job_id}/fail` reports an attempt failure:
 
 1. Fairlead validates the worker and rejects empty error messages.
 2. Fairlead sweeps expired leases before applying the failure.
 3. `JobRegistry::fail_lease()` checks that the job is running and leased to that
-   worker.
+   worker. If the request includes `attempt`, it must match the lease attempt
+   number.
 4. The failure message and retryable flag are stored on the job.
 5. Retryable failures return the job to its priority queue when attempts remain.
 6. Non-retryable failures, or retryable failures after max attempts, mark the
-   job `failed`.
+   job `failed` and record terminal attempt metadata.
 7. Both requeue and terminal-failure paths release the worker's in-flight slot.
+8. Exact duplicate terminal failures with the same worker, `attempt`, error, and
+   retryable flag return the existing failed job without releasing capacity or
+   dispatching another callback. Contradictory terminal failure reports return
+   `409`.
 
 The proxy logs structured fields for the same decision: request ID, workload,
 origin node, affinity key, selected backend, retry count, fallback reason,

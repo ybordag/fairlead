@@ -93,3 +93,10 @@ when attempts remain and failed when attempts are exhausted.
 An HTTP POST Fairlead sends when an async job reaches a terminal state and the
 job has `callback_url`. Callback delivery is at least once when SQLite
 persistence is enabled. Callback receivers should be idempotent by job ID.
+
+## Idempotency Key
+
+An optional caller-provided key on `POST /v1/jobs`. If a caller retries the same
+submission with the same `idempotency_key`, Fairlead returns the original job
+record instead of enqueueing duplicate work. Reusing the same key with a
+different job request is rejected.
