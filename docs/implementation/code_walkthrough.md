@@ -1527,7 +1527,9 @@ The current code does not:
   hints, not allocator-level reservations.
 
 Push dispatch, background pruning, and process-level restart harnesses are
-future roadmap phases, not current behavior. Synchronous backend pool routing,
-async worker pool eligibility and metrics, durable job state, terminal
-callbacks, and explicit terminal-job pruning are current behavior when the
-relevant configuration is enabled.
+future roadmap phases, not current behavior. Background lease recovery is
+current behavior: `main()` spawns a maintenance loop that calls the same expired
+lease sweep used by worker claim, renew, complete, and fail handlers.
+Synchronous backend pool routing, async worker pool eligibility and metrics,
+durable job state, terminal callbacks, and explicit terminal-job pruning are
+current behavior when the relevant configuration is enabled.

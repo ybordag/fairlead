@@ -876,7 +876,8 @@ workload protocols.
   - [x] Audit test coverage and deferred process-level e2e cases before PR.
   - [x] Add final 8C docs/readiness pass before PR.
 - **8D Clove: Background Maintenance Loops**
-  - Add background expiry/recovery loops if claim-time sweeps are not enough.
+  - [x] Add a configurable background lease expiry/recovery loop using the same
+    sweep path as worker claims.
   - Add optional background pruning loop that invokes the 8B terminal-job
     pruning policy on a configured interval.
   - Keep explicit `POST /v1/jobs/prune` as the operator/manual path even if a

@@ -13,6 +13,7 @@ pub const DEFAULT_BACKEND_POOL: &str = "default";
 pub const DEFAULT_JOB_DB_PATH: &str = "fairlead_jobs.sqlite3";
 pub const DEFAULT_JOB_RETENTION_SECS: u64 = 86_400;
 pub const DEFAULT_JOB_PRUNE_LIMIT: usize = 1000;
+pub const DEFAULT_JOB_MAINTENANCE_INTERVAL_SECS: u64 = 30;
 
 const KNOWN_POOL_WORKLOADS: &[&str] = &[
     "chat_completions",
@@ -263,6 +264,8 @@ pub struct Config {
     pub job_retention_secs: u64,
     /// Maximum terminal jobs removed by one prune operation. Default: 1000.
     pub job_prune_limit: usize,
+    /// Seconds between background async job maintenance sweeps. Default: 30.
+    pub job_maintenance_interval_secs: u64,
     /// Max callback delivery attempts for terminal async jobs. Default: 3.
     pub callback_max_attempts: u32,
     /// Per-attempt callback timeout in seconds. Default: 5.
@@ -367,6 +370,12 @@ impl Config {
                 .map_err(|e| anyhow!("invalid JOB_RETENTION_SECS: {}", e))?,
 
             job_prune_limit: parse_nonzero("JOB_PRUNE_LIMIT", DEFAULT_JOB_PRUNE_LIMIT, &get)?,
+
+            job_maintenance_interval_secs: parse_nonzero(
+                "JOB_MAINTENANCE_INTERVAL_SECS",
+                DEFAULT_JOB_MAINTENANCE_INTERVAL_SECS,
+                &get,
+            )?,
 
             callback_max_attempts: parse_nonzero(
                 "CALLBACK_MAX_ATTEMPTS",
@@ -820,6 +829,10 @@ mod tests {
         assert_eq!(cfg.job_store, JobStoreConfig::Memory);
         assert_eq!(cfg.job_retention_secs, DEFAULT_JOB_RETENTION_SECS);
         assert_eq!(cfg.job_prune_limit, DEFAULT_JOB_PRUNE_LIMIT);
+        assert_eq!(
+            cfg.job_maintenance_interval_secs,
+            DEFAULT_JOB_MAINTENANCE_INTERVAL_SECS
+        );
         assert_eq!(cfg.callback_max_attempts, DEFAULT_CALLBACK_MAX_ATTEMPTS);
         assert_eq!(cfg.callback_timeout_secs, DEFAULT_CALLBACK_TIMEOUT_SECS);
         assert_eq!(cfg.callback_retry_delay_ms, DEFAULT_CALLBACK_RETRY_DELAY_MS);
@@ -923,6 +936,7 @@ mod tests {
             ("PRIORITY_BACKGROUND_LIMIT", "3"),
             ("JOB_RETENTION_SECS", "3600"),
             ("JOB_PRUNE_LIMIT", "25"),
+            ("JOB_MAINTENANCE_INTERVAL_SECS", "12"),
             ("CALLBACK_MAX_ATTEMPTS", "5"),
             ("CALLBACK_TIMEOUT_SECS", "9"),
             ("CALLBACK_RETRY_DELAY_MS", "50"),
@@ -940,6 +954,7 @@ mod tests {
         assert_eq!(cfg.priority_background_limit, 3);
         assert_eq!(cfg.job_retention_secs, 3600);
         assert_eq!(cfg.job_prune_limit, 25);
+        assert_eq!(cfg.job_maintenance_interval_secs, 12);
         assert_eq!(cfg.callback_max_attempts, 5);
         assert_eq!(cfg.callback_timeout_secs, 9);
         assert_eq!(cfg.callback_retry_delay_ms, 50);
@@ -1017,7 +1032,11 @@ mod tests {
 
     #[test]
     fn invalid_job_retention_policy_returns_err() {
-        for (key, value) in [("JOB_RETENTION_SECS", "abc"), ("JOB_PRUNE_LIMIT", "0")] {
+        for (key, value) in [
+            ("JOB_RETENTION_SECS", "abc"),
+            ("JOB_PRUNE_LIMIT", "0"),
+            ("JOB_MAINTENANCE_INTERVAL_SECS", "0"),
+        ] {
             let result = Config::from_lookup(env(&[(key, value)]));
             assert!(result.is_err(), "expected {key}={value} to fail");
             assert!(result.unwrap_err().to_string().contains(key));

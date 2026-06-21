@@ -5,6 +5,7 @@ use axum::{
     Json,
 };
 use serde::Serialize;
+use std::time::Duration;
 
 use crate::{
     jobs::{
@@ -243,6 +244,18 @@ pub async fn sweep_expired_leases(state: &AppState) {
     }
 }
 
+pub fn spawn_lease_recovery_loop(
+    state: AppState,
+    interval: Duration,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(interval).await;
+            sweep_expired_leases(&state).await;
+        }
+    })
+}
+
 #[cfg(test)]
 pub async fn preview_next_assignment(
     jobs: &JobRegistry,
@@ -389,7 +402,7 @@ mod tests {
     use std::{
         collections::{BTreeMap, VecDeque},
         sync::{Arc, Mutex},
-        time::{Duration, SystemTime, UNIX_EPOCH},
+        time::{SystemTime, UNIX_EPOCH},
     };
     use tokio::sync::mpsc;
     use tower::ServiceExt;
@@ -2483,6 +2496,59 @@ mod tests {
         assert_eq!(claim.status(), StatusCode::OK);
         assert_eq!(workers.get("old-worker").await.unwrap().in_flight_jobs, 0);
         assert_eq!(workers.get("new-worker").await.unwrap().in_flight_jobs, 1);
+    }
+
+    #[tokio::test]
+    async fn lease_recovery_loop_requeues_expired_lease_and_releases_capacity() {
+        let jobs = JobRegistry::default();
+        let workers = WorkerRegistry::default();
+
+        jobs.submit(SubmitJobRequest {
+            kind: JobKind::VisionAnalysis,
+            priority: Priority::Batch,
+            payload: Value::Null,
+            callback_url: None,
+            idempotency_key: None,
+        })
+        .await
+        .unwrap();
+        workers
+            .register(RegisterWorkerRequest {
+                id: "vision-worker".into(),
+                endpoint_url: "http://vision-worker:9000".into(),
+                node_id: None,
+                pool: "default".into(),
+                job_types: vec![JobKind::VisionAnalysis],
+                max_concurrent_jobs: Some(1),
+                available_vram_mb: None,
+            })
+            .await
+            .unwrap();
+        workers.try_acquire_slot("vision-worker").await;
+        jobs.claim_next_for_worker("vision-worker", &[JobKind::VisionAnalysis], 0)
+            .await
+            .unwrap();
+
+        let state = test_state(jobs.clone(), workers.clone());
+        let task = spawn_lease_recovery_loop(state, Duration::from_millis(10));
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                let job = jobs.get("job-1").await.unwrap();
+                let worker = workers.get("vision-worker").await.unwrap();
+                if job.status == crate::jobs::JobStatus::Queued
+                    && job.lease.is_none()
+                    && worker.in_flight_jobs == 0
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap();
+
+        task.abort();
     }
 
     #[tokio::test]

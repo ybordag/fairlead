@@ -113,11 +113,15 @@ Implemented generalization work includes:
   deregister async workers without dropping held leases.
 - **Terminal job pruning** through an explicit endpoint with configurable
   retention age, per-run limit, SQLite persistence, and Prometheus counters.
+- **Background lease recovery** so expired async worker leases are requeued or
+  failed on a configured maintenance interval, without waiting for the next
+  worker claim.
 
 Phase 8C is complete on `splice` and adds stronger idempotency semantics for
 async job submission, cancellation retries, and terminal worker result retries.
-Remaining Phase 8 work adds background maintenance loops and process-level e2e
-harnesses. Later phases add adapter boundaries, richer resource policy,
+Phase 8D is underway on `clove` and adds background maintenance loops. Remaining
+Phase 8 work adds background pruning and process-level e2e harnesses. Later
+phases add adapter boundaries, richer resource policy,
 external scale/overflow, and transport/SDK hardening.
 
 See [`docs/planning/roadmap.md`](docs/planning/roadmap.md) for the
@@ -266,6 +270,12 @@ callback delivery state, and result/error state. On startup,
 already-expired running leases are requeued when attempts remain and failed when
 attempts are exhausted.
 
+Fairlead also runs a background lease recovery loop. The loop uses the same
+expiry path as worker claims: expired running leases release worker capacity,
+record `attempt timed out`, and either requeue the job or fail it when attempts
+are exhausted. The interval defaults to 30 seconds and can be changed with
+`JOB_MAINTENANCE_INTERVAL_SECS`.
+
 Terminal async jobs can be pruned explicitly with `POST /v1/jobs/prune`.
 Pruning removes only terminal jobs older than `JOB_RETENTION_SECS`, up to
 `JOB_PRUNE_LIMIT` jobs per call. Jobs with pending callbacks are retained so
@@ -285,6 +295,7 @@ Contradictory terminal reports still return a conflict.
 ```bash
 JOB_RETENTION_SECS=86400 \
 JOB_PRUNE_LIMIT=1000 \
+JOB_MAINTENANCE_INTERVAL_SECS=30 \
 cargo run
 ```
 
