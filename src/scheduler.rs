@@ -39,7 +39,9 @@ pub struct JobResultResponse {
 }
 
 pub async fn preview_next_assignment_handler(State(state): State<AppState>) -> Response {
-    match preview_next_assignment(&state.jobs, &state.workers).await {
+    match preview_next_assignment_with_policy(&state.jobs, &state.workers, &state.workload_pools)
+        .await
+    {
         Some(assignment) => Json(SchedulerPreviewResponse { assignment }).into_response(),
         None => StatusCode::NO_CONTENT.into_response(),
     }
@@ -66,7 +68,13 @@ pub async fn claim_worker_job_handler(
 
     match state
         .jobs
-        .claim_next_for_worker(&worker.id, &worker.job_types, DEFAULT_LEASE_DURATION_MS)
+        .claim_next_for_worker_in_pool(
+            &worker.id,
+            &worker.job_types,
+            &worker.pool,
+            &state.workload_pools,
+            DEFAULT_LEASE_DURATION_MS,
+        )
         .await
     {
         Some(job) => Json(JobClaimResponse { job }).into_response(),
@@ -215,22 +223,38 @@ pub async fn sweep_expired_leases(state: &AppState) {
     }
 }
 
+#[cfg(test)]
 pub async fn preview_next_assignment(
     jobs: &JobRegistry,
     workers: &WorkerRegistry,
 ) -> Option<SchedulerPreview> {
-    preview_from_snapshots(jobs.queued_jobs_by_priority().await, workers.list().await)
+    let workload_pools = crate::config::WorkloadPoolPolicy::default();
+    preview_next_assignment_with_policy(jobs, workers, &workload_pools).await
+}
+
+pub async fn preview_next_assignment_with_policy(
+    jobs: &JobRegistry,
+    workers: &WorkerRegistry,
+    workload_pools: &crate::config::WorkloadPoolPolicy,
+) -> Option<SchedulerPreview> {
+    preview_from_snapshots(
+        jobs.queued_jobs_by_priority().await,
+        workers.list().await,
+        workload_pools,
+    )
 }
 
 fn preview_from_snapshots(
     queued_jobs: Vec<JobRecord>,
     workers: Vec<WorkerSnapshot>,
+    workload_pools: &crate::config::WorkloadPoolPolicy,
 ) -> Option<SchedulerPreview> {
     for job in queued_jobs {
-        if let Some(worker) = workers
-            .iter()
-            .find(|worker| !worker.stale && worker.job_types.contains(&job.kind))
-        {
+        if let Some(worker) = workers.iter().find(|worker| {
+            !worker.stale
+                && worker.job_types.contains(&job.kind)
+                && workload_pools.allows(job.kind.as_str(), &worker.pool)
+        }) {
             return Some(SchedulerPreview {
                 job,
                 worker: worker.clone(),
@@ -263,7 +287,7 @@ mod tests {
     };
     use serde_json::{json, Value};
     use std::{
-        collections::VecDeque,
+        collections::{BTreeMap, VecDeque},
         sync::{Arc, Mutex},
         time::{Duration, SystemTime, UNIX_EPOCH},
     };
@@ -272,6 +296,17 @@ mod tests {
 
     fn test_state(jobs: JobRegistry, workers: WorkerRegistry) -> AppState {
         test_state_with_callback_policy(jobs, workers, crate::callbacks::CallbackPolicy::default())
+    }
+
+    fn test_state_with_workload_pools(
+        jobs: JobRegistry,
+        workers: WorkerRegistry,
+        workload_pools: crate::config::WorkloadPoolPolicy,
+    ) -> AppState {
+        AppState {
+            workload_pools,
+            ..test_state(jobs, workers)
+        }
     }
 
     fn test_state_with_callback_policy(
@@ -444,6 +479,7 @@ mod tests {
                 id: "worker-a".into(),
                 endpoint_url: "http://worker-a:9000".into(),
                 node_id: None,
+                pool: "default".into(),
                 job_types: vec![JobKind::IndexBuild, JobKind::EmbedBatch],
                 max_concurrent_jobs: None,
                 available_vram_mb: None,
@@ -483,6 +519,7 @@ mod tests {
                 id: "vision-worker".into(),
                 endpoint_url: "http://vision-worker:9000".into(),
                 node_id: None,
+                pool: "default".into(),
                 job_types: vec![JobKind::VisionAnalysis],
                 max_concurrent_jobs: None,
                 available_vram_mb: None,
@@ -520,6 +557,7 @@ mod tests {
                 id: "embed-worker".into(),
                 endpoint_url: "http://embed-worker:9000".into(),
                 node_id: None,
+                pool: "default".into(),
                 job_types: vec![JobKind::EmbedBatch],
                 max_concurrent_jobs: None,
                 available_vram_mb: None,
@@ -530,6 +568,82 @@ mod tests {
         let preview = preview_next_assignment(&jobs, &workers).await.unwrap();
         assert_eq!(preview.job.id, "job-2");
         assert_eq!(preview.worker.id, "embed-worker");
+    }
+
+    #[tokio::test]
+    async fn preview_skips_workers_outside_workload_pool_policy() {
+        let jobs = JobRegistry::default();
+        let workers = WorkerRegistry::default();
+        let workload_pools = crate::config::WorkloadPoolPolicy::new(BTreeMap::from([(
+            "vision_analysis".to_string(),
+            vec!["vision".to_string()],
+        )]));
+
+        jobs.submit(SubmitJobRequest {
+            kind: JobKind::VisionAnalysis,
+            priority: Priority::Batch,
+            payload: Value::Null,
+            callback_url: None,
+        })
+        .await
+        .unwrap();
+        workers
+            .register(RegisterWorkerRequest {
+                id: "peer-worker".into(),
+                endpoint_url: "http://peer-worker:9000".into(),
+                node_id: None,
+                pool: "peer".into(),
+                job_types: vec![JobKind::VisionAnalysis],
+                max_concurrent_jobs: None,
+                available_vram_mb: None,
+            })
+            .await
+            .unwrap();
+
+        assert!(
+            preview_next_assignment_with_policy(&jobs, &workers, &workload_pools)
+                .await
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn preview_selects_worker_from_allowed_pool() {
+        let jobs = JobRegistry::default();
+        let workers = WorkerRegistry::default();
+        let workload_pools = crate::config::WorkloadPoolPolicy::new(BTreeMap::from([(
+            "vision_analysis".to_string(),
+            vec!["vision".to_string()],
+        )]));
+
+        jobs.submit(SubmitJobRequest {
+            kind: JobKind::VisionAnalysis,
+            priority: Priority::Batch,
+            payload: Value::Null,
+            callback_url: None,
+        })
+        .await
+        .unwrap();
+        for (id, pool) in [("peer-worker", "peer"), ("vision-worker", "vision")] {
+            workers
+                .register(RegisterWorkerRequest {
+                    id: id.into(),
+                    endpoint_url: format!("http://{id}:9000"),
+                    node_id: None,
+                    pool: pool.into(),
+                    job_types: vec![JobKind::VisionAnalysis],
+                    max_concurrent_jobs: None,
+                    available_vram_mb: None,
+                })
+                .await
+                .unwrap();
+        }
+
+        let preview = preview_next_assignment_with_policy(&jobs, &workers, &workload_pools)
+            .await
+            .unwrap();
+        assert_eq!(preview.worker.id, "vision-worker");
+        assert_eq!(preview.worker.pool, "vision");
     }
 
     #[tokio::test]
@@ -550,6 +664,7 @@ mod tests {
                 id: "stale-worker".into(),
                 endpoint_url: "http://stale-worker:9000".into(),
                 node_id: None,
+                pool: "default".into(),
                 job_types: vec![JobKind::Cluster],
                 max_concurrent_jobs: None,
                 available_vram_mb: None,
@@ -570,6 +685,7 @@ mod tests {
                 id: "worker-a".into(),
                 endpoint_url: "http://worker-a:9000".into(),
                 node_id: None,
+                pool: "default".into(),
                 job_types: vec![JobKind::VisionAnalysis],
                 max_concurrent_jobs: None,
                 available_vram_mb: None,
@@ -598,6 +714,7 @@ mod tests {
                 id: "vision-worker".into(),
                 endpoint_url: "http://vision-worker:9000".into(),
                 node_id: Some("node-a".into()),
+                pool: "default".into(),
                 job_types: vec![JobKind::VisionAnalysis],
                 max_concurrent_jobs: None,
                 available_vram_mb: None,
@@ -665,6 +782,7 @@ mod tests {
                 id: "vision-worker".into(),
                 endpoint_url: "http://vision-worker:9000".into(),
                 node_id: Some("node-a".into()),
+                pool: "default".into(),
                 job_types: vec![JobKind::VisionAnalysis],
                 max_concurrent_jobs: None,
                 available_vram_mb: None,
@@ -695,6 +813,127 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn worker_claim_endpoint_skips_jobs_outside_worker_pool() {
+        let jobs = JobRegistry::default();
+        let workers = WorkerRegistry::default();
+        let workload_pools = crate::config::WorkloadPoolPolicy::new(BTreeMap::from([
+            ("vision_analysis".to_string(), vec!["vision".to_string()]),
+            ("embed_batch".to_string(), vec!["default".to_string()]),
+        ]));
+
+        jobs.submit(SubmitJobRequest {
+            kind: JobKind::VisionAnalysis,
+            priority: Priority::Realtime,
+            payload: Value::Null,
+            callback_url: None,
+        })
+        .await
+        .unwrap();
+        jobs.submit(SubmitJobRequest {
+            kind: JobKind::EmbedBatch,
+            priority: Priority::Batch,
+            payload: Value::Null,
+            callback_url: None,
+        })
+        .await
+        .unwrap();
+        workers
+            .register(RegisterWorkerRequest {
+                id: "default-worker".into(),
+                endpoint_url: "http://default-worker:9000".into(),
+                node_id: None,
+                pool: "default".into(),
+                job_types: vec![JobKind::VisionAnalysis, JobKind::EmbedBatch],
+                max_concurrent_jobs: None,
+                available_vram_mb: None,
+            })
+            .await
+            .unwrap();
+
+        let app = build_router(test_state_with_workload_pools(
+            jobs.clone(),
+            workers.clone(),
+            workload_pools,
+        ));
+        let response = app
+            .oneshot(
+                Request::post("/v1/workers/default-worker/claim")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(value["job"]["id"], "job-2");
+        assert_eq!(value["job"]["type"], "embed_batch");
+        assert_eq!(
+            jobs.get("job-1").await.unwrap().status,
+            crate::jobs::JobStatus::Queued
+        );
+        assert_eq!(
+            workers.get("default-worker").await.unwrap().in_flight_jobs,
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn worker_claim_endpoint_returns_no_content_when_worker_pool_is_not_allowed() {
+        let jobs = JobRegistry::default();
+        let workers = WorkerRegistry::default();
+        let workload_pools = crate::config::WorkloadPoolPolicy::new(BTreeMap::from([(
+            "vision_analysis".to_string(),
+            vec!["vision".to_string()],
+        )]));
+
+        jobs.submit(SubmitJobRequest {
+            kind: JobKind::VisionAnalysis,
+            priority: Priority::Batch,
+            payload: Value::Null,
+            callback_url: None,
+        })
+        .await
+        .unwrap();
+        workers
+            .register(RegisterWorkerRequest {
+                id: "peer-worker".into(),
+                endpoint_url: "http://peer-worker:9000".into(),
+                node_id: None,
+                pool: "peer".into(),
+                job_types: vec![JobKind::VisionAnalysis],
+                max_concurrent_jobs: None,
+                available_vram_mb: None,
+            })
+            .await
+            .unwrap();
+
+        let app = build_router(test_state_with_workload_pools(
+            jobs.clone(),
+            workers.clone(),
+            workload_pools,
+        ));
+        let response = app
+            .oneshot(
+                Request::post("/v1/workers/peer-worker/claim")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        assert_eq!(
+            jobs.get("job-1").await.unwrap().status,
+            crate::jobs::JobStatus::Queued
+        );
+        assert_eq!(workers.get("peer-worker").await.unwrap().in_flight_jobs, 0);
+    }
+
+    #[tokio::test]
     async fn worker_claim_endpoint_prevents_duplicate_claims() {
         let jobs = JobRegistry::default();
         let workers = WorkerRegistry::default();
@@ -712,6 +951,7 @@ mod tests {
                 id: "embed-worker".into(),
                 endpoint_url: "http://embed-worker:9000".into(),
                 node_id: None,
+                pool: "default".into(),
                 job_types: vec![JobKind::EmbedBatch],
                 max_concurrent_jobs: None,
                 available_vram_mb: None,
@@ -762,6 +1002,7 @@ mod tests {
                 id: "vision-worker".into(),
                 endpoint_url: "http://vision-worker:9000".into(),
                 node_id: None,
+                pool: "default".into(),
                 job_types: vec![JobKind::VisionAnalysis],
                 max_concurrent_jobs: Some(1),
                 available_vram_mb: None,
@@ -816,6 +1057,7 @@ mod tests {
                 id: "vision-worker".into(),
                 endpoint_url: "http://vision-worker:9000".into(),
                 node_id: None,
+                pool: "default".into(),
                 job_types: vec![JobKind::VisionAnalysis],
                 max_concurrent_jobs: None,
                 available_vram_mb: None,
@@ -869,6 +1111,7 @@ mod tests {
                 id: "embed-worker".into(),
                 endpoint_url: "http://embed-worker:9000".into(),
                 node_id: None,
+                pool: "default".into(),
                 job_types: vec![JobKind::EmbedBatch],
                 max_concurrent_jobs: Some(1),
                 available_vram_mb: None,
@@ -949,6 +1192,7 @@ mod tests {
                 id: "vision-worker".into(),
                 endpoint_url: "http://vision-worker:9000".into(),
                 node_id: None,
+                pool: "default".into(),
                 job_types: vec![JobKind::VisionAnalysis],
                 max_concurrent_jobs: None,
                 available_vram_mb: None,
@@ -1006,6 +1250,7 @@ mod tests {
                 id: "cluster-worker".into(),
                 endpoint_url: "http://cluster-worker:9000".into(),
                 node_id: None,
+                pool: "default".into(),
                 job_types: vec![JobKind::Cluster],
                 max_concurrent_jobs: None,
                 available_vram_mb: None,
@@ -1066,6 +1311,7 @@ mod tests {
                 id: "vision-worker".into(),
                 endpoint_url: "http://vision-worker:9000".into(),
                 node_id: None,
+                pool: "default".into(),
                 job_types: vec![JobKind::VisionAnalysis],
                 max_concurrent_jobs: None,
                 available_vram_mb: None,
@@ -1139,6 +1385,7 @@ mod tests {
                 id: "cluster-worker".into(),
                 endpoint_url: "http://cluster-worker:9000".into(),
                 node_id: None,
+                pool: "default".into(),
                 job_types: vec![JobKind::Cluster],
                 max_concurrent_jobs: None,
                 available_vram_mb: None,
@@ -1452,6 +1699,7 @@ mod tests {
                 id: "embed-worker".into(),
                 endpoint_url: "http://embed-worker:9000".into(),
                 node_id: None,
+                pool: "default".into(),
                 job_types: vec![JobKind::EmbedBatch],
                 max_concurrent_jobs: None,
                 available_vram_mb: None,
@@ -1495,6 +1743,7 @@ mod tests {
                 id: "vision-worker".into(),
                 endpoint_url: "http://vision-worker:9000".into(),
                 node_id: None,
+                pool: "default".into(),
                 job_types: vec![JobKind::VisionAnalysis],
                 max_concurrent_jobs: Some(1),
                 available_vram_mb: None,
@@ -1600,6 +1849,7 @@ mod tests {
                 id: "old-worker".into(),
                 endpoint_url: "http://old-worker:9000".into(),
                 node_id: None,
+                pool: "default".into(),
                 job_types: vec![JobKind::VisionAnalysis],
                 max_concurrent_jobs: Some(1),
                 available_vram_mb: None,
@@ -1611,6 +1861,7 @@ mod tests {
                 id: "new-worker".into(),
                 endpoint_url: "http://new-worker:9000".into(),
                 node_id: None,
+                pool: "default".into(),
                 job_types: vec![JobKind::VisionAnalysis],
                 max_concurrent_jobs: Some(1),
                 available_vram_mb: None,
@@ -1661,6 +1912,7 @@ mod tests {
                 id: "vision-worker".into(),
                 endpoint_url: "http://vision-worker:9000".into(),
                 node_id: None,
+                pool: "default".into(),
                 job_types: vec![JobKind::VisionAnalysis],
                 max_concurrent_jobs: None,
                 available_vram_mb: None,
@@ -1715,6 +1967,7 @@ mod tests {
                 id: "vision-worker".into(),
                 endpoint_url: "http://vision-worker:9000".into(),
                 node_id: None,
+                pool: "default".into(),
                 job_types: vec![JobKind::VisionAnalysis],
                 max_concurrent_jobs: None,
                 available_vram_mb: None,
@@ -1771,6 +2024,7 @@ mod tests {
                 id: "worker-b".into(),
                 endpoint_url: "http://worker-b:9000".into(),
                 node_id: None,
+                pool: "default".into(),
                 job_types: vec![JobKind::EmbedBatch],
                 max_concurrent_jobs: None,
                 available_vram_mb: None,
@@ -1819,6 +2073,7 @@ mod tests {
                 id: "worker-a".into(),
                 endpoint_url: "http://worker-a:9000".into(),
                 node_id: None,
+                pool: "default".into(),
                 job_types: vec![JobKind::VisionAnalysis],
                 max_concurrent_jobs: None,
                 available_vram_mb: None,
@@ -1869,6 +2124,7 @@ mod tests {
                 id: "vision-worker".into(),
                 endpoint_url: "http://vision-worker:9000".into(),
                 node_id: None,
+                pool: "default".into(),
                 job_types: vec![JobKind::VisionAnalysis],
                 max_concurrent_jobs: Some(1),
                 available_vram_mb: None,
@@ -1960,6 +2216,7 @@ mod tests {
                 id: "index-worker".into(),
                 endpoint_url: "http://index-worker:9000".into(),
                 node_id: None,
+                pool: "default".into(),
                 job_types: vec![JobKind::IndexBuild],
                 max_concurrent_jobs: None,
                 available_vram_mb: None,
@@ -2020,6 +2277,7 @@ mod tests {
                 id: "cluster-worker".into(),
                 endpoint_url: "http://cluster-worker:9000".into(),
                 node_id: None,
+                pool: "default".into(),
                 job_types: vec![JobKind::Cluster],
                 max_concurrent_jobs: None,
                 available_vram_mb: None,
@@ -2061,6 +2319,7 @@ mod tests {
                 id: "worker-a".into(),
                 endpoint_url: "http://worker-a:9000".into(),
                 node_id: None,
+                pool: "default".into(),
                 job_types: vec![JobKind::Cluster],
                 max_concurrent_jobs: None,
                 available_vram_mb: None,
@@ -2103,6 +2362,7 @@ mod tests {
                 id: "worker-a".into(),
                 endpoint_url: "http://worker-a:9000".into(),
                 node_id: None,
+                pool: "default".into(),
                 job_types: vec![JobKind::Cluster],
                 max_concurrent_jobs: None,
                 available_vram_mb: None,
@@ -2171,6 +2431,7 @@ mod tests {
                 id: "embed-worker".into(),
                 endpoint_url: "http://embed-worker:9000".into(),
                 node_id: None,
+                pool: "default".into(),
                 job_types: vec![JobKind::EmbedBatch],
                 max_concurrent_jobs: None,
                 available_vram_mb: None,
@@ -2210,6 +2471,7 @@ mod tests {
                 id: "worker-b".into(),
                 endpoint_url: "http://worker-b:9000".into(),
                 node_id: None,
+                pool: "default".into(),
                 job_types: vec![JobKind::Cluster],
                 max_concurrent_jobs: None,
                 available_vram_mb: None,
@@ -2256,6 +2518,7 @@ mod tests {
                 id: "vision-worker".into(),
                 endpoint_url: "http://vision-worker:9000".into(),
                 node_id: None,
+                pool: "default".into(),
                 job_types: vec![JobKind::VisionAnalysis],
                 max_concurrent_jobs: None,
                 available_vram_mb: None,
@@ -2314,6 +2577,7 @@ mod tests {
                 id: "vision-worker".into(),
                 endpoint_url: "http://vision-worker:9000".into(),
                 node_id: None,
+                pool: "default".into(),
                 job_types: vec![JobKind::VisionAnalysis],
                 max_concurrent_jobs: None,
                 available_vram_mb: None,
@@ -2363,6 +2627,7 @@ mod tests {
                 id: "cluster-worker".into(),
                 endpoint_url: "http://cluster-worker:9000".into(),
                 node_id: None,
+                pool: "default".into(),
                 job_types: vec![JobKind::Cluster],
                 max_concurrent_jobs: None,
                 available_vram_mb: None,
@@ -2396,6 +2661,7 @@ mod tests {
                 id: "worker-a".into(),
                 endpoint_url: "http://worker-a:9000".into(),
                 node_id: None,
+                pool: "default".into(),
                 job_types: vec![JobKind::EmbedBatch],
                 max_concurrent_jobs: None,
                 available_vram_mb: None,
@@ -2453,6 +2719,7 @@ mod tests {
                 id: "cluster-worker".into(),
                 endpoint_url: "http://cluster-worker:9000".into(),
                 node_id: None,
+                pool: "default".into(),
                 job_types: vec![JobKind::Cluster],
                 max_concurrent_jobs: None,
                 available_vram_mb: None,
@@ -2491,6 +2758,7 @@ mod tests {
                 id: "embed-worker".into(),
                 endpoint_url: "http://embed-worker:9000".into(),
                 node_id: None,
+                pool: "default".into(),
                 job_types: vec![JobKind::EmbedBatch],
                 max_concurrent_jobs: None,
                 available_vram_mb: None,

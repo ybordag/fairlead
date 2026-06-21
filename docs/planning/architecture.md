@@ -203,15 +203,17 @@ if none eligible:
 ```
 
 Current Fairlead implements locality-aware routing, ordered synchronous
-backend-pool selection, and an opt-in resource-aware slice. Backends can carry
-`node_id` and `pool` metadata, requests can carry `X-Fairlead-Origin-Node`, and
-workers/backends can report resource state through `/v1/resources/report`. When
-`RESOURCE_AWARE_ROUTING=true`, the router skips backends without a fresh report
-that satisfies the workload's coarse VRAM estimate, applies pool policy,
-locality, and affinity precedence, then ranks remaining eligible candidates by
-lower reported load, higher available VRAM, and configured order inside the
-selected pool stage. It does not yet implement async worker pool placement,
-durable starvation policy beyond current queue ordering, or cloud fallback.
+backend-pool selection, async worker pool eligibility, and an opt-in
+resource-aware slice. Backends and workers can carry `node_id` and `pool`
+metadata, requests can carry `X-Fairlead-Origin-Node`, and workers/backends can
+report resource state through `/v1/resources/report`. When
+`RESOURCE_AWARE_ROUTING=true`, the synchronous router skips backends without a
+fresh report that satisfies the workload's coarse VRAM estimate, applies pool
+policy, locality, and affinity precedence, then ranks remaining eligible
+candidates by lower reported load, higher available VRAM, and configured order
+inside the selected pool stage. It does not yet implement per-pool async
+placement metrics, durable starvation policy beyond current queue ordering, or
+cloud fallback.
 
 ### Pool Policy Model
 
@@ -257,8 +259,9 @@ first pool's eligible backends, then falls back to the next pool only when no
 backend in the earlier pool can be selected. Within each pool, the existing
 selection rules still apply: origin locality, session affinity, resource
 ranking, circuit state, and configured backend order choose the concrete
-backend. Phase 7C will add worker pool metadata and apply the same vocabulary to
-async worker placement.
+backend. Phase 7C applies the same vocabulary to async worker placement through
+worker pool metadata and workload pool policy checks during preview and
+worker-pull claims.
 
 Synchronous pool routing emits Prometheus counters for each pool stage Fairlead
 evaluates:
@@ -399,8 +402,8 @@ job submitted
 - `cluster` — k-means or HDBSCAN over an embedding space
 
 **Supporting infrastructure:**
-- `POST /v1/workers/register` — workers announce capabilities, endpoint, and
-  node metadata
+- `POST /v1/workers/register` — workers announce capabilities, endpoint, node
+  metadata, and pool metadata
 - `POST /v1/workers/{id}/heartbeat` — workers refresh liveness
 - `GET /v1/workers` — current in-memory worker registry
 - `POST /v1/workers/{id}/claim` — worker-pull claim endpoint
@@ -429,6 +432,13 @@ Workers only announce readiness by asking for work. Fairlead remains the central
 controller: it validates the worker, checks freshness and capabilities, scans
 queued jobs by priority/FIFO order, applies lease/resource policy, and either
 returns a leased job or returns no work.
+
+Phase 7C applies workload pool policy to this worker-pull path. Worker
+registration now includes a `pool` field, defaulting to `default` for older
+clients. Scheduler preview and worker claims only match a queued job when the
+worker supports the job type and the workload policy allows the worker's pool.
+If a worker asks for work but every queued job is outside that worker's allowed
+pool, Fairlead releases the worker slot and returns `204 No Content`.
 
 The alternative would be a job-scoped claim endpoint such as:
 

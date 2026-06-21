@@ -7,7 +7,7 @@ health, circuit state, and session affinity.
 
 The name comes from sailing: a fairlead is a fitting that guides lines in exactly the right direction without friction or fouling.
 
-**Status:** Phase 7B is underway on `trimmer`. Phase 7 adds pool-aware
+**Status:** Phase 7C is underway on `tactician`. Phase 7 adds pool-aware
 placement: first the shared pool/workload policy model, then synchronous backend
 routing, then async worker placement.
 Fairlead currently runs as an Axum HTTP service with `/health`, `/metrics`,
@@ -100,9 +100,9 @@ Implemented generalization work includes:
 - **Terminal job callbacks** with bounded retry/timeout policy,
   success/failure metrics, and SQLite-backed at-least-once restart recovery.
 
-Remaining Phase 7 work adds async worker pool placement and shared pool demos.
-Future phases add scheduler hardening, adapter boundaries, richer resource
-policy, external scale/overflow, and transport/SDK hardening.
+Remaining Phase 7 work adds async worker pool observability and shared pool
+demos. Future phases add scheduler hardening, adapter boundaries, richer
+resource policy, external scale/overflow, and transport/SDK hardening.
 
 See [`docs/planning/roadmap.md`](docs/planning/roadmap.md) for the
 implementation plan and acceptance criteria.

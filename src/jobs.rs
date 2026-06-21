@@ -507,12 +507,32 @@ impl JobRegistry {
         worker_job_types: &[JobKind],
         lease_duration_ms: u128,
     ) -> Option<JobRecord> {
+        self.claim_next_for_worker_in_pool(
+            worker_id,
+            worker_job_types,
+            "default",
+            &crate::config::WorkloadPoolPolicy::default(),
+            lease_duration_ms,
+        )
+        .await
+    }
+
+    pub async fn claim_next_for_worker_in_pool(
+        &self,
+        worker_id: &str,
+        worker_job_types: &[JobKind],
+        worker_pool: &str,
+        workload_pools: &crate::config::WorkloadPoolPolicy,
+        lease_duration_ms: u128,
+    ) -> Option<JobRecord> {
         let mut guard = self.inner.write().await;
         let job_id = guard.queues.iter().find_map(|(_priority, queue)| {
             queue.iter().find_map(|id| {
                 let job = guard.jobs.get(id)?;
-                (job.status == JobStatus::Queued && worker_job_types.contains(&job.kind))
-                    .then(|| id.clone())
+                (job.status == JobStatus::Queued
+                    && worker_job_types.contains(&job.kind)
+                    && workload_pools.allows(job.kind.as_str(), worker_pool))
+                .then(|| id.clone())
             })
         })?;
 

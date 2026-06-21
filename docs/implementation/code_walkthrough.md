@@ -1313,9 +1313,10 @@ and registered workers:
    `realtime`, `batch`, then `background` order, preserving FIFO order inside
    each priority.
 2. `WorkerRegistry::list()` returns registered workers with their fresh/stale
-   status.
-3. `scheduler::preview_next_assignment()` scans jobs in priority order and picks
-   the first non-stale worker that supports the job type.
+   status, job types, and pool metadata.
+3. `scheduler::preview_next_assignment_with_policy()` scans jobs in priority
+   order and picks the first non-stale worker that supports the job type and is
+   in a pool allowed by the workload pool policy.
 
 The preview response is deliberately non-mutating. The job remains `queued`, no
 lease is created, and Fairlead does not call the worker endpoint.
@@ -1330,8 +1331,9 @@ lease is created, and Fairlead does not call the worker endpoint.
 4. If the worker is stale, Fairlead returns `409`.
 5. If the worker is already at `max_concurrent_jobs`, Fairlead returns `409`.
 6. Otherwise, Fairlead acquires one worker slot.
-7. `JobRegistry::claim_next_for_worker()` scans queued jobs in
-   priority/FIFO order for a job type the worker supports.
+7. `JobRegistry::claim_next_for_worker_in_pool()` scans queued jobs in
+   priority/FIFO order for a job type the worker supports and a workload pool
+   policy that allows the worker's pool.
 8. If a match exists, the job becomes `running`, `attempts` increments, lease
    metadata is attached, and the job is removed from queue-depth accounting.
 9. If no compatible queued job exists, Fairlead releases the worker slot and
@@ -1455,7 +1457,8 @@ The current code does not:
 - Reserve GPU memory for a request; resource reports are cooperative control-plane
   hints, not allocator-level reservations.
 
-Push dispatch, async worker pool placement, completed-job pruning, and
+Push dispatch, per-pool async placement metrics, completed-job pruning, and
 process-level restart harnesses are future roadmap phases, not current
-behavior. Synchronous backend pool routing, durable job state, and terminal
-callbacks are current behavior when the relevant configuration is enabled.
+behavior. Synchronous backend pool routing, async worker pool eligibility,
+durable job state, and terminal callbacks are current behavior when the relevant
+configuration is enabled.

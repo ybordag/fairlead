@@ -126,9 +126,9 @@ Fairlead currently provides:
 
 It does not yet provide:
 
-- Async worker pool placement or shared sync/async pool demos. Synchronous
+- Per-pool async placement metrics or shared sync/async pool demos. Synchronous
   backend pool configuration and ordered fallback chains are implemented in
-  Phase 7B.
+  Phase 7B; async worker pool eligibility is underway in Phase 7C.
 - CPU resource accounting and richer resource dimensions beyond coarse VRAM/load.
 - Durable starvation/fairness policy beyond current priority queue ordering.
 - Worker deregistration, graceful shutdown, or completed-job pruning.
@@ -816,11 +816,12 @@ async workers.
 
 #### Phase 7C: Async Worker Pool Placement
 
-- Add pool metadata to registered workers.
-- Route async jobs to eligible worker pools before choosing a specific worker.
-- Apply priority/FIFO ordering only after the workload's eligible worker pools
+- [x] Add pool metadata to registered workers.
+- [x] Route async jobs to eligible worker pools before choosing a specific
+  worker.
+- [x] Apply priority/FIFO ordering only after the workload's eligible worker pools
   are known.
-- Add per-pool async metrics for candidate workers, selected worker, and
+- [ ] Add per-pool async metrics for candidate workers, selected worker, and
   no-compatible-pool cases.
 
 #### Phase 7D: Shared Pool Demo and Docs
