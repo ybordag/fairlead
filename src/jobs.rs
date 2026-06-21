@@ -49,6 +49,16 @@ impl JobStatus {
     fn is_terminal(&self) -> bool {
         matches!(self, Self::Complete | Self::Failed | Self::Cancelled)
     }
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Queued => "queued",
+            Self::Running => "running",
+            Self::Complete => "complete",
+            Self::Failed => "failed",
+            Self::Cancelled => "cancelled",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -134,6 +144,16 @@ pub struct JobQueueWaitSnapshot {
     pub count: usize,
     pub wait_seconds_sum: f64,
     pub wait_seconds_max: f64,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct JobDurationSnapshot {
+    pub priority: &'static str,
+    pub kind: &'static str,
+    pub status: &'static str,
+    pub count: usize,
+    pub duration_seconds_sum: f64,
+    pub duration_seconds_max: f64,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -302,6 +322,53 @@ impl JobRegistry {
 
         snapshots
             .sort_by_key(|snapshot| (priority_rank(snapshot.priority), kind_rank(snapshot.kind)));
+        snapshots
+    }
+
+    pub async fn terminal_duration_snapshots(&self) -> Vec<JobDurationSnapshot> {
+        let guard = self.inner.read().await;
+        let mut snapshots: Vec<JobDurationSnapshot> = Vec::new();
+
+        for id in &guard.order {
+            let Some(job) = guard.jobs.get(id) else {
+                continue;
+            };
+            if !job.status.is_terminal() {
+                continue;
+            }
+
+            let duration_seconds = job
+                .updated_at_unix_ms
+                .saturating_sub(job.created_at_unix_ms) as f64
+                / 1000.0;
+
+            if let Some(snapshot) = snapshots.iter_mut().find(|s| {
+                s.priority == job.priority.as_str()
+                    && s.kind == job.kind.as_str()
+                    && s.status == job.status.as_str()
+            }) {
+                snapshot.count += 1;
+                snapshot.duration_seconds_sum += duration_seconds;
+                snapshot.duration_seconds_max = snapshot.duration_seconds_max.max(duration_seconds);
+            } else {
+                snapshots.push(JobDurationSnapshot {
+                    priority: job.priority.as_str(),
+                    kind: job.kind.as_str(),
+                    status: job.status.as_str(),
+                    count: 1,
+                    duration_seconds_sum: duration_seconds,
+                    duration_seconds_max: duration_seconds,
+                });
+            }
+        }
+
+        snapshots.sort_by_key(|snapshot| {
+            (
+                priority_rank(snapshot.priority),
+                kind_rank(snapshot.kind),
+                status_rank(snapshot.status),
+            )
+        });
         snapshots
     }
 
@@ -629,6 +696,17 @@ fn kind_rank(kind: &str) -> u8 {
         "index_build" => 2,
         "cluster" => 3,
         _ => 4,
+    }
+}
+
+fn status_rank(status: &str) -> u8 {
+    match status {
+        "queued" => 0,
+        "running" => 1,
+        "complete" => 2,
+        "failed" => 3,
+        "cancelled" => 4,
+        _ => 5,
     }
 }
 
@@ -1542,6 +1620,59 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn terminal_duration_snapshots_group_terminal_jobs() {
+        let jobs = JobRegistry::default();
+
+        jobs.submit(SubmitJobRequest {
+            kind: JobKind::VisionAnalysis,
+            priority: Priority::Batch,
+            payload: Value::Null,
+            callback_url: None,
+        })
+        .await
+        .unwrap();
+        jobs.submit(SubmitJobRequest {
+            kind: JobKind::EmbedBatch,
+            priority: Priority::Realtime,
+            payload: Value::Null,
+            callback_url: None,
+        })
+        .await
+        .unwrap();
+        jobs.submit(SubmitJobRequest {
+            kind: JobKind::Cluster,
+            priority: Priority::Background,
+            payload: Value::Null,
+            callback_url: None,
+        })
+        .await
+        .unwrap();
+
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+
+        jobs.claim_next_for_worker("worker-a", &[JobKind::VisionAnalysis], 30_000)
+            .await
+            .unwrap();
+        jobs.complete_lease("job-1", "worker-a", json!({"ok": true}))
+            .await;
+        jobs.cancel("job-2").await;
+
+        let snapshots = jobs.terminal_duration_snapshots().await;
+
+        assert_eq!(snapshots.len(), 2);
+        assert_eq!(snapshots[0].priority, "realtime");
+        assert_eq!(snapshots[0].kind, "embed_batch");
+        assert_eq!(snapshots[0].status, "cancelled");
+        assert_eq!(snapshots[0].count, 1);
+        assert_eq!(snapshots[1].priority, "batch");
+        assert_eq!(snapshots[1].kind, "vision_analysis");
+        assert_eq!(snapshots[1].status, "complete");
+        assert_eq!(snapshots[1].count, 1);
+        assert!(snapshots[1].duration_seconds_sum > 0.0);
+        assert!(snapshots[1].duration_seconds_max > 0.0);
+    }
+
+    #[tokio::test]
     async fn cancelling_job_removes_it_from_queue_wait_snapshots() {
         let jobs = JobRegistry::default();
         jobs.submit(SubmitJobRequest {
@@ -1643,6 +1774,80 @@ mod tests {
         ));
         assert!(!metrics.contains(
             "fairlead_job_queue_wait_seconds_max{priority=\"background\",type=\"cluster\"}"
+        ));
+    }
+
+    #[tokio::test]
+    async fn metrics_reports_terminal_job_duration() {
+        let state = test_state();
+        let jobs = state.jobs.clone();
+        let app = build_router(state);
+
+        jobs.submit(SubmitJobRequest {
+            kind: JobKind::VisionAnalysis,
+            priority: Priority::Batch,
+            payload: Value::Null,
+            callback_url: None,
+        })
+        .await
+        .unwrap();
+        jobs.submit(SubmitJobRequest {
+            kind: JobKind::Cluster,
+            priority: Priority::Background,
+            payload: Value::Null,
+            callback_url: None,
+        })
+        .await
+        .unwrap();
+        jobs.submit(SubmitJobRequest {
+            kind: JobKind::EmbedBatch,
+            priority: Priority::Realtime,
+            payload: Value::Null,
+            callback_url: None,
+        })
+        .await
+        .unwrap();
+
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+
+        jobs.claim_next_for_worker("worker-a", &[JobKind::VisionAnalysis], 30_000)
+            .await
+            .unwrap();
+        jobs.complete_lease("job-1", "worker-a", json!({"ok": true}))
+            .await;
+        jobs.claim_next_for_worker("worker-a", &[JobKind::Cluster], 30_000)
+            .await
+            .unwrap();
+        jobs.fail_lease(
+            "job-2",
+            "worker-a",
+            JobFailure {
+                message: "bad input".into(),
+                retryable: false,
+            },
+        )
+        .await;
+
+        let response = app
+            .oneshot(Request::get("/metrics").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let metrics = response_text(response).await;
+
+        assert!(metrics.contains(
+            "fairlead_job_duration_seconds_count{priority=\"batch\",type=\"vision_analysis\",status=\"complete\"} 1"
+        ));
+        assert!(metrics.contains(
+            "fairlead_job_duration_seconds_sum{priority=\"batch\",type=\"vision_analysis\",status=\"complete\"} "
+        ));
+        assert!(metrics.contains(
+            "fairlead_job_duration_seconds_max{priority=\"batch\",type=\"vision_analysis\",status=\"complete\"} "
+        ));
+        assert!(metrics.contains(
+            "fairlead_job_duration_seconds_count{priority=\"background\",type=\"cluster\",status=\"failed\"} 1"
+        ));
+        assert!(!metrics.contains(
+            "fairlead_job_duration_seconds_count{priority=\"realtime\",type=\"embed_batch\""
         ));
     }
 

@@ -201,6 +201,7 @@ pub async fn metrics(State(state): State<AppState>) -> Response<String> {
     body.push_str(&render_priority_metrics(&state));
     body.push_str(&render_resource_metrics(&state).await);
     body.push_str(&render_job_queue_metrics(&state).await);
+    body.push_str(&render_job_duration_metrics(&state).await);
     body.push_str(&render_worker_metrics(&state).await);
 
     Response::builder()
@@ -286,6 +287,34 @@ async fn render_job_queue_metrics(state: &AppState) -> String {
         body.push_str(&format!(
             "fairlead_job_queue_wait_seconds_max{{priority=\"{priority}\",type=\"{kind}\"}} {:.6}\n",
             snapshot.wait_seconds_max,
+        ));
+    }
+
+    body
+}
+
+async fn render_job_duration_metrics(state: &AppState) -> String {
+    let snapshots = state.jobs.terminal_duration_snapshots().await;
+    let mut body = String::from(
+        "# HELP fairlead_job_duration_seconds Terminal async job duration from submission to terminal state\n\
+         # TYPE fairlead_job_duration_seconds summary\n",
+    );
+
+    for snapshot in snapshots {
+        let priority = prometheus_escape(snapshot.priority);
+        let kind = prometheus_escape(snapshot.kind);
+        let status = prometheus_escape(snapshot.status);
+        body.push_str(&format!(
+            "fairlead_job_duration_seconds_count{{priority=\"{priority}\",type=\"{kind}\",status=\"{status}\"}} {}\n",
+            snapshot.count,
+        ));
+        body.push_str(&format!(
+            "fairlead_job_duration_seconds_sum{{priority=\"{priority}\",type=\"{kind}\",status=\"{status}\"}} {:.6}\n",
+            snapshot.duration_seconds_sum,
+        ));
+        body.push_str(&format!(
+            "fairlead_job_duration_seconds_max{{priority=\"{priority}\",type=\"{kind}\",status=\"{status}\"}} {:.6}\n",
+            snapshot.duration_seconds_max,
         ));
     }
 

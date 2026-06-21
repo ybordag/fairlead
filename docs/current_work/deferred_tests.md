@@ -129,7 +129,6 @@ tests need a heavier multi-process/deployment harness.
 As Phase 6D continues, add tests for:
 
 - per-attempt timeout handling
-- job duration metrics
 - concurrent claims racing against `max_concurrent_jobs` once the scheduler runs
   under a heavier multi-worker harness
 - duplicate result reports after a worker slot has already been released
@@ -138,8 +137,8 @@ As Phase 6D continues, add tests for:
 requeue, non-retryable failure, retry exhaustion, and endpoint ownership checks.
 The current Halyard branch also covers in-flight accounting, capacity release on
 completion/failure/cancellation/expiry, capacity rejection, and utilization
-metric output. The remaining tests need timeout policy, duration metrics, or a
-heavier concurrency/e2e harness.
+metric output. It also covers terminal job duration snapshots and metrics. The
+remaining tests need timeout policy or a heavier concurrency/e2e harness.
 
 ### `phase_6e_job_persistence_and_recovery`
 

@@ -123,7 +123,7 @@ It does not yet provide:
 - CPU resource accounting and richer resource dimensions beyond coarse VRAM/load.
 - Durable priority queues or durable job persistence.
 - Callback delivery or durable async worker execution state.
-- Worker deregistration, graceful shutdown, or job duration metrics.
+- Worker deregistration, graceful shutdown, or callback success/failure metrics.
 
 ## Easy Tasks
 
@@ -411,7 +411,8 @@ Scope:
 - [x] Add queue wait time by priority and workload.
 - [x] Add worker availability.
 - [x] Add worker utilization.
-- [ ] Add job duration and callback success/failure.
+- [x] Add job duration.
+- [ ] Add callback success/failure.
 
 Acceptance criteria:
 
@@ -606,7 +607,8 @@ Needed metrics:
 - Queue wait time by priority and workload.
 - Worker availability and utilization.
 - Resource used/free by node and resource kind.
-- Job duration and callback success/failure.
+- Job duration.
+- Callback success/failure.
 
 Tracing should carry:
 
@@ -726,10 +728,11 @@ observable.
 - Enforce per-attempt timeouts.
 - [x] Track worker in-flight counts and capacity usage.
 - [x] Add worker utilization metrics.
-- Add job duration metrics.
-- Add tests for timeout and duration accounting.
+- [x] Add job duration metrics.
+- Add tests for timeout accounting.
 - [x] Add tests for success, retryable failure, and retry exhaustion.
 - [x] Add tests for utilization accounting.
+- [x] Add tests for duration accounting.
 
 ### Phase 6E: Durable Job State and Recovery
 

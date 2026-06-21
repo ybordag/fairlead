@@ -52,7 +52,6 @@ Implemented:
 
 Remaining likely Halyard work:
 
-- Job duration metrics.
 - Per-attempt timeout behavior.
 
 ## Second Slice
@@ -80,5 +79,23 @@ Implemented:
 
 Remaining likely Halyard work:
 
-- Job duration metrics.
+- Per-attempt timeout behavior.
+
+## Third Slice
+
+Implemented:
+
+- Added terminal job duration snapshots to `JobRegistry`.
+- Duration is measured from job submission to terminal state using
+  `created_at_unix_ms` and `updated_at_unix_ms`.
+- Aggregates are grouped by priority, job type, and terminal status.
+- Added `/metrics` output for `fairlead_job_duration_seconds_count`,
+  `fairlead_job_duration_seconds_sum`, and
+  `fairlead_job_duration_seconds_max`.
+- Duration metrics include only terminal jobs: `complete`, `failed`, and
+  `cancelled`.
+- Added registry and metrics tests for terminal duration accounting.
+
+Remaining likely Halyard work:
+
 - Per-attempt timeout behavior.

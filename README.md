@@ -89,9 +89,9 @@ Implemented generalization work includes:
   release in-flight slots on completion, failure, cancellation, or expired
   leases.
 
-Future Phase 6 subphases add job duration metrics, per-attempt timeout behavior,
-durable job state, callback delivery, and async completion metrics. Later phases
-add complete pool-aware routing, adapter boundaries, and cloud fallback.
+Future Phase 6 subphases add per-attempt timeout behavior, durable job state,
+callback delivery, and async completion metrics. Later phases add complete
+pool-aware routing, adapter boundaries, and cloud fallback.
 
 See [`docs/planning/roadmap.md`](docs/planning/roadmap.md) for the
 implementation plan and acceptance criteria.

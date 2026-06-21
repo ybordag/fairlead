@@ -268,6 +268,10 @@ Current Phase 6B/6C/6D behavior:
 - `/metrics` exposes `fairlead_job_queue_depth{priority,type}`
 - `/metrics` exposes `fairlead_job_queue_wait_seconds_sum{priority,type}` and
   `fairlead_job_queue_wait_seconds_max{priority,type}`
+- `/metrics` exposes terminal async job duration through
+  `fairlead_job_duration_seconds_count{priority,type,status}`,
+  `fairlead_job_duration_seconds_sum{priority,type,status}`, and
+  `fairlead_job_duration_seconds_max{priority,type,status}`
 - job state is in memory and is lost on process restart
 - cancellation marks queued jobs `cancelled`
 - cancellation removes queued jobs from queue depth and wait-time accounting

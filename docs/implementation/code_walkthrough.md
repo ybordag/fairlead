@@ -1233,6 +1233,17 @@ fairlead_job_queue_wait_seconds_max{priority="batch",type="vision_analysis"} 2.4
 The wait metric only considers jobs still in `queued` state. Cancelled jobs are
 removed from queue depth and wait-time accounting.
 
+Terminal async job duration is aggregated by priority, type, and final status:
+
+```text
+fairlead_job_duration_seconds_count{priority="batch",type="vision_analysis",status="complete"} 1
+fairlead_job_duration_seconds_sum{priority="batch",type="vision_analysis",status="complete"} 1.240000
+fairlead_job_duration_seconds_max{priority="batch",type="vision_analysis",status="complete"} 1.240000
+```
+
+The duration metric only includes terminal jobs: `complete`, `failed`, and
+`cancelled`. Running and queued jobs are excluded.
+
 Worker registration exposes current non-dispatching worker availability:
 
 ```text

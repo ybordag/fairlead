@@ -55,8 +55,8 @@ cargo watch -x run
 ## Current status
 
 **Phase 6C complete** (cleat → main). **Phase 6D is in progress on halyard**:
-worker completion/failure reporting, retries, worker capacity accounting, and
-job duration metrics before durable state and callbacks.
+worker completion/failure reporting, retries, worker capacity accounting,
+duration metrics, and per-attempt timeouts before durable state and callbacks.
 
 | Phase | Branch | Status |
 |---|---|---|
@@ -376,7 +376,8 @@ WORKER_HEARTBEAT_SECS        — interval before a worker is considered stale
   multiple Fairlead instances.
 - Callback delivery: on completion, POST to `callback_url` with result payload;
   retry on failure.
-- Job duration and callback success/failure metrics.
+- [x] Job duration metrics.
+- Callback success/failure metrics.
 - Test: submit vision job → claimed by registered worker → completed → callback
   fires with result.
 
