@@ -891,6 +891,8 @@ workload protocols.
     smoke coverage.
   - [x] Add process-level callback receiver coverage for successful terminal
     callback delivery and callback metrics.
+  - [x] Add SQLite-backed process restart coverage for pending callback retry
+    recovery.
   - Add process-level restart e2e harnesses for jobs, leases, callbacks, and
     metrics.
 - Keep Temporal deferred unless application workflows need durable multi-step

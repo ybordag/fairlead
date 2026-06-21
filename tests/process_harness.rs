@@ -2,10 +2,12 @@ use axum::{routing::post, Json, Router};
 use reqwest::StatusCode;
 use serde_json::{json, Value};
 use std::{
+    collections::VecDeque,
     fs::{self, File},
     net::TcpListener,
     path::PathBuf,
     process::{Child, Command, Stdio},
+    sync::{Arc, Mutex},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use tokio::sync::mpsc;
@@ -236,6 +238,38 @@ async fn start_callback_target(status: StatusCode) -> (String, mpsc::Receiver<Va
     (format!("http://{addr}/callback"), rx)
 }
 
+async fn start_sequence_callback_target(
+    statuses: Vec<StatusCode>,
+) -> (String, mpsc::Receiver<Value>) {
+    let (tx, rx) = mpsc::channel(8);
+    let statuses = Arc::new(Mutex::new(VecDeque::from(statuses)));
+    let app = Router::new().route(
+        "/callback",
+        post(move |Json(value): Json<Value>| {
+            let tx = tx.clone();
+            let statuses = statuses.clone();
+            async move {
+                tx.send(value).await.expect("record callback request");
+                statuses
+                    .lock()
+                    .expect("callback statuses mutex poisoned")
+                    .pop_front()
+                    .unwrap_or(StatusCode::OK)
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind callback target");
+    let addr = listener.local_addr().expect("read callback target address");
+    tokio::spawn(async move {
+        axum::serve(listener, app)
+            .await
+            .expect("serve callback target");
+    });
+    (format!("http://{addr}/callback"), rx)
+}
+
 async fn wait_for_callback_status(
     fairlead: &FairleadProcess,
     job_id: &str,
@@ -251,6 +285,33 @@ async fn wait_for_callback_status(
         if tokio::time::Instant::now() >= deadline {
             panic!(
                 "callback status {expected_status} was not observed for {job_id}; last job: {fetched}"
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+}
+
+async fn wait_for_callback_attempt(
+    fairlead: &FairleadProcess,
+    job_id: &str,
+    expected_status: &str,
+    expected_attempts: u64,
+    expected_http_status: u64,
+) -> Value {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    loop {
+        let (status, fetched) = fairlead.get_json(&format!("/v1/jobs/{job_id}")).await;
+        assert_eq!(status, StatusCode::OK);
+        let callback = &fetched["job"]["callback"];
+        if callback["status"] == expected_status
+            && callback["attempts"] == expected_attempts
+            && callback["last_http_status"] == expected_http_status
+        {
+            return fetched;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            panic!(
+                "callback attempt {expected_attempts}/{expected_http_status} was not observed for {job_id}; last job: {fetched}"
             );
         }
         tokio::time::sleep(Duration::from_millis(25)).await;
@@ -469,4 +530,100 @@ async fn complete_job_delivers_callback_over_real_http() {
     assert!(metrics.contains("fairlead_job_callbacks_total{type=\"vision_analysis\",status=\"complete\",outcome=\"success\",http_status=\"200\"} 1"));
 
     fairlead.shutdown().await;
+}
+
+#[tokio::test]
+async fn pending_callback_retries_after_process_restart() {
+    let (callback_url, mut callbacks) =
+        start_sequence_callback_target(vec![StatusCode::INTERNAL_SERVER_ERROR, StatusCode::OK])
+            .await;
+    let db_dir = unique_temp_dir("fairlead-process-callback-db");
+    fs::create_dir_all(&db_dir).expect("create callback SQLite process test temp dir");
+    let db_path = db_dir.join("jobs.sqlite3");
+    let db_path = db_path.to_string_lossy().to_string();
+    let mut fairlead = FairleadProcess::spawn(&[
+        ("JOB_STORE", "sqlite"),
+        ("JOB_DB_PATH", &db_path),
+        ("CALLBACK_MAX_ATTEMPTS", "1"),
+        ("CALLBACK_RETRY_DELAY_MS", "10000"),
+        ("CALLBACK_TIMEOUT_SECS", "1"),
+    ]);
+    fairlead.wait_for_health().await;
+
+    let (status, _) = fairlead
+        .register_worker(json!({
+            "id": "restart-callback-worker",
+            "endpoint_url": "http://restart-callback-worker.local",
+            "node_id": "spark-a",
+            "pool": "default",
+            "job_types": ["vision_analysis"],
+            "max_concurrent_jobs": 1,
+            "available_vram_mb": 4096
+        }))
+        .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, submitted) = fairlead
+        .submit_job(json!({
+            "type": "vision_analysis",
+            "priority": "batch",
+            "payload": { "image": "rose.jpg" },
+            "callback_url": callback_url
+        }))
+        .await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+    assert_eq!(submitted["job"]["id"], "job-1");
+
+    let (status, claim) = fairlead.claim_worker_job("restart-callback-worker").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(claim["job"]["id"], "job-1");
+
+    let (status, completed) = fairlead
+        .complete_worker_job(
+            "restart-callback-worker",
+            "job-1",
+            json!({
+                "attempt": 1,
+                "result": { "classification": "healthy" }
+            }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(completed["job"]["status"], "complete");
+
+    let first_callback = tokio::time::timeout(Duration::from_secs(2), callbacks.recv())
+        .await
+        .expect("first callback was delivered")
+        .expect("callback receiver stayed open");
+    assert_eq!(first_callback["job"]["id"], "job-1");
+    assert_eq!(first_callback["job"]["callback"]["attempts"], 1);
+
+    let failed_callback = wait_for_callback_attempt(&fairlead, "job-1", "pending", 1, 500).await;
+    assert_eq!(
+        failed_callback["job"]["callback"]["last_error"],
+        Value::Null
+    );
+
+    fairlead.restart().await;
+    fairlead.wait_for_health().await;
+
+    let second_callback = tokio::time::timeout(Duration::from_secs(2), callbacks.recv())
+        .await
+        .expect("pending callback was retried after restart")
+        .expect("callback receiver stayed open");
+    assert_eq!(second_callback["job"]["id"], "job-1");
+    assert_eq!(second_callback["job"]["callback"]["status"], "pending");
+    assert_eq!(second_callback["job"]["callback"]["attempts"], 2);
+    assert_eq!(second_callback["job"]["callback"]["last_http_status"], 500);
+
+    let delivered = wait_for_callback_attempt(&fairlead, "job-1", "delivered", 2, 200).await;
+    assert_eq!(delivered["job"]["status"], "complete");
+    assert!(delivered["job"]["callback"]["last_error"].is_null());
+
+    let (status, metrics) = fairlead.get_text("/metrics").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(metrics.contains("fairlead_job_callbacks_total{type=\"vision_analysis\",status=\"complete\",outcome=\"success\",http_status=\"200\"} 1"));
+
+    fairlead.shutdown().await;
+    fs::remove_dir_all(db_dir).expect("remove callback SQLite process test temp dir");
 }

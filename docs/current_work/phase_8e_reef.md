@@ -33,11 +33,15 @@ behavior that in-process Rust tests cannot cover.
   `complete_job_delivers_callback_over_real_http`, which exercises submit with
   `callback_url` -> worker claim -> completion -> callback delivery -> callback
   state polling -> callback metrics through real HTTP boundaries.
+- Added `pending_callback_retries_after_process_restart`, which uses SQLite
+  storage and a sequence callback receiver to verify a failed terminal callback
+  remains pending across a Fairlead process restart and is redelivered by the
+  recovery loop.
 
 ## Next Slices
 
 - Add helpers for worker renew/fail/drain/reactivate/deregister and prune
   endpoints.
-- Add process-level restart coverage for pending callbacks and callback retry
-  recovery.
+- Add process-level restart coverage for lease recovery and maintenance-loop
+  behavior.
 - Move deferred Phase 8 local-process cases into concrete tests incrementally.

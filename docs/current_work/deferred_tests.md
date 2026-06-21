@@ -529,9 +529,10 @@ success/failure metrics, cancellation callbacks, no callback on retryable job
 requeue, SQLite-backed pending callback delivery after registry restart, and
 SQLite-backed failed callback attempt retry after registry restart. It also
 covers recovery-loop delivery of pending SQLite callbacks and in-process
-in-flight callback de-duplication. Remaining deferred tests:
+in-flight callback de-duplication. Phase 8E adds process-level callback
+delivery and SQLite-backed callback retry recovery across a full Fairlead
+process restart. Remaining deferred tests:
 
-- Callback retry recovery across a full Fairlead OS-process restart.
 - Duplicate callback behavior when Fairlead crashes after the receiver handles
   the callback but before Fairlead records delivery success.
 - Deployment-level callback delivery on Thor/Loki.
