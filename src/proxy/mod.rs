@@ -16,7 +16,7 @@ use tracing::{info, warn};
 
 use crate::{
     config::{Priority, WorkloadKind, WorkloadRoute},
-    metrics::{FallbackLabels, RequestLabels, RetryLabels},
+    metrics::{FallbackLabels, PoolDecisionLabels, RequestLabels, RetryLabels},
     priority::PriorityPermit,
     router::{select_backend_excluding_resource, BackendState, ResourceRank},
     AppState,
@@ -147,6 +147,7 @@ async fn forward(
                 let Some(idx) = select_backend_for_route(
                     state,
                     &route,
+                    priority,
                     preferred,
                     origin_node.as_deref(),
                     &attempted,
@@ -289,6 +290,7 @@ async fn forward(
                 next_backend = select_backend_for_route(
                     state,
                     &route,
+                    priority,
                     preferred,
                     origin_node.as_deref(),
                     &attempted,
@@ -354,6 +356,7 @@ async fn forward(
             next_backend = select_backend_for_route(
                 state,
                 &route,
+                priority,
                 preferred,
                 origin_node.as_deref(),
                 &attempted,
@@ -549,9 +552,14 @@ fn route_allows_backend(
         && backend.workloads.contains(&route.kind)
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "route selection receives the current request, route policy, and precomputed eligibility state"
+)]
 async fn select_backend_for_route(
     state: &AppState,
     route: &WorkloadRoute,
+    priority: Priority,
     preferred: Option<usize>,
     origin_node: Option<&str>,
     attempted: &[usize],
@@ -561,6 +569,13 @@ async fn select_backend_for_route(
     if let Some(pools) = state.workload_pools.pools_for(route.kind.as_str()) {
         for pool in pools {
             let pool_ineligible = pool_ineligible_backends(&state.backends, pool);
+            let (candidate_count, resource_ineligible_count) = pool_candidate_counts(
+                &state.backends,
+                pool,
+                attempted,
+                route_ineligible,
+                &resource_state.ineligible,
+            );
             let ineligible = selection_ineligible_with_pool(
                 route_ineligible,
                 &resource_state.ineligible,
@@ -576,14 +591,42 @@ async fn select_backend_for_route(
             )
             .await
             {
+                record_pool_decision(
+                    state,
+                    route,
+                    priority,
+                    pool,
+                    Some(&state.backends[idx]),
+                    origin_node,
+                    "selected",
+                    candidate_count,
+                    resource_ineligible_count,
+                );
                 return Some(idx);
             }
+            record_pool_decision(
+                state,
+                route,
+                priority,
+                pool,
+                None,
+                origin_node,
+                "unavailable",
+                candidate_count,
+                resource_ineligible_count,
+            );
         }
         return None;
     }
 
+    let (candidate_count, resource_ineligible_count) = any_pool_candidate_counts(
+        &state.backends,
+        attempted,
+        route_ineligible,
+        &resource_state.ineligible,
+    );
     let ineligible = selection_ineligible(route_ineligible, &resource_state.ineligible);
-    select_backend_excluding_resource(
+    let selected = select_backend_excluding_resource(
         &state.backends,
         preferred,
         origin_node,
@@ -591,7 +634,23 @@ async fn select_backend_for_route(
         &ineligible,
         &resource_state.ranks,
     )
-    .await
+    .await;
+    record_pool_decision(
+        state,
+        route,
+        priority,
+        "",
+        selected.and_then(|idx| state.backends.get(idx)),
+        origin_node,
+        if selected.is_some() {
+            "selected"
+        } else {
+            "unavailable"
+        },
+        candidate_count,
+        resource_ineligible_count,
+    );
+    selected
 }
 
 fn pool_ineligible_backends(backends: &[BackendState], pool: &str) -> Vec<usize> {
@@ -600,6 +659,61 @@ fn pool_ineligible_backends(backends: &[BackendState], pool: &str) -> Vec<usize>
         .enumerate()
         .filter_map(|(idx, backend)| (backend.pool != pool).then_some(idx))
         .collect()
+}
+
+fn pool_candidate_counts(
+    backends: &[BackendState],
+    pool: &str,
+    attempted: &[usize],
+    route_ineligible: &[usize],
+    resource_ineligible: &[usize],
+) -> (usize, usize) {
+    candidate_counts(
+        backends,
+        attempted,
+        route_ineligible,
+        resource_ineligible,
+        |backend| backend.pool == pool,
+    )
+}
+
+fn any_pool_candidate_counts(
+    backends: &[BackendState],
+    attempted: &[usize],
+    route_ineligible: &[usize],
+    resource_ineligible: &[usize],
+) -> (usize, usize) {
+    candidate_counts(
+        backends,
+        attempted,
+        route_ineligible,
+        resource_ineligible,
+        |_| true,
+    )
+}
+
+fn candidate_counts(
+    backends: &[BackendState],
+    attempted: &[usize],
+    route_ineligible: &[usize],
+    resource_ineligible: &[usize],
+    pool_matches: impl Fn(&BackendState) -> bool,
+) -> (usize, usize) {
+    let mut candidates = 0;
+    let mut resource_blocked = 0;
+
+    for (idx, backend) in backends.iter().enumerate() {
+        if attempted.contains(&idx) || route_ineligible.contains(&idx) || !pool_matches(backend) {
+            continue;
+        }
+        if resource_ineligible.contains(&idx) {
+            resource_blocked += 1;
+        } else {
+            candidates += 1;
+        }
+    }
+
+    (candidates, resource_blocked)
 }
 
 fn selection_ineligible(route_ineligible: &[usize], resource_ineligible: &[usize]) -> Vec<usize> {
@@ -776,6 +890,39 @@ fn record_fallback(
         reason: reason.to_string(),
     };
     state.metrics.record_fallback(labels);
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "pool decision metrics map directly to Prometheus label dimensions"
+)]
+fn record_pool_decision(
+    state: &AppState,
+    route: &WorkloadRoute,
+    priority: Priority,
+    pool: &str,
+    backend: Option<&BackendState>,
+    origin_node: Option<&str>,
+    outcome: &str,
+    candidate_backends: usize,
+    resource_ineligible_backends: usize,
+) {
+    let labels = PoolDecisionLabels {
+        workload: route.kind.as_str().to_string(),
+        priority: priority.as_str().to_string(),
+        pool: pool.to_string(),
+        backend: backend
+            .map(|backend| backend.id.clone())
+            .unwrap_or_default(),
+        node: backend
+            .and_then(|backend| backend.node_id.clone())
+            .unwrap_or_default(),
+        origin_node: origin_node.unwrap_or("").to_string(),
+        outcome: outcome.to_string(),
+    };
+    state
+        .metrics
+        .record_pool_decision(labels, candidate_backends, resource_ineligible_backends);
 }
 
 fn record_retry(
@@ -1966,6 +2113,22 @@ mod tests {
             resp.json::<serde_json::Value>().await.unwrap()["source"],
             "local"
         );
+
+        let metrics = reqwest::get(format!("{}/metrics", fairlead))
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap();
+        assert!(metrics.contains(
+            "fairlead_pool_selections_total{workload=\"chat_completions\",priority=\"realtime\",pool=\"local-llm\",backend=\"local-chat\",node=\"\",origin_node=\"\",outcome=\"selected\"} 1"
+        ));
+        assert!(metrics.contains(
+            "fairlead_pool_candidate_backends_total{workload=\"chat_completions\",priority=\"realtime\",pool=\"local-llm\",backend=\"local-chat\",node=\"\",origin_node=\"\",outcome=\"selected\"} 1"
+        ));
+        assert!(metrics.contains(
+            "fairlead_pool_resource_ineligible_backends_total{workload=\"chat_completions\",priority=\"realtime\",pool=\"local-llm\",backend=\"local-chat\",node=\"\",origin_node=\"\",outcome=\"selected\"} 0"
+        ));
     }
 
     #[tokio::test]
@@ -2020,6 +2183,25 @@ mod tests {
             resp.json::<serde_json::Value>().await.unwrap()["source"],
             "peer"
         );
+
+        let metrics = reqwest::get(format!("{}/metrics", fairlead))
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap();
+        assert!(metrics.contains(
+            "fairlead_pool_selections_total{workload=\"chat_completions\",priority=\"realtime\",pool=\"local-llm\",backend=\"\",node=\"\",origin_node=\"\",outcome=\"unavailable\"} 1"
+        ));
+        assert!(metrics.contains(
+            "fairlead_pool_candidate_backends_total{workload=\"chat_completions\",priority=\"realtime\",pool=\"local-llm\",backend=\"\",node=\"\",origin_node=\"\",outcome=\"unavailable\"} 1"
+        ));
+        assert!(metrics.contains(
+            "fairlead_pool_selections_total{workload=\"chat_completions\",priority=\"realtime\",pool=\"peer-llm\",backend=\"peer-chat\",node=\"\",origin_node=\"\",outcome=\"selected\"} 1"
+        ));
+        assert!(metrics.contains(
+            "fairlead_pool_candidate_backends_total{workload=\"chat_completions\",priority=\"realtime\",pool=\"peer-llm\",backend=\"peer-chat\",node=\"\",origin_node=\"\",outcome=\"selected\"} 1"
+        ));
     }
 
     #[tokio::test]
@@ -2699,7 +2881,10 @@ mod tests {
                 backend_on_node(node_a_url, "node-a"),
                 backend_on_node(node_b_url, "node-b"),
             ],
-            workload_pools: WorkloadPoolPolicy::default(),
+            workload_pools: WorkloadPoolPolicy::new(BTreeMap::from([(
+                "chat_completions".to_string(),
+                vec!["local-llm".to_string()],
+            )])),
             affinity: SessionAffinity::default(),
             metrics: crate::metrics::RoutingMetrics::default(),
             callback_policy: crate::callbacks::CallbackPolicy::default(),
@@ -2741,6 +2926,9 @@ mod tests {
             .unwrap();
         assert!(metrics.contains(
             "fairlead_fallbacks_total{workload=\"chat_completions\",priority=\"realtime\",backend=\"node-b-vllm\",node=\"node-b\",pool=\"local-llm\",origin_node=\"node-a\",reason=\"resource_unavailable\"} 1"
+        ));
+        assert!(metrics.contains(
+            "fairlead_pool_resource_ineligible_backends_total{workload=\"chat_completions\",priority=\"realtime\",pool=\"local-llm\",backend=\"node-b-vllm\",node=\"node-b\",origin_node=\"node-a\",outcome=\"selected\"} 1"
         ));
     }
 

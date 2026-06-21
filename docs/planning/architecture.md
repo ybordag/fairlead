@@ -253,6 +253,17 @@ ranking, circuit state, and configured backend order choose the concrete
 backend. Phase 7C will add worker pool metadata and apply the same vocabulary to
 async worker placement.
 
+Synchronous pool routing emits Prometheus counters for each pool stage Fairlead
+evaluates:
+
+- `fairlead_pool_selections_total`
+- `fairlead_pool_candidate_backends_total`
+- `fairlead_pool_resource_ineligible_backends_total`
+
+These metrics expose selected or unavailable pool stages, the selected
+pool/backend when one exists, candidate backend counts, and resource pressure
+inside each pool.
+
 ---
 
 ## What Fairlead does

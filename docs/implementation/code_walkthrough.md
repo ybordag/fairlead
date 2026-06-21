@@ -1228,6 +1228,18 @@ fairlead_fallbacks_total{workload="chat_completions",priority="realtime",backend
 fairlead_retries_total{workload="chat_completions",priority="realtime",backend="spark-a-vllm",node="spark-a",pool="local-llm",origin_node="spark-a",reason="server_error"} 1
 ```
 
+Phase 7B adds per-pool synchronous routing counters:
+
+```text
+fairlead_pool_selections_total{workload="chat_completions",priority="realtime",pool="local-llm",backend="spark-a-vllm",node="spark-a",origin_node="spark-a",outcome="selected"} 1
+fairlead_pool_candidate_backends_total{workload="chat_completions",priority="realtime",pool="local-llm",backend="spark-a-vllm",node="spark-a",origin_node="spark-a",outcome="selected"} 1
+fairlead_pool_resource_ineligible_backends_total{workload="chat_completions",priority="realtime",pool="local-llm",backend="spark-b-vllm",node="spark-b",origin_node="spark-a",outcome="selected"} 1
+```
+
+These record which pool stage selected a backend or was unavailable, how many
+route/resource-eligible candidates were seen in that pool, and how much resource
+pressure blocked candidates in that pool.
+
 Priority admission exposes current in-flight counts and configured caps:
 
 ```text

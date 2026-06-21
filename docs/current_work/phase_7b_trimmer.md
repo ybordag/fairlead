@@ -17,6 +17,8 @@ Goal: apply the validated Phase 7 pool policy to synchronous backend routing.
 - Treat each workload's pool list as an ordered synchronous fallback chain.
 - Preserve origin locality, affinity, resource ranking, circuit state, and
   backend order within each pool stage.
+- Added per-pool synchronous decision metrics for selected/unavailable pool
+  stages, candidate backend counts, and resource-ineligible backend counts.
 - Preserved permissive behavior for workloads omitted from an explicit partial
   policy.
 - Added proxy tests for:
@@ -26,13 +28,13 @@ Goal: apply the validated Phase 7 pool policy to synchronous backend routing.
   - preferring an earlier pool even when a later pool appears first in backend
     order
   - falling back to a later pool when every backend in an earlier pool is open
+  - emitting per-pool selected/unavailable metrics
+  - emitting per-pool resource pressure metrics
 
 ## Remaining 7B Work
 
 - Decide whether `WORKLOAD_POOLS_JSON` should remain a partial override or become
   strict before Phase 7 ends.
-- Add per-pool synchronous metrics for candidate counts, selected pool/backend,
-  fallback reason, and capacity pressure.
 - Audit docs and tests before opening the `trimmer` PR.
 
 ## Deferrals

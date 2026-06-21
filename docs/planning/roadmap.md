@@ -805,7 +805,7 @@ async workers.
   Within each pool, existing locality, affinity, resource ranking, and backend
   order choose the concrete backend.
 - [x] Keep cloud overflow as a future pool target, not an implemented provider path.
-- [ ] Add per-pool synchronous metrics for candidate counts, selected pool/backend,
+- [x] Add per-pool synchronous metrics for candidate counts, selected pool/backend,
   fallback reason, and capacity pressure.
 
 #### Phase 7C: Async Worker Pool Placement
