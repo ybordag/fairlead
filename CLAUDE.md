@@ -204,6 +204,10 @@ BACKENDS                     — comma-separated backend URLs in priority order
 CLOUD_PROVIDERS              — JSON array of cloud provider configs (url, api_key_env)
 CIRCUIT_FAILURE_THRESHOLD    — consecutive failures to open circuit (default: 3)
 CIRCUIT_COOLDOWN_SECS        — seconds before half-open probe (default: 30)
+RESOURCE_REPORT_TTL_SECS     — seconds before a resource report is stale (default: 30)
+RESOURCE_AWARE_ROUTING       — enable resource-aware eligibility (default: false)
+CHAT_COMPLETIONS_REQUIRED_VRAM_MB — coarse chat request estimate (default: 1024)
+EMBEDDINGS_REQUIRED_VRAM_MB  — coarse embedding request estimate (default: 512)
 SESSION_AFFINITY             — "thread" | "user" (default: "thread")
 PRIORITY_REALTIME_LIMIT      — max concurrent realtime requests (default: 8)
 PRIORITY_BATCH_LIMIT         — max concurrent batch jobs (default: 4)
@@ -251,7 +255,8 @@ LOG_LEVEL                    — tracing level: error, warn, info, debug, trace 
 
 - `ResourceRegistry`: per-node/backend resource reports with VRAM, load, and TTL
 - `POST /v1/resources/report` and `GET /v1/resources`
-- Router checks available VRAM before selecting a backend
+- Router checks available VRAM before selecting a backend when
+  `RESOURCE_AWARE_ROUTING=true`
 - Three-tier priority queue with Tokio channels (realtime / batch / background)
 - Scheduler drains higher-priority channels before accepting lower-priority work
 - Inference requests carry a `X-Fairlead-Priority` header (default: `realtime`)

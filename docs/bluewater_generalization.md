@@ -309,8 +309,8 @@ GET  /v1/resources
 Acceptance criteria:
 
 - vLLM or a mock worker can report capacity for `spark-a` and `spark-b`.
-- Fairlead can read the latest fresh report from the registry; routing
-  integration lands in Resource-Aware Selection.
+- Fairlead can read the latest fresh report from the registry during backend
+  selection when resource-aware routing is enabled.
 - Stale reports stop being trusted after a configurable timeout.
 
 ### Resource-Aware Selection
@@ -319,11 +319,12 @@ Goal: incorporate resource state into synchronous backend selection.
 
 Scope:
 
-- [ ] Extend backend eligibility to include reported headroom or load.
-- [ ] Add workload-level resource estimates, starting with a coarse default for
+- [x] Extend backend eligibility to include reported headroom.
+- [x] Add workload-level resource estimates, starting with a coarse default for
   chat and embeddings.
-- [ ] Decide conservative behavior when no resource report exists.
-- [ ] Add tests for local backend full -> peer backend selected.
+- [x] Decide conservative behavior when no resource report exists.
+- [x] Add tests for local backend full -> peer backend selected.
+- [ ] Rank eligible candidates by load/headroom after locality and affinity.
 
 Proposed decision pipeline:
 
@@ -333,7 +334,7 @@ candidates = remove circuit-open backends
 candidates = remove backends without enough reported capacity
 rank by origin-node locality
 rank by session affinity
-rank by load/headroom
+rank by load/headroom (future)
 rank by configured order
 ```
 
@@ -342,8 +343,8 @@ Acceptance criteria:
 - If spark-a has capacity, requests from spark-a select spark-a.
 - If spark-a reports insufficient headroom, requests from spark-a select
   spark-b.
-- If both spark-a and spark-b are ineligible, Fairlead returns the configured
-  no-capacity behavior: queue, 503, or cloud fallback.
+- If both spark-a and spark-b are ineligible, Fairlead returns 503. Queueing and
+  cloud fallback remain future workload-policy work.
 
 ### Full Observability
 
@@ -352,7 +353,7 @@ and async-job behavior.
 
 Scope:
 
-- [ ] Add resource metrics for reported VRAM/load per node.
+- [x] Add resource metrics for reported VRAM/load per node.
 - [ ] Add queue depth by priority and workload.
 - [ ] Add queue wait time by priority and workload.
 - [ ] Add worker availability and utilization.

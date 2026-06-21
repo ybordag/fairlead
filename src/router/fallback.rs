@@ -18,11 +18,24 @@ async fn select_backend(
 
 /// Select the best available backend index while skipping backends already
 /// attempted for the current request.
+#[cfg(test)]
 pub async fn select_backend_excluding(
     backends: &[BackendState],
     preferred: Option<usize>,
     origin_node: Option<&str>,
     excluded: &[usize],
+) -> Option<usize> {
+    select_backend_excluding_resource(backends, preferred, origin_node, excluded, &[]).await
+}
+
+/// Select the best available backend index while skipping both already
+/// attempted backends and candidates that are ineligible under resource policy.
+pub async fn select_backend_excluding_resource(
+    backends: &[BackendState],
+    preferred: Option<usize>,
+    origin_node: Option<&str>,
+    excluded: &[usize],
+    resource_ineligible: &[usize],
 ) -> Option<usize> {
     let mut checked = Vec::with_capacity(2);
 
@@ -30,7 +43,10 @@ pub async fn select_backend_excluding(
     // rule; resource eligibility will be layered in later.
     if let Some(origin) = origin_node {
         for (i, backend) in backends.iter().enumerate() {
-            if excluded.contains(&i) || backend.node_id.as_deref() != Some(origin) {
+            if excluded.contains(&i)
+                || resource_ineligible.contains(&i)
+                || backend.node_id.as_deref() != Some(origin)
+            {
                 continue;
             }
             checked.push(i);
@@ -42,7 +58,10 @@ pub async fn select_backend_excluding(
 
     // Try the preferred backend first.
     if let Some(idx) = preferred {
-        if !checked.contains(&idx) && !excluded.contains(&idx) {
+        if !checked.contains(&idx)
+            && !excluded.contains(&idx)
+            && !resource_ineligible.contains(&idx)
+        {
             if let Some(backend) = backends.get(idx) {
                 checked.push(idx);
                 if backend.circuit.write().await.is_available() {
@@ -54,7 +73,7 @@ pub async fn select_backend_excluding(
 
     // Walk in declared priority order, skipping already-checked candidates.
     for (i, backend) in backends.iter().enumerate() {
-        if checked.contains(&i) || excluded.contains(&i) {
+        if checked.contains(&i) || excluded.contains(&i) || resource_ineligible.contains(&i) {
             continue;
         }
         if backend.circuit.write().await.is_available() {
@@ -233,6 +252,32 @@ mod tests {
         assert_eq!(
             select_backend_excluding(&backends, Some(1), None, &[1]).await,
             Some(0)
+        );
+    }
+
+    #[tokio::test]
+    async fn resource_ineligible_origin_backend_uses_peer() {
+        let backends = vec![
+            healthy_on_node("http://node-a:8000/v1", "node-a"),
+            healthy_on_node("http://node-b:8000/v1", "node-b"),
+        ];
+
+        assert_eq!(
+            select_backend_excluding_resource(&backends, None, Some("node-a"), &[], &[0]).await,
+            Some(1)
+        );
+    }
+
+    #[tokio::test]
+    async fn all_resource_ineligible_returns_none() {
+        let backends = vec![
+            healthy_on_node("http://node-a:8000/v1", "node-a"),
+            healthy_on_node("http://node-b:8000/v1", "node-b"),
+        ];
+
+        assert_eq!(
+            select_backend_excluding_resource(&backends, None, Some("node-a"), &[], &[0, 1]).await,
+            None
         );
     }
 }

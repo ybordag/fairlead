@@ -174,6 +174,16 @@ Current resource state:
 curl http://localhost:7000/v1/resources
 ```
 
+Resource-aware routing is opt-in. When enabled, Fairlead skips healthy backends
+that do not have a fresh report with enough available VRAM for the workload:
+
+```bash
+RESOURCE_AWARE_ROUTING=true \
+CHAT_COMPLETIONS_REQUIRED_VRAM_MB=1024 \
+EMBEDDINGS_REQUIRED_VRAM_MB=512 \
+cargo run
+```
+
 Chat completions are proxied to one of the configured backends:
 
 ```bash

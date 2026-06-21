@@ -15,7 +15,7 @@ use tracing::info;
 use tracing_subscriber::EnvFilter;
 
 use metrics::RoutingMetrics;
-use resources::ResourceRegistry;
+use resources::{ResourceRegistry, ResourceRoutingPolicy};
 use router::{spawn_health_probe, BackendState, SessionAffinity};
 
 /// Shared state cloned into every handler by Axum's `State` extractor.
@@ -34,6 +34,8 @@ pub struct AppState {
     pub metrics: RoutingMetrics,
     /// Cooperative resource reports from model servers and compute workers.
     pub resources: ResourceRegistry,
+    /// Policy for using resource reports during backend selection.
+    pub resource_policy: ResourceRoutingPolicy,
 }
 
 #[tokio::main]
@@ -72,6 +74,11 @@ async fn main() -> anyhow::Result<()> {
         affinity: SessionAffinity::default(),
         metrics: RoutingMetrics::default(),
         resources: ResourceRegistry::new(Duration::from_secs(cfg.resource_report_ttl_secs)),
+        resource_policy: ResourceRoutingPolicy {
+            enabled: cfg.resource_aware_routing,
+            chat_completions_required_vram_mb: cfg.chat_completions_required_vram_mb,
+            embeddings_required_vram_mb: cfg.embeddings_required_vram_mb,
+        },
     };
     let app = build_router(state);
 
@@ -119,6 +126,7 @@ mod tests {
             affinity: SessionAffinity::default(),
             metrics: RoutingMetrics::default(),
             resources: ResourceRegistry::default(),
+            resource_policy: ResourceRoutingPolicy::default(),
         };
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();

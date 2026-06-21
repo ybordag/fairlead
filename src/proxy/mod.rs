@@ -11,8 +11,9 @@ use std::time::Instant;
 use tracing::{info, warn};
 
 use crate::{
+    config::WorkloadKind,
     metrics::{FallbackLabels, RequestLabels, RetryLabels},
-    router::{select_backend_excluding, BackendState},
+    router::{select_backend_excluding_resource, BackendState},
     AppState,
 };
 
@@ -23,7 +24,7 @@ pub async fn chat_completions(
 ) -> Response {
     forward(
         &state,
-        "chat_completions",
+        WorkloadKind::ChatCompletions,
         "chat/completions",
         &headers,
         body,
@@ -36,16 +37,24 @@ pub async fn embeddings(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    forward(&state, "embeddings", "embeddings", &headers, body).await
+    forward(
+        &state,
+        WorkloadKind::Embeddings,
+        "embeddings",
+        &headers,
+        body,
+    )
+    .await
 }
 
 async fn forward(
     state: &AppState,
-    workload: &str,
+    workload_kind: WorkloadKind,
     path: &str,
     headers: &HeaderMap,
     body: Bytes,
 ) -> Response {
+    let workload = workload_kind.as_str();
     let started = Instant::now();
     if state.backends.is_empty() {
         record_request(
@@ -86,16 +95,18 @@ async fn forward(
 
     let mut attempted = Vec::new();
     let mut next_backend = None;
+    let resource_ineligible = resource_ineligible_backends(state, &workload_kind).await;
 
     loop {
         let idx = match next_backend.take() {
             Some(idx) => idx,
             None => {
-                let Some(idx) = select_backend_excluding(
+                let Some(idx) = select_backend_excluding_resource(
                     &state.backends,
                     preferred,
                     origin_node.as_deref(),
                     &attempted,
+                    &resource_ineligible,
                 )
                 .await
                 else {
@@ -106,7 +117,7 @@ async fn forward(
                             None,
                             origin_node.as_deref(),
                             StatusCode::SERVICE_UNAVAILABLE,
-                            "unavailable",
+                            unavailable_outcome(&resource_ineligible),
                             started,
                         );
                         info!(
@@ -116,14 +127,14 @@ async fn forward(
                             affinity_key = thread_id.as_deref().unwrap_or(""),
                             selected_backend = "",
                             retry_count = attempted.len(),
-                            fallback_reason = "",
+                            fallback_reason = unavailable_fallback_reason(&resource_ineligible),
                             status = StatusCode::SERVICE_UNAVAILABLE.as_u16(),
-                            outcome = "unavailable",
+                            outcome = unavailable_outcome(&resource_ineligible),
                             "request completed"
                         );
                         return (
                             StatusCode::SERVICE_UNAVAILABLE,
-                            "all backends unavailable (circuits open)",
+                            unavailable_message(&resource_ineligible),
                         )
                             .into_response();
                     }
@@ -155,8 +166,13 @@ async fn forward(
         };
 
         let backend = &state.backends[idx];
-        let fallback_reason =
-            fallback_reason(&state.backends, idx, preferred, origin_node.as_deref());
+        let fallback_reason = fallback_reason(
+            &state.backends,
+            idx,
+            preferred,
+            origin_node.as_deref(),
+            &resource_ineligible,
+        );
         if let Some(reason) = fallback_reason {
             record_fallback(state, workload, backend, origin_node.as_deref(), reason);
         }
@@ -191,11 +207,12 @@ async fn forward(
                     "retrying after upstream failure"
                 );
                 attempted.push(idx);
-                next_backend = select_backend_excluding(
+                next_backend = select_backend_excluding_resource(
                     &state.backends,
                     preferred,
                     origin_node.as_deref(),
                     &attempted,
+                    &resource_ineligible,
                 )
                 .await;
                 if next_backend.is_some() {
@@ -249,11 +266,12 @@ async fn forward(
                 "retrying after upstream failure"
             );
             attempted.push(idx);
-            next_backend = select_backend_excluding(
+            next_backend = select_backend_excluding_resource(
                 &state.backends,
                 preferred,
                 origin_node.as_deref(),
                 &attempted,
+                &resource_ineligible,
             )
             .await;
             if next_backend.is_some() {
@@ -326,25 +344,102 @@ fn fallback_reason(
     selected_idx: usize,
     preferred: Option<usize>,
     origin_node: Option<&str>,
+    resource_ineligible: &[usize],
 ) -> Option<&'static str> {
     let selected = backends.get(selected_idx)?;
 
     if let Some(origin) = origin_node {
-        let has_origin_backend = backends
+        let origin_indexes: Vec<_> = backends
             .iter()
-            .any(|backend| backend.node_id.as_deref() == Some(origin));
+            .enumerate()
+            .filter_map(|(idx, backend)| {
+                (backend.node_id.as_deref() == Some(origin)).then_some(idx)
+            })
+            .collect();
+        let has_origin_backend = !origin_indexes.is_empty();
         if has_origin_backend && selected.node_id.as_deref() != Some(origin) {
+            if origin_indexes
+                .iter()
+                .any(|idx| resource_ineligible.contains(idx))
+            {
+                return Some("resource_unavailable");
+            }
             return Some("origin_unavailable");
         }
     }
 
     if let Some(preferred_idx) = preferred {
         if preferred_idx != selected_idx && backends.get(preferred_idx).is_some() {
+            if resource_ineligible.contains(&preferred_idx) {
+                return Some("resource_unavailable");
+            }
             return Some("affinity_unavailable");
         }
     }
 
+    if resource_ineligible
+        .iter()
+        .any(|idx| *idx < selected_idx && backends.get(*idx).is_some())
+    {
+        return Some("resource_unavailable");
+    }
+
     None
+}
+
+async fn resource_ineligible_backends(state: &AppState, workload: &WorkloadKind) -> Vec<usize> {
+    if !state.resource_policy.enabled {
+        return Vec::new();
+    }
+
+    let required_vram_mb = state.resource_policy.required_vram_mb(workload);
+    let mut ineligible = Vec::new();
+
+    for (idx, backend) in state.backends.iter().enumerate() {
+        let Some(node_id) = backend.node_id.as_deref() else {
+            ineligible.push(idx);
+            continue;
+        };
+
+        let Some(report) = state
+            .resources
+            .fresh_backend_report(node_id, &backend.id)
+            .await
+        else {
+            ineligible.push(idx);
+            continue;
+        };
+
+        if report.available_vram_mb < required_vram_mb {
+            ineligible.push(idx);
+        }
+    }
+
+    ineligible
+}
+
+fn unavailable_outcome(resource_ineligible: &[usize]) -> &'static str {
+    if resource_ineligible.is_empty() {
+        "unavailable"
+    } else {
+        "resource_unavailable"
+    }
+}
+
+fn unavailable_fallback_reason(resource_ineligible: &[usize]) -> &'static str {
+    if resource_ineligible.is_empty() {
+        ""
+    } else {
+        "resource_unavailable"
+    }
+}
+
+fn unavailable_message(resource_ineligible: &[usize]) -> &'static str {
+    if resource_ineligible.is_empty() {
+        "all backends unavailable (circuits open)"
+    } else {
+        "all backends unavailable (circuits open or insufficient resources)"
+    }
 }
 
 fn record_request(
@@ -565,6 +660,7 @@ mod tests {
             affinity: SessionAffinity::default(),
             metrics: crate::metrics::RoutingMetrics::default(),
             resources: crate::resources::ResourceRegistry::default(),
+            resource_policy: crate::resources::ResourceRoutingPolicy::default(),
         };
         start_fairlead_with_state(state).await
     }
@@ -1372,6 +1468,198 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn resource_aware_routing_skips_local_backend_without_headroom() {
+        let node_a = Router::new().route(
+            "/v1/chat/completions",
+            post(|| async { axum::Json(json!({"source":"node-a"})) }),
+        );
+        let node_b = Router::new().route(
+            "/v1/chat/completions",
+            post(|| async { axum::Json(json!({"source":"node-b"})) }),
+        );
+        let node_a_url = start_mock(node_a).await;
+        let node_b_url = start_mock(node_b).await;
+        let resources = crate::resources::ResourceRegistry::default();
+        resources
+            .report(crate::resources::ResourceReportRequest {
+                node_id: "node-a".into(),
+                backend_id: Some("node-a-vllm".into()),
+                total_vram_mb: 64_000,
+                reserved_vram_mb: 63_500,
+                current_load: Some(0.95),
+            })
+            .await
+            .unwrap();
+        resources
+            .report(crate::resources::ResourceReportRequest {
+                node_id: "node-b".into(),
+                backend_id: Some("node-b-vllm".into()),
+                total_vram_mb: 64_000,
+                reserved_vram_mb: 16_000,
+                current_load: Some(0.25),
+            })
+            .await
+            .unwrap();
+        let state = AppState {
+            client: reqwest::Client::new(),
+            backends: vec![
+                backend_on_node(node_a_url, "node-a"),
+                backend_on_node(node_b_url, "node-b"),
+            ],
+            affinity: SessionAffinity::default(),
+            metrics: crate::metrics::RoutingMetrics::default(),
+            resources,
+            resource_policy: crate::resources::ResourceRoutingPolicy {
+                enabled: true,
+                chat_completions_required_vram_mb: 1024,
+                embeddings_required_vram_mb: 512,
+            },
+        };
+        let fairlead = start_fairlead_with_state(state).await;
+
+        let client = reqwest::Client::new();
+        let resp = client
+            .post(format!("{}/v1/chat/completions", fairlead))
+            .header("x-fairlead-origin-node", "node-a")
+            .json(&json!({"model":"m","messages":[]}))
+            .send()
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), 200);
+        assert_eq!(
+            resp.json::<serde_json::Value>().await.unwrap()["source"],
+            "node-b"
+        );
+
+        let metrics = client
+            .get(format!("{}/metrics", fairlead))
+            .send()
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap();
+        assert!(metrics.contains(
+            "fairlead_fallbacks_total{workload=\"chat_completions\",backend=\"node-b-vllm\",node=\"node-b\",pool=\"local-llm\",origin_node=\"node-a\",reason=\"resource_unavailable\"} 1"
+        ));
+    }
+
+    #[tokio::test]
+    async fn resource_aware_routing_ignores_stale_reports() {
+        let node_a = Router::new().route(
+            "/v1/chat/completions",
+            post(|| async { axum::Json(json!({"source":"node-a"})) }),
+        );
+        let node_b = Router::new().route(
+            "/v1/chat/completions",
+            post(|| async { axum::Json(json!({"source":"node-b"})) }),
+        );
+        let node_a_url = start_mock(node_a).await;
+        let node_b_url = start_mock(node_b).await;
+        let resources = crate::resources::ResourceRegistry::new(Duration::from_millis(10));
+        resources
+            .report(crate::resources::ResourceReportRequest {
+                node_id: "node-a".into(),
+                backend_id: Some("node-a-vllm".into()),
+                total_vram_mb: 64_000,
+                reserved_vram_mb: 16_000,
+                current_load: Some(0.25),
+            })
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        resources
+            .report(crate::resources::ResourceReportRequest {
+                node_id: "node-b".into(),
+                backend_id: Some("node-b-vllm".into()),
+                total_vram_mb: 64_000,
+                reserved_vram_mb: 16_000,
+                current_load: Some(0.25),
+            })
+            .await
+            .unwrap();
+        let state = AppState {
+            client: reqwest::Client::new(),
+            backends: vec![
+                backend_on_node(node_a_url, "node-a"),
+                backend_on_node(node_b_url, "node-b"),
+            ],
+            affinity: SessionAffinity::default(),
+            metrics: crate::metrics::RoutingMetrics::default(),
+            resources,
+            resource_policy: crate::resources::ResourceRoutingPolicy {
+                enabled: true,
+                chat_completions_required_vram_mb: 1024,
+                embeddings_required_vram_mb: 512,
+            },
+        };
+        let fairlead = start_fairlead_with_state(state).await;
+
+        let resp = reqwest::Client::new()
+            .post(format!("{}/v1/chat/completions", fairlead))
+            .header("x-fairlead-origin-node", "node-a")
+            .json(&json!({"model":"m","messages":[]}))
+            .send()
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), 200);
+        assert_eq!(
+            resp.json::<serde_json::Value>().await.unwrap()["source"],
+            "node-b"
+        );
+    }
+
+    #[tokio::test]
+    async fn resource_aware_routing_returns_503_when_all_backends_lack_headroom() {
+        let resources = crate::resources::ResourceRegistry::default();
+        for node_id in ["node-a", "node-b"] {
+            resources
+                .report(crate::resources::ResourceReportRequest {
+                    node_id: node_id.into(),
+                    backend_id: Some(format!("{node_id}-vllm")),
+                    total_vram_mb: 64_000,
+                    reserved_vram_mb: 63_500,
+                    current_load: Some(0.95),
+                })
+                .await
+                .unwrap();
+        }
+        let state = AppState {
+            client: reqwest::Client::new(),
+            backends: vec![
+                backend_on_node("http://node-a:8000/v1".into(), "node-a"),
+                backend_on_node("http://node-b:8000/v1".into(), "node-b"),
+            ],
+            affinity: SessionAffinity::default(),
+            metrics: crate::metrics::RoutingMetrics::default(),
+            resources,
+            resource_policy: crate::resources::ResourceRoutingPolicy {
+                enabled: true,
+                chat_completions_required_vram_mb: 1024,
+                embeddings_required_vram_mb: 512,
+            },
+        };
+        let fairlead = start_fairlead_with_state(state).await;
+
+        let resp = reqwest::Client::new()
+            .post(format!("{}/v1/chat/completions", fairlead))
+            .header("x-fairlead-origin-node", "node-a")
+            .json(&json!({"model":"m","messages":[]}))
+            .send()
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), 503);
+        assert!(resp
+            .text()
+            .await
+            .unwrap()
+            .contains("insufficient resources"));
+    }
+
+    #[tokio::test]
     async fn structured_tracing_fields_are_emitted_for_origin_fallback() {
         let node_b = Router::new().route(
             "/v1/chat/completions",
@@ -1389,6 +1677,7 @@ mod tests {
             affinity: SessionAffinity::default(),
             metrics: crate::metrics::RoutingMetrics::default(),
             resources: crate::resources::ResourceRegistry::default(),
+            resource_policy: crate::resources::ResourceRoutingPolicy::default(),
         };
         let app = build_router(state);
 
@@ -1627,6 +1916,7 @@ mod tests {
             affinity: affinity.clone(),
             metrics: crate::metrics::RoutingMetrics::default(),
             resources: crate::resources::ResourceRegistry::default(),
+            resource_policy: crate::resources::ResourceRoutingPolicy::default(),
         };
         let fairlead = start_fairlead_with_state(state).await;
 

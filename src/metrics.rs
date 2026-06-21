@@ -264,6 +264,7 @@ mod tests {
             affinity: crate::router::SessionAffinity::default(),
             metrics: RoutingMetrics::default(),
             resources: crate::resources::ResourceRegistry::default(),
+            resource_policy: crate::resources::ResourceRoutingPolicy::default(),
         };
         router_with_state(state)
     }
@@ -496,6 +497,7 @@ mod tests {
             affinity: crate::router::SessionAffinity::default(),
             metrics: RoutingMetrics::default(),
             resources,
+            resource_policy: crate::resources::ResourceRoutingPolicy::default(),
         };
         let app = router_with_state(state);
         let resp = app

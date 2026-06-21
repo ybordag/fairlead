@@ -12,7 +12,33 @@ use std::{
 };
 use tokio::sync::RwLock;
 
-use crate::AppState;
+use crate::{config::WorkloadKind, AppState};
+
+#[derive(Debug, Clone)]
+pub struct ResourceRoutingPolicy {
+    pub enabled: bool,
+    pub chat_completions_required_vram_mb: u64,
+    pub embeddings_required_vram_mb: u64,
+}
+
+impl Default for ResourceRoutingPolicy {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            chat_completions_required_vram_mb: 1024,
+            embeddings_required_vram_mb: 512,
+        }
+    }
+}
+
+impl ResourceRoutingPolicy {
+    pub fn required_vram_mb(&self, workload: &WorkloadKind) -> u64 {
+        match workload {
+            WorkloadKind::ChatCompletions => self.chat_completions_required_vram_mb,
+            WorkloadKind::Embeddings => self.embeddings_required_vram_mb,
+        }
+    }
+}
 
 #[derive(Clone)]
 pub struct ResourceRegistry {
@@ -135,6 +161,17 @@ impl ResourceRegistry {
             return None;
         }
         Some(entry.report.clone())
+    }
+
+    pub async fn fresh_backend_report(
+        &self,
+        node_id: &str,
+        backend_id: &str,
+    ) -> Option<ResourceReport> {
+        if let Some(report) = self.fresh_report(node_id, Some(backend_id)).await {
+            return Some(report);
+        }
+        self.fresh_report(node_id, None).await
     }
 }
 
@@ -284,6 +321,21 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn fresh_backend_report_falls_back_to_node_level_report() {
+        let registry = ResourceRegistry::default();
+        registry.report(report("spark-a", None)).await.unwrap();
+
+        let report = registry
+            .fresh_backend_report("spark-a", "spark-a-vllm")
+            .await
+            .unwrap();
+
+        assert_eq!(report.node_id, "spark-a");
+        assert_eq!(report.backend_id, None);
+        assert_eq!(report.available_vram_mb, 48_000);
+    }
+
+    #[tokio::test]
     async fn invalid_report_rejects_reserved_vram_above_total() {
         let registry = ResourceRegistry::default();
         let result = registry
@@ -328,6 +380,7 @@ mod tests {
             affinity: SessionAffinity::default(),
             metrics: RoutingMetrics::default(),
             resources,
+            resource_policy: ResourceRoutingPolicy::default(),
         }
     }
 

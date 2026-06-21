@@ -15,6 +15,13 @@ impl WorkloadKind {
     pub fn default_proxy_workloads() -> Vec<Self> {
         vec![Self::ChatCompletions, Self::Embeddings]
     }
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::ChatCompletions => "chat_completions",
+            Self::Embeddings => "embeddings",
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -79,6 +86,12 @@ pub struct Config {
     pub health_probe_interval_secs: u64,
     /// Seconds before a resource report is considered stale. Default: 30.
     pub resource_report_ttl_secs: u64,
+    /// Enable resource-aware backend eligibility. Default: false.
+    pub resource_aware_routing: bool,
+    /// Coarse VRAM estimate for chat completion requests. Default: 1024 MB.
+    pub chat_completions_required_vram_mb: u64,
+    /// Coarse VRAM estimate for embedding requests. Default: 512 MB.
+    pub embeddings_required_vram_mb: u64,
 }
 
 impl Config {
@@ -122,6 +135,20 @@ impl Config {
                 .unwrap_or_else(|_| "30".to_string())
                 .parse()
                 .map_err(|e| anyhow!("invalid RESOURCE_REPORT_TTL_SECS: {}", e))?,
+
+            resource_aware_routing: get("RESOURCE_AWARE_ROUTING")
+                .map(|v| v.to_lowercase() == "true")
+                .unwrap_or(false),
+
+            chat_completions_required_vram_mb: get("CHAT_COMPLETIONS_REQUIRED_VRAM_MB")
+                .unwrap_or_else(|_| "1024".to_string())
+                .parse()
+                .map_err(|e| anyhow!("invalid CHAT_COMPLETIONS_REQUIRED_VRAM_MB: {}", e))?,
+
+            embeddings_required_vram_mb: get("EMBEDDINGS_REQUIRED_VRAM_MB")
+                .unwrap_or_else(|_| "512".to_string())
+                .parse()
+                .map_err(|e| anyhow!("invalid EMBEDDINGS_REQUIRED_VRAM_MB: {}", e))?,
         })
     }
 }
@@ -264,6 +291,9 @@ mod tests {
         assert_eq!(cfg.circuit_cooldown_secs, 30);
         assert_eq!(cfg.health_probe_interval_secs, 10);
         assert_eq!(cfg.resource_report_ttl_secs, 30);
+        assert!(!cfg.resource_aware_routing);
+        assert_eq!(cfg.chat_completions_required_vram_mb, 1024);
+        assert_eq!(cfg.embeddings_required_vram_mb, 512);
     }
 
     #[test]
@@ -273,12 +303,18 @@ mod tests {
             ("CIRCUIT_COOLDOWN_SECS", "60"),
             ("HEALTH_PROBE_INTERVAL_SECS", "15"),
             ("RESOURCE_REPORT_TTL_SECS", "45"),
+            ("RESOURCE_AWARE_ROUTING", "true"),
+            ("CHAT_COMPLETIONS_REQUIRED_VRAM_MB", "2048"),
+            ("EMBEDDINGS_REQUIRED_VRAM_MB", "256"),
         ]))
         .unwrap();
         assert_eq!(cfg.circuit_failure_threshold, 5);
         assert_eq!(cfg.circuit_cooldown_secs, 60);
         assert_eq!(cfg.health_probe_interval_secs, 15);
         assert_eq!(cfg.resource_report_ttl_secs, 45);
+        assert!(cfg.resource_aware_routing);
+        assert_eq!(cfg.chat_completions_required_vram_mb, 2048);
+        assert_eq!(cfg.embeddings_required_vram_mb, 256);
     }
 
     #[test]
@@ -319,6 +355,26 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("invalid RESOURCE_REPORT_TTL_SECS"));
+    }
+
+    #[test]
+    fn invalid_chat_required_vram_returns_err() {
+        let result = Config::from_lookup(env(&[("CHAT_COMPLETIONS_REQUIRED_VRAM_MB", "abc")]));
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("invalid CHAT_COMPLETIONS_REQUIRED_VRAM_MB"));
+    }
+
+    #[test]
+    fn invalid_embeddings_required_vram_returns_err() {
+        let result = Config::from_lookup(env(&[("EMBEDDINGS_REQUIRED_VRAM_MB", "abc")]));
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("invalid EMBEDDINGS_REQUIRED_VRAM_MB"));
     }
 
     #[test]
