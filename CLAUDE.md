@@ -10,8 +10,8 @@ reports from model servers and other GPU consumers.
 It exposes an OpenAI-compatible inference API and a first-slice generic async
 job API. The inference path is synchronous (request → response). The job path is
 currently submit → job_id → poll/cancel, with non-dispatching worker
-registration and scheduler preview. Worker-pull claims, leases, execution,
-durable state, and callbacks are Phase 6C+ work.
+registration, scheduler preview, and initial worker-pull claims. Worker
+execution, durable state, and callbacks are Phase 6D+ work.
 
 See `docs/planning/design.md` for the design horizon and
 `docs/planning/architecture.md` for the current architecture.
@@ -54,9 +54,9 @@ cargo watch -x run
 
 ## Current status
 
-**Phase 6A complete** (clew → main). **Phase 6B is in progress on tackle**:
-async job API, queue visibility, worker registration, and non-dispatching
-scheduler preview before claims, leases, execution, callbacks, and persistence.
+**Phase 6B complete** (tackle → main). **Phase 6C is in progress on cleat**:
+worker-pull claims and bounded leases before worker execution, callbacks, and
+persistence.
 
 | Phase | Branch | Status |
 |---|---|---|
@@ -66,8 +66,8 @@ scheduler preview before claims, leases, execution, callbacks, and persistence.
 | 4 — Fallback chain + session affinity | spinnaker → main | ✅ complete |
 | 5 — VRAM accounting + priority admission | trim → main | ✅ complete |
 | 6A — Synchronous surface cleanup | clew → main | ✅ complete |
-| 6B — Async API + scheduler preview | tackle | in progress |
-| 6C — Worker-pull claims + leases | — | pending |
+| 6B — Async API + scheduler preview | tackle → main | ✅ complete |
+| 6C — Worker-pull claims + leases | cleat | in progress |
 | 6D — Worker execution + retries | — | pending |
 | 6E — Durable job state + recovery | — | pending |
 | 6F — Callback delivery + finalization | — | pending |
@@ -76,7 +76,7 @@ scheduler preview before claims, leases, execution, callbacks, and persistence.
 
 ## Project layout
 
-**What exists now (Phases 1–6B):**
+**What exists now (Phases 1–6C first slice):**
 
 ```
 src/
@@ -142,13 +142,15 @@ GET    /v1/jobs              — list in-memory job records
 GET    /v1/jobs/{id}         — check status: queued | running | complete | failed
 DELETE /v1/jobs/{id}         — cancel a queued job
 GET    /v1/scheduler/preview — preview next job/worker match without mutation
+POST   /v1/workers/{id}/claim — lease a compatible queued job to a worker
 ```
 
-The first Phase 6B slices store job records in memory only and track explicit
-per-priority queued job IDs. Worker registration and scheduler preview are
-non-dispatching for now. Worker-pull claims, deregistration, leases, callback
-delivery, worker utilization metrics, and SQLite-backed persistence are planned
-for Phase 6C and later.
+The Phase 6B slices store job records in memory and track explicit per-priority
+queued job IDs. The first Phase 6C slice lets fresh workers claim compatible
+queued jobs. Claimed jobs become `running`, attempts increment, and lease
+metadata is attached. Worker execution, deregistration, lease expiry requeue,
+callback delivery, worker utilization metrics, and SQLite-backed persistence are
+still planned.
 
 Job request body:
 ```json
@@ -165,6 +167,7 @@ Job request body:
 ```
 POST   /v1/workers/register        — worker announces: job types, endpoint, node
 POST   /v1/workers/{id}/heartbeat  — refresh worker liveness
+POST   /v1/workers/{id}/claim      — claim a compatible queued job
 GET    /v1/workers                 — list registered workers and their status
 ```
 
@@ -340,9 +343,18 @@ WORKER_HEARTBEAT_SECS        — interval before a worker is considered stale
 - [x] Keep preview non-mutating: no lease, no `running` transition, no worker
   call, and no callback
 
-### Phase 6C+ — Remaining async compute router work
+### Phase 6C — Worker-pull claims and leases
 
-- Worker-pull claims and leases.
+- [x] Worker-pull claim endpoint.
+- [x] Mark selected jobs `running` only when a lease is granted.
+- [x] Store lease metadata: worker ID, lease expiry, attempt number, and
+  claimed-at timestamp.
+- [x] Prevent duplicate claims for the same job.
+- [x] Initial cancellation semantics for queued and running jobs.
+- Lease expiry/requeue behavior remains.
+
+### Phase 6D+ — Remaining async compute router work
+
 - Worker deregistration API and graceful shutdown semantics.
 - Worker utilization metrics.
 - Scheduler policy based on lease availability, VRAM headroom, and load.

@@ -697,15 +697,16 @@ or execute work yet.
 Scope: turn preview selection into atomic worker-pull claims while keeping worker
 execution simple and bounded.
 
-- Add worker-pull claim endpoint.
-- Mark selected jobs `running` only when a lease is granted.
-- Store lease metadata: worker ID, lease expiry, attempt number, and claimed-at
+- [x] Add worker-pull claim endpoint.
+- [x] Mark selected jobs `running` only when a lease is granted.
+- [x] Store lease metadata: worker ID, lease expiry, attempt number, and claimed-at
   timestamp.
-- Prevent duplicate claims for the same job.
+- [x] Prevent duplicate claims for the same job.
 - Requeue expired leases when attempts remain.
-- Define cancellation semantics for queued, claimed, and running jobs.
-- Add tests for priority ordering, stale worker exclusion, unsupported job types,
-  duplicate-claim prevention, lease expiry, and cancellation races.
+- [x] Define initial cancellation semantics for queued and running jobs.
+- [x] Add tests for priority ordering, FIFO ordering, stale worker exclusion,
+  unsupported job types, and duplicate-claim prevention.
+- Add tests for lease expiry and cancellation races.
 
 ### Phase 6D: Worker Execution, Retries, and Utilization
 

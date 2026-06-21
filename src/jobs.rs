@@ -74,8 +74,17 @@ pub struct JobRecord {
     pub callback_url: Option<String>,
     pub attempts: u32,
     pub max_attempts: u32,
+    pub lease: Option<JobLease>,
     pub created_at_unix_ms: u128,
     pub updated_at_unix_ms: u128,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct JobLease {
+    pub worker_id: String,
+    pub attempt: u32,
+    pub claimed_at_unix_ms: u128,
+    pub expires_at_unix_ms: u128,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -167,6 +176,7 @@ impl JobRegistry {
             callback_url,
             attempts: 0,
             max_attempts: 3,
+            lease: None,
             created_at_unix_ms: now,
             updated_at_unix_ms: now,
         };
@@ -281,6 +291,39 @@ impl JobRegistry {
         }
 
         jobs
+    }
+
+    pub async fn claim_next_for_worker(
+        &self,
+        worker_id: &str,
+        worker_job_types: &[JobKind],
+        lease_duration_ms: u128,
+    ) -> Option<JobRecord> {
+        let mut guard = self.inner.write().await;
+        let job_id = guard.queues.iter().find_map(|(_priority, queue)| {
+            queue.iter().find_map(|id| {
+                let job = guard.jobs.get(id)?;
+                (job.status == JobStatus::Queued && worker_job_types.contains(&job.kind))
+                    .then(|| id.clone())
+            })
+        })?;
+
+        let job = guard.jobs.get_mut(&job_id)?;
+        let now = unix_ms();
+        job.status = JobStatus::Running;
+        job.attempts += 1;
+        job.lease = Some(JobLease {
+            worker_id: worker_id.to_string(),
+            attempt: job.attempts,
+            claimed_at_unix_ms: now,
+            expires_at_unix_ms: now + lease_duration_ms,
+        });
+        job.updated_at_unix_ms = now;
+        let priority = job.priority;
+        let job = job.clone();
+        guard.queues.remove(priority, &job_id);
+
+        Some(job)
     }
 
     pub async fn cancel(&self, id: &str) -> CancelJobResult {
@@ -664,6 +707,98 @@ mod tests {
             queued.iter().map(|job| job.id.as_str()).collect::<Vec<_>>(),
             vec!["job-3", "job-1"]
         );
+    }
+
+    #[tokio::test]
+    async fn claim_next_for_worker_marks_job_running_and_removes_it_from_queue() {
+        let jobs = JobRegistry::default();
+        jobs.submit(SubmitJobRequest {
+            kind: JobKind::VisionAnalysis,
+            priority: Priority::Batch,
+            payload: Value::Null,
+            callback_url: None,
+        })
+        .await
+        .unwrap();
+
+        let claimed = jobs
+            .claim_next_for_worker("worker-a", &[JobKind::VisionAnalysis], 30_000)
+            .await
+            .unwrap();
+
+        assert_eq!(claimed.id, "job-1");
+        assert_eq!(claimed.status, JobStatus::Running);
+        assert_eq!(claimed.attempts, 1);
+        let lease = claimed.lease.unwrap();
+        assert_eq!(lease.worker_id, "worker-a");
+        assert_eq!(lease.attempt, 1);
+        assert!(lease.expires_at_unix_ms >= lease.claimed_at_unix_ms + 30_000);
+        assert!(jobs.queue_snapshots().await.is_empty());
+        assert!(jobs.queued_jobs_by_priority().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn claim_next_for_worker_uses_priority_then_fifo_order() {
+        let jobs = JobRegistry::default();
+        jobs.submit(SubmitJobRequest {
+            kind: JobKind::VisionAnalysis,
+            priority: Priority::Background,
+            payload: Value::Null,
+            callback_url: None,
+        })
+        .await
+        .unwrap();
+        jobs.submit(SubmitJobRequest {
+            kind: JobKind::VisionAnalysis,
+            priority: Priority::Batch,
+            payload: Value::Null,
+            callback_url: None,
+        })
+        .await
+        .unwrap();
+        jobs.submit(SubmitJobRequest {
+            kind: JobKind::VisionAnalysis,
+            priority: Priority::Batch,
+            payload: Value::Null,
+            callback_url: None,
+        })
+        .await
+        .unwrap();
+
+        let first = jobs
+            .claim_next_for_worker("worker-a", &[JobKind::VisionAnalysis], 30_000)
+            .await
+            .unwrap();
+        let second = jobs
+            .claim_next_for_worker("worker-a", &[JobKind::VisionAnalysis], 30_000)
+            .await
+            .unwrap();
+
+        assert_eq!(first.id, "job-2");
+        assert_eq!(second.id, "job-3");
+    }
+
+    #[tokio::test]
+    async fn cancelling_running_job_marks_it_cancelled() {
+        let jobs = JobRegistry::default();
+        jobs.submit(SubmitJobRequest {
+            kind: JobKind::EmbedBatch,
+            priority: Priority::Realtime,
+            payload: Value::Null,
+            callback_url: None,
+        })
+        .await
+        .unwrap();
+        jobs.claim_next_for_worker("worker-a", &[JobKind::EmbedBatch], 30_000)
+            .await
+            .unwrap();
+
+        let result = jobs.cancel("job-1").await;
+        let CancelJobResult::Cancelled(job) = result else {
+            panic!("expected running job cancellation");
+        };
+        assert_eq!(job.status, JobStatus::Cancelled);
+        assert!(job.lease.is_some());
     }
 
     #[tokio::test]

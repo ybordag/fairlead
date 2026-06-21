@@ -44,9 +44,9 @@ pub struct AppState {
     pub resource_policy: ResourceRoutingPolicy,
     /// Per-priority synchronous admission limits.
     pub priority_limiter: PriorityLimiter,
-    /// In-memory async job state for Phase 6B job API requests.
+    /// In-memory async job and lease state for Phase 6B/6C job API requests.
     pub jobs: jobs::JobRegistry,
-    /// In-memory non-dispatching worker registry for Phase 6B.
+    /// In-memory worker registry for Phase 6B/6C.
     pub workers: workers::WorkerRegistry,
 }
 
@@ -125,6 +125,10 @@ pub(crate) fn build_router(state: AppState) -> Router {
         )
         .route("/v1/workers", get(workers::list_workers))
         .route("/v1/workers/register", post(workers::register_worker))
+        .route(
+            "/v1/workers/:id/claim",
+            post(scheduler::claim_worker_job_handler),
+        )
         .route("/v1/workers/:id/heartbeat", post(workers::heartbeat_worker))
         .route("/v1/chat/completions", post(proxy::chat_completions))
         .route("/v1/embeddings", post(proxy::embeddings))

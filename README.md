@@ -7,11 +7,11 @@ health, circuit state, and session affinity.
 
 The name comes from sailing: a fairlead is a fitting that guides lines in exactly the right direction without friction or fouling.
 
-**Status:** Phase 6B is in progress on the `tackle` branch. Fairlead currently
+**Status:** Phase 6C is in progress on the `cleat` branch. Fairlead currently
 runs as an Axum HTTP service with `/health`, `/metrics`, `/v1/models`,
 `/v1/resources`, `/v1/resources/report`, `/v1/jobs`, `/v1/jobs/{id}`,
-`/v1/workers`, `/v1/scheduler/preview`, `/v1/chat/completions`, and
-`/v1/embeddings`.
+`/v1/workers`, `/v1/workers/{id}/claim`, `/v1/scheduler/preview`,
+`/v1/chat/completions`, and `/v1/embeddings`.
 
 ---
 
@@ -76,10 +76,12 @@ Implemented generalization work includes:
   capability metadata, and worker availability metrics.
 - **Non-dispatching scheduler preview** that shows the next queued job and fresh
   compatible worker without leasing, running, or dispatching the job.
+- **Worker-pull claim groundwork** that leases a compatible queued job to a
+  fresh worker and marks it running without calling the worker yet.
 
-Future Phase 6 subphases add worker-pull leases, worker execution, durable job
-state, callback delivery, and async completion metrics. Later phases add
-complete pool-aware routing, adapter boundaries, and cloud fallback.
+Future Phase 6 subphases add worker execution, durable job state, callback
+delivery, and async completion metrics. Later phases add complete pool-aware
+routing, adapter boundaries, and cloud fallback.
 
 See [`docs/planning/roadmap.md`](docs/planning/roadmap.md) for the
 implementation plan and acceptance criteria.

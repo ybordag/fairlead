@@ -635,6 +635,7 @@ Router::new()
     .route("/v1/scheduler/preview", get(scheduler::preview_next_assignment_handler))
     .route("/v1/workers", get(workers::list_workers))
     .route("/v1/workers/register", post(workers::register_worker))
+    .route("/v1/workers/:id/claim", post(scheduler::claim_worker_job_handler))
     .route("/v1/workers/:id/heartbeat", post(workers::heartbeat_worker))
     .route("/v1/chat/completions", post(proxy::chat_completions))
     .route("/v1/embeddings", post(proxy::embeddings))
@@ -656,6 +657,7 @@ This means:
   `scheduler::preview_next_assignment_handler`.
 - `GET /v1/workers` calls `workers::list_workers`.
 - `POST /v1/workers/register` calls `workers::register_worker`.
+- `POST /v1/workers/{id}/claim` calls `scheduler::claim_worker_job_handler`.
 - `POST /v1/workers/{id}/heartbeat` calls `workers::heartbeat_worker`.
 - `POST /v1/chat/completions` calls `proxy::chat_completions`.
 - `POST /v1/embeddings` calls `proxy::embeddings`.
@@ -1233,6 +1235,20 @@ and registered workers:
 
 The preview response is deliberately non-mutating. The job remains `queued`, no
 lease is created, and Fairlead does not call the worker endpoint.
+
+`POST /v1/workers/{id}/claim` is the first mutating worker-pull scheduler path:
+
+1. Fairlead looks up the worker by ID.
+2. If the worker is missing, Fairlead returns `404`.
+3. If the worker is stale, Fairlead returns `409`.
+4. Otherwise, `JobRegistry::claim_next_for_worker()` scans queued jobs in
+   priority/FIFO order for a job type the worker supports.
+5. If a match exists, the job becomes `running`, `attempts` increments, lease
+   metadata is attached, and the job is removed from queue-depth accounting.
+6. If no compatible queued job exists, Fairlead returns `204`.
+
+The claim endpoint still does not call the worker process. It only grants the
+worker a bounded lease and returns the job payload to run.
 
 The proxy logs structured fields for the same decision: request ID, workload,
 origin node, affinity key, selected backend, retry count, fallback reason,

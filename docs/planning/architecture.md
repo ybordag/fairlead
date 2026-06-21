@@ -236,11 +236,12 @@ request arrives
 ### Surface 2: Async job dispatch
 
 Phase 6B implements the HTTP job surface, non-dispatching worker registration,
-queue visibility, and scheduler preview with in-memory state. Worker-pull
-claims, leases, execution, persistence, and callback delivery are Phase 6C+
-work. The design belongs in the architecture because it defines Fairlead's
-boundary: Fairlead should be a compute control plane, not a general-purpose
-workflow engine.
+queue visibility, and scheduler preview with in-memory state. Phase 6C adds the
+first worker-pull claim path: Fairlead grants a bounded lease, marks the job
+running, and returns it to the worker. Lease expiry/requeue, worker execution,
+persistence, and callback delivery are later Phase 6 work. The design belongs in
+the architecture because it defines Fairlead's boundary: Fairlead should be a
+compute control plane, not a general-purpose workflow engine.
 
 ```
 POST /v1/jobs        — submit, get job_id immediately
@@ -250,10 +251,11 @@ DELETE /v1/jobs/{id} — cancel queued or running work when supported
 GET  /v1/scheduler/preview    — preview next job/worker match without mutation
 POST /v1/workers/register       — register or update worker capabilities
 POST /v1/workers/{id}/heartbeat — refresh worker liveness
+POST /v1/workers/{id}/claim     — lease a compatible queued job to a worker
 GET  /v1/workers                — list registered workers
 ```
 
-Current early Phase 6B behavior:
+Current Phase 6B/6C behavior:
 
 - submitted jobs enter `queued`
 - submitted jobs are tracked in in-memory per-priority queues
@@ -268,11 +270,13 @@ Current early Phase 6B behavior:
 - `/metrics` exposes `fairlead_workers{type,status}`
 - `GET /v1/scheduler/preview` selects the next queued job and fresh compatible
   worker without changing job state
+- `POST /v1/workers/{id}/claim` validates the worker, grants a lease for a
+  compatible queued job, marks it `running`, and removes it from queue metrics
 - no job is dispatched to a worker yet
 - no callback is delivered yet
-- no durable queue, lease, or scheduler loop exists yet
+- no durable queue, lease expiry/requeue loop, or scheduler loop exists yet
 
-Future Phase 6C+ behavior:
+Future Phase 6C+ behavior after lease expiry and execution support:
 
 ```
 job submitted
@@ -303,7 +307,7 @@ job submitted
 
 ### Worker-pull claim decision
 
-Phase 6C should use a worker-scoped claim endpoint:
+Phase 6C uses a worker-scoped claim endpoint:
 
 ```text
 POST /v1/workers/{id}/claim

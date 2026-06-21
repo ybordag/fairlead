@@ -101,19 +101,17 @@ synchronous and async compute.
 
 When Phase 6C implements worker-pull claims and leases, add tests for:
 
-- cancellation of queued and running jobs
-- duplicate-claim prevention when two workers ask for the same job
 - lease timeout and retry
 - lease heartbeat or renewal behavior, if implemented
-- stale worker exclusion during claim
-- unsupported job types returning no claim
-- priority ordering across realtime, batch, and background queues at claim time
-- FIFO ordering within a priority at claim time
+- cancellation races between claim and cancel
+- lease ownership checks for future renew/complete/fail endpoints
 
 **Why deferred:** Phase 6B now has the in-memory job API, worker registry, queue
 metrics, and non-mutating scheduler preview. These tests require mutating claims,
 lease metadata, running-job state, and timeout behavior, which are Phase 6C
-scope.
+scope. Cleat's first slice now covers the claim endpoint, duplicate-claim
+prevention, stale worker exclusion, unsupported job types, priority ordering,
+FIFO ordering, and queued/running cancellation basics.
 
 ### `phase_6d_worker_execution_and_utilization`
 

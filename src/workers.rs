@@ -126,6 +126,14 @@ impl WorkerRegistry {
         Some(snapshot_from_entry(worker, self.stale_after))
     }
 
+    pub async fn get(&self, id: &str) -> Option<WorkerSnapshot> {
+        let guard = self.inner.read().await;
+        guard
+            .workers
+            .get(id)
+            .map(|entry| snapshot_from_entry(entry, self.stale_after))
+    }
+
     pub async fn list(&self) -> Vec<WorkerSnapshot> {
         let guard = self.inner.read().await;
         let mut workers: Vec<_> = guard
