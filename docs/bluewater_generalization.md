@@ -63,7 +63,7 @@ Fairlead currently provides:
 - Soft session affinity through `X-Fairlead-Thread-Id`.
 - Origin-node locality through `X-Fairlead-Origin-Node`.
 - Streaming proxy support for Server-Sent Events.
-- Basic Prometheus circuit-state metrics.
+- Prometheus circuit-state, request, retry, fallback, and latency metrics.
 - Node-aware backend metadata through `BACKENDS_JSON`.
 - `WorkloadKind` metadata for chat completions and embeddings.
 - Documentation for a manual two-node DGX Spark deployment.
@@ -77,7 +77,6 @@ It does not yet provide:
 - VRAM or CPU resource accounting.
 - Priority queues.
 - Async job submission, status, cancellation, worker registration, or callbacks.
-- True same-request retry across the fallback chain after an upstream failure.
 
 ## Easy Tasks
 
@@ -89,17 +88,17 @@ These should be achievable without changing the core architecture.
   `route`, and `affinity` so future docs use the terms consistently.
 - [ ] Document the current supported workload shape: HTTP request in, selected
   backend URL out, streamed or buffered HTTP response back.
-- [ ] Add example configuration for multiple OpenAI-compatible local backends.
-- [ ] Document how any OpenAI-compatible client can point at Fairlead without
+- [x] Add example configuration for multiple OpenAI-compatible local backends.
+- [x] Document how any OpenAI-compatible client can point at Fairlead without
   Rhizome in the loop.
-- [ ] Add explicit docs for current headers:
-  `X-Fairlead-Thread-Id` and future `X-Fairlead-Priority`.
+- [x] Add explicit docs for current headers:
+  `X-Fairlead-Thread-Id` and `X-Fairlead-Origin-Node`.
 - [x] Document manual two-node DGX Spark deployment commands and expected
   observations.
 - [x] Add fixture/local-config hygiene docs and `.gitignore` rules for private
   local deployment files.
-- [ ] Add the deferred low-risk tests listed in `docs/deferred_tests.md`.
-- [ ] Run and require the current quality gate:
+- [x] Add the deferred low-risk tests listed in `docs/deferred_tests.md`.
+- [x] Run and require the current quality gate:
   `cargo fmt --check`, `cargo clippy --all -- -D warnings`, and `cargo test`.
 
 ## Moderate Tasks
@@ -184,7 +183,6 @@ Current precedence:
 ```text
 eligible backend on origin node
   -> existing session affinity if still eligible
-  -> lowest-load eligible backend
   -> configured fallback order
 ```
 
@@ -192,7 +190,7 @@ Acceptance criteria:
 
 - A request with `X-Fairlead-Origin-Node: spark-a` selects spark-a's backend when it is
   healthy and eligible.
-- If spark-a is circuit-open or resource-ineligible, the same request selects spark-b.
+- If spark-a is circuit-open, the same request selects spark-b.
 - The reverse behavior works for `X-Fairlead-Origin-Node: spark-b`.
 
 ### 3. Health Probe Target Cleanup
