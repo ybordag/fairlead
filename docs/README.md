@@ -18,7 +18,7 @@ detail.
 
 - [`planning/design.md`](planning/design.md) — design horizon and longer-term
   product shape.
-- [`planning/roadmap.md`](planning/roadmap.md) — completed phases, current Trim
+- [`planning/roadmap.md`](planning/roadmap.md) — completed phases, current Clew
   scope, future phases, acceptance criteria, and deferred work.
 
 ## Implementation And Examples

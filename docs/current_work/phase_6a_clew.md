@@ -16,7 +16,7 @@ Clew includes:
 - Workload route metadata for synchronous proxy routes.
 - Route metadata for upstream path, retry behavior, backend pool, and metric
   labels.
-- Backend pool selection by workload.
+- Backend pool metadata on routes and backends.
 - A clear session-affinity policy: global, per workload, or per backend pool.
 - Provider/header forwarding policy.
 - `GET /v1/models` from configured workloads and backend metadata.
@@ -27,6 +27,9 @@ Clew does not include:
 - Durable priority queues.
 - Worker registration or heartbeat.
 - Queue depth or wait-time metrics.
+- Complete pool-aware backend configuration, pool fallback chains, or placement
+  policies. These are deferred to Phase 7A so they can cover both synchronous
+  backends and async workers.
 - Cloud-provider fallback unless a clear demo need appears.
 
 ## First Slice
@@ -90,5 +93,4 @@ Implemented:
 
 Next likely slice:
 
-- Audit Phase 6A scope for any remaining synchronous cleanup before deciding
-  whether to close Clew or continue into adapter-boundary groundwork.
+- Run a final Phase 6A readiness audit, then open the Clew PR.

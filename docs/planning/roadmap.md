@@ -108,9 +108,8 @@ Fairlead currently provides:
 
 It does not yet provide:
 
-- Workload-aware route selection.
-- Separate backend pools by workload type.
-- Provider-specific auth/header policies.
+- Complete pool-aware backend configuration, fallback chains, or placement
+  policy across sync backends and async workers.
 - CPU resource accounting and richer resource dimensions beyond coarse VRAM/load.
 - Durable priority queues.
 - Async job submission, status, cancellation, worker registration, or callbacks.
@@ -155,8 +154,9 @@ system.
   retry policy,
   backend pool name,
   metric labels.
-- [ ] Split backend configuration by pool so different workloads can target
-  different backend sets.
+- [ ] Complete pool-aware backend configuration and routing policy. Deferred to
+  **Phase 7A: Pool-Aware Routing and Placement Policies** so the design can
+  cover both synchronous backends and async workers.
 - [x] Preserve a default backend pool for today's simple `BACKENDS` config.
 - [x] Add provider/header forwarding policy:
   content type,
@@ -166,7 +166,8 @@ system.
 - [x] Add `/v1/models` for the synchronous proxy surface, backed by configured
   workloads and backend metadata.
 - [ ] Add an adapter boundary for non-OpenAI-compatible synchronous endpoints,
-  such as `/v1/rerank` or `/v1/images/generations`.
+  such as `/v1/rerank` or `/v1/images/generations`. Deferred to
+  **Phase 7: Advanced Workloads**.
 - [x] Add metrics labels for workload kind and selected backend.
 - [x] Decide whether session affinity should be keyed globally, per workload, or
   per backend pool.
@@ -368,7 +369,8 @@ Scope:
 Proposed decision pipeline:
 
 ```text
-candidates = backends in workload's backend pool
+candidates = backends eligible for the workload
+candidates = backends in workload's backend pool (Phase 7A)
 candidates = remove circuit-open backends
 candidates = remove backends without enough reported capacity
 rank by origin-node locality
@@ -611,7 +613,8 @@ Docker, or the provider accounts themselves.
 - [x] Add workload-aware routing metrics and retry/fallback counters.
 - [x] Add a repeatable local mock demo.
 - [x] Move route-specific behavior into workload metadata.
-- [ ] Add backend pools. Deferred to **Phase 6A: Synchronous Surface Cleanup**.
+- [ ] Add complete backend pools. Deferred to
+  **Phase 7A: Pool-Aware Routing and Placement Policies**.
 - [x] Add provider/header policy.
 - [x] Add `/v1/models`.
 
@@ -633,12 +636,13 @@ It should not introduce queues, workers, or job state.
   into workload metadata.
 - [x] Add route metadata for path, method, streaming behavior, retry policy, backend
   pool, and metric labels.
-- [ ] Split backend configuration by pool so different synchronous workloads can
-  target different backend sets.
 - [x] Decide whether session affinity is global, per workload, or per backend pool.
 - [x] Add provider/header forwarding policy for content type, authorization,
   organization/project headers, and provider-specific opt-in headers.
 - [x] Add `GET /v1/models` backed by configured workloads and backend metadata.
+- Full pool-aware backend configuration, pool fallback chains, and placement
+  policies are deferred to **Phase 7A** so they can cover both synchronous
+  backends and async workers.
 - Keep cloud-provider fallback and provider credentials deferred unless a clear
   demo need appears.
 
@@ -657,6 +661,20 @@ It should not introduce queues, workers, or job state.
 - Add async workload metrics.
 - Document Temporal as deferred unless Rhizome needs durable multi-step workflow
   orchestration beyond compute dispatch.
+
+### Phase 7A: Pool-Aware Routing and Placement Policies
+
+- Add named backend and worker pools as first-class routing boundaries.
+- Let workloads target one or more pools, with explicit validation for missing
+  or empty pools.
+- Add pool fallback chains, such as local GPU pool -> peer local pool -> cloud
+  overflow pool.
+- Add per-pool metrics for candidate counts, selected backend or worker, fallback
+  reason, and capacity pressure.
+- Apply the same pool model to synchronous OpenAI-compatible backends and async
+  registered workers.
+- Document local DGX pools, shared Fairlead deployments, and future cloud
+  overflow pools.
 
 ### Phase 7: Advanced Workloads
 

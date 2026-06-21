@@ -1233,7 +1233,7 @@ The current code does not:
 - Inspect model-specific request JSON.
 - Estimate token count or memory use.
 - Manage CUDA memory.
-- Keep separate backend pools per workload.
+- Enforce complete pool-aware routing and placement policies.
 - Implement job queues or worker registration.
 - Reserve GPU memory for a request; resource reports are cooperative control-plane
   hints, not allocator-level reservations.
