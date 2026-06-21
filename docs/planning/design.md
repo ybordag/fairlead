@@ -57,6 +57,9 @@ DELETE /v1/jobs/{id}
 GET  /v1/scheduler/preview
 POST /v1/workers/register
 POST /v1/workers/{id}/heartbeat
+POST /v1/workers/{id}/drain
+POST /v1/workers/{id}/reactivate
+DELETE /v1/workers/{id}
 POST /v1/workers/{id}/claim
 POST /v1/workers/{worker_id}/jobs/{job_id}/renew
 POST /v1/workers/{worker_id}/jobs/{job_id}/complete
@@ -66,12 +69,6 @@ GET  /health
 GET  /metrics
 POST /v1/resources/report
 GET  /v1/resources
-```
-
-Planned endpoints:
-
-```text
-DELETE /v1/workers/{id}
 ```
 
 The application points its model client at `http://fairlead/v1` instead of a

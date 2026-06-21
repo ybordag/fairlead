@@ -28,7 +28,7 @@ reactivate, and deregister async workers without dropping held jobs.
 
 ## Remaining
 
-- Run one final docs/readiness pass before PR.
+- Ready for PR.
 
 ## Semantics
 
