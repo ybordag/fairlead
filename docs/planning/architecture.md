@@ -464,7 +464,9 @@ job submitted
   job duration, callback delivery outcomes, and terminal job pruning
 - Persistent callback-attempt state and pending callback recovery are
   implemented for SQLite-backed job state.
-- Background pruning remains deferred to Phase 8D; Phase 8B pruning is explicit.
+- Background lease recovery runs on `JOB_MAINTENANCE_INTERVAL_SECS`.
+- Optional background terminal-job pruning runs when `JOB_PRUNE_INTERVAL_SECS`
+  is configured. Manual `POST /v1/jobs/prune` remains available.
 
 ### Worker-pull claim decision
 

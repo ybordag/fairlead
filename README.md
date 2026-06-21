@@ -7,8 +7,9 @@ health, circuit state, and session affinity.
 
 The name comes from sailing: a fairlead is a fitting that guides lines in exactly the right direction without friction or fouling.
 
-**Status:** Phase 8A is complete on `bowline`. Phase 8 hardens the async
-scheduler after the completed Phase 7 pool-aware placement work.
+**Status:** Phase 8D is underway on `clove`. Phase 8 hardens the async
+scheduler after the completed Phase 7 pool-aware placement work; 8A through 8C
+are merged, and 8D's in-process maintenance-loop work is complete.
 Fairlead currently runs as an Axum HTTP service with `/health`, `/metrics`,
 `/v1/models`, `/v1/resources`, `/v1/resources/report`, `/v1/jobs`,
 `/v1/jobs/prune`, `/v1/jobs/{id}`, `/v1/workers`, `/v1/workers/{id}`,
@@ -116,13 +117,14 @@ Implemented generalization work includes:
 - **Background lease recovery** so expired async worker leases are requeued or
   failed on a configured maintenance interval, without waiting for the next
   worker claim.
+- **Optional background terminal-job pruning** using the same retention,
+  per-run limit, callback-safety, SQLite, idempotency-key, and metrics behavior
+  as `POST /v1/jobs/prune`.
 
-Phase 8C is complete on `splice` and adds stronger idempotency semantics for
-async job submission, cancellation retries, and terminal worker result retries.
 Phase 8D is underway on `clove` and adds background maintenance loops. Remaining
-Phase 8 work adds process-level e2e harnesses. Later phases add adapter
-boundaries, richer resource policy, external scale/overflow, and transport/SDK
-hardening.
+Phase 8 work is the process-level e2e harness in Phase 8E. Later phases add
+adapter boundaries, richer resource policy, external scale/overflow, and
+transport/SDK hardening.
 
 See [`docs/planning/roadmap.md`](docs/planning/roadmap.md) for the
 implementation plan and acceptance criteria.

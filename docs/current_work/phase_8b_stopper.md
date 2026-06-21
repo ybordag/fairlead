@@ -35,9 +35,9 @@ processes can bound completed job history without weakening callback delivery.
 
 ## Semantics
 
-Pruning is explicit in Phase 8B. Operators or later maintenance loops call
-`POST /v1/jobs/prune`; Fairlead does not yet run a background pruning loop.
-Background invocation belongs to Phase 8D.
+Pruning is explicit in Phase 8B. Operators can call `POST /v1/jobs/prune`.
+Background invocation was intentionally left for Phase 8D and is now available
+when `JOB_PRUNE_INTERVAL_SECS` is configured.
 
 Eligible jobs must be:
 
