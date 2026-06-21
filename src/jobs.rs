@@ -1034,7 +1034,11 @@ pub async fn cancel_job(State(state): State<AppState>, Path(id): Path<String>) -
             Json(JobResponse { job }).into_response()
         }
         CancelJobResult::AlreadyTerminal(job) => {
-            (StatusCode::CONFLICT, Json(JobResponse { job })).into_response()
+            if job.status == JobStatus::Cancelled {
+                Json(JobResponse { job }).into_response()
+            } else {
+                (StatusCode::CONFLICT, Json(JobResponse { job })).into_response()
+            }
         }
         CancelJobResult::NotFound => (StatusCode::NOT_FOUND, "job not found").into_response(),
     }
@@ -3207,7 +3211,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cancel_terminal_job_returns_conflict() {
+    async fn cancel_already_cancelled_job_returns_existing_job() {
         let app = build_router(test_state());
 
         app.clone()
@@ -3242,9 +3246,44 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(response.status(), StatusCode::CONFLICT);
+        assert_eq!(response.status(), StatusCode::OK);
         let value = response_json(response).await;
         assert_eq!(value["job"]["status"], "cancelled");
+    }
+
+    #[tokio::test]
+    async fn cancel_completed_job_returns_conflict() {
+        let jobs = JobRegistry::default();
+        jobs.submit(SubmitJobRequest {
+            kind: JobKind::Cluster,
+            priority: Priority::Batch,
+            payload: Value::Null,
+            callback_url: None,
+            idempotency_key: None,
+        })
+        .await
+        .unwrap();
+        jobs.claim_next_for_worker("worker-a", &[JobKind::Cluster], 30_000)
+            .await
+            .unwrap();
+        jobs.complete_lease("job-1", "worker-a", json!({"ok": true}))
+            .await;
+        let app = build_router(test_state_with_jobs(jobs));
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::DELETE)
+                    .uri("/v1/jobs/job-1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        let value = response_json(response).await;
+        assert_eq!(value["job"]["status"], "complete");
     }
 
     #[tokio::test]

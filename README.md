@@ -271,6 +271,10 @@ Pruning removes only terminal jobs older than `JOB_RETENTION_SECS`, up to
 callback delivery can continue. Removed jobs are also deleted from SQLite, and
 their submit idempotency keys are released, when `JOB_STORE=sqlite` is enabled.
 
+`DELETE /v1/jobs/{id}` is idempotent for jobs that are already `cancelled`.
+Cancelling a job that already completed or failed still returns a conflict,
+because that work was not cancelled by the caller's earlier request.
+
 ```bash
 JOB_RETENTION_SECS=86400 \
 JOB_PRUNE_LIMIT=1000 \

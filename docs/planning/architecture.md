@@ -357,6 +357,8 @@ Current async scheduler behavior:
   callback delivery state across ordinary Fairlead restarts
 - cancellation marks queued jobs `cancelled`
 - cancellation removes queued jobs from queue depth and wait-time accounting
+- repeated cancellation returns the existing job when it is already `cancelled`;
+  cancellation still returns conflict for jobs that already completed or failed
 - registered workers are listed with stale and draining status
 - workers can be drained, reactivated, or deregistered
 - draining workers remain registered but are skipped by scheduler preview and

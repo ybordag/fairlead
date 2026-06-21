@@ -1353,6 +1353,17 @@ request and delegates to `JobRegistry::submit()`:
 5. With `JOB_STORE=sqlite`, the full registry snapshot includes the idempotency
    key so a submit retry after restart still resolves to the original job.
 
+`DELETE /v1/jobs/{id}` calls `jobs::cancel_job`, which delegates to
+`JobRegistry::cancel()`:
+
+1. Queued and running jobs become `cancelled`.
+2. Queued jobs are removed from queue-depth and wait-time accounting.
+3. Running jobs release the worker slot held by their lease.
+4. Terminal jobs that are already `cancelled` return `200 OK` with the existing
+   job, making caller retries safe.
+5. Terminal jobs that are `complete` or `failed` return `409 Conflict`, because
+   those jobs finished by some path other than cancellation.
+
 `GET /v1/scheduler/preview` asks the scheduler to inspect the in-memory queues
 and registered workers:
 

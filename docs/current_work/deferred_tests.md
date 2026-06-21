@@ -412,6 +412,11 @@ Add an opt-in process-level e2e for async job idempotency:
 - complete, fail, or cancel the original job, then retry the original submit
   and verify it still returns the retained terminal job while that job has not
   been pruned
+- cancel a queued job, retry `DELETE /v1/jobs/{id}` before and after restart,
+  and verify the existing cancelled job is returned without duplicate callback
+  delivery or queue metric mutation
+- attempt to cancel completed and failed jobs and verify the process-level API
+  still returns conflict
 - prune the retained terminal job after it becomes eligible, then reuse the
   same idempotency key and verify Fairlead creates a new job
 - run the same sequence while fake workers are concurrently claiming jobs to

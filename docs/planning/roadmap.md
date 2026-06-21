@@ -863,7 +863,9 @@ workload protocols.
   - [x] Add optional `idempotency_key` for async job submission retries.
   - [x] Persist submit idempotency keys in SQLite-backed job state.
   - [x] Release submit idempotency keys when terminal jobs are pruned.
-  - Add stronger idempotency semantics for complete, fail, cancel, and callback
+  - [x] Make repeated cancellation idempotent for already-cancelled jobs while
+    preserving conflict responses for completed or failed jobs.
+  - Add stronger idempotency semantics for complete, fail, and callback
     handling where needed.
 - **8D Clove: Background Maintenance Loops**
   - Add background expiry/recovery loops if claim-time sweeps are not enough.
