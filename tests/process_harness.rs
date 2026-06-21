@@ -253,6 +253,48 @@ fn unique_temp_dir(prefix: &str) -> PathBuf {
     std::env::temp_dir().join(format!("{prefix}-{}-{nanos}", std::process::id()))
 }
 
+fn assert_process_startup_fails(extra_env: &[(&str, &str)], expected_stderr: &str) {
+    let port = reserve_port();
+    let temp_dir = unique_temp_dir("fairlead-process-startup-failure");
+    fs::create_dir_all(&temp_dir).expect("create startup failure temp dir");
+    let stdout_path = temp_dir.join("fairlead.stdout.log");
+    let stderr_path = temp_dir.join("fairlead.stderr.log");
+    let stdout = File::create(&stdout_path).expect("create Fairlead stdout log");
+    let stderr = File::create(&stderr_path).expect("create Fairlead stderr log");
+
+    let mut command = Command::new(env!("CARGO_BIN_EXE_fairlead"));
+    command
+        .env_clear()
+        .stdout(Stdio::from(stdout))
+        .stderr(Stdio::from(stderr));
+    for (key, value) in process_env(port, extra_env) {
+        command.env(key, value);
+    }
+
+    let mut child = command.spawn().expect("spawn Fairlead process");
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    let status = loop {
+        if let Some(status) = child.try_wait().expect("poll Fairlead process") {
+            break status;
+        }
+        if std::time::Instant::now() >= deadline {
+            child.kill().expect("kill hung Fairlead process");
+            child.wait().expect("wait for killed Fairlead process");
+            panic!("Fairlead did not exit for invalid startup configuration");
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    };
+
+    let stderr = fs::read_to_string(&stderr_path).unwrap_or_default();
+    assert!(!status.success(), "Fairlead unexpectedly started successfully");
+    assert!(
+        stderr.contains(expected_stderr),
+        "stderr did not contain {expected_stderr:?}; stderr: {stderr}"
+    );
+
+    fs::remove_dir_all(temp_dir).expect("remove startup failure temp dir");
+}
+
 async fn json_response(response: reqwest::Response) -> (StatusCode, Value) {
     let status = response.status();
     let body = response.text().await.expect("read Fairlead response body");
@@ -436,6 +478,19 @@ async fn fairlead_process_starts_serves_health_and_shuts_down() {
     assert!(fairlead.stderr_path.exists());
 
     fairlead.shutdown().await;
+}
+
+#[tokio::test]
+async fn invalid_scheduler_env_exits_before_serving_health() {
+    for (key, value) in [
+        ("JOB_RETENTION_SECS", "abc"),
+        ("JOB_PRUNE_LIMIT", "0"),
+        ("JOB_LEASE_DURATION_MS", "0"),
+        ("JOB_MAINTENANCE_INTERVAL_SECS", "abc"),
+        ("JOB_PRUNE_INTERVAL_SECS", "0"),
+    ] {
+        assert_process_startup_fails(&[(key, value)], key);
+    }
 }
 
 #[tokio::test]

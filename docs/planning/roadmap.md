@@ -886,6 +886,8 @@ workload protocols.
 - **8E Reef: Process-Level E2E Harness**
   - [x] Add a reusable process harness that starts a real Fairlead binary on an
     isolated local port and verifies `/health`.
+  - [x] Add process-level startup failure coverage for invalid scheduler and
+    retention environment configuration.
   - [x] Add JSON request helpers and a SQLite-backed job restart smoke test.
   - [x] Add process-level worker registration, claim, completion, and metrics
     smoke coverage.

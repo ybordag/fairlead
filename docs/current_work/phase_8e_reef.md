@@ -17,6 +17,9 @@ behavior that in-process Rust tests cannot cover.
   - kills and waits for the process during cleanup
 - Added the first process-level smoke test:
   `fairlead_process_starts_serves_health_and_shuts_down`.
+- Added `invalid_scheduler_env_exits_before_serving_health`, which verifies the
+  real process exits nonzero for invalid scheduler/retention configuration
+  before serving health.
 - Added JSON request helpers for process-level `GET` and `POST` calls.
 - Added restart support that stops and starts Fairlead again with the same
   port, temp directory, and environment.

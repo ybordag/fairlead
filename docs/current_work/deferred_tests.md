@@ -414,9 +414,9 @@ Metrics and config cases:
 - scrape `/metrics` and verify worker availability, queue depth, queue wait,
   terminal duration, callback, prune, and maintenance-related behavior remain
   internally consistent
-- verify invalid env configuration fails startup for `JOB_RETENTION_SECS`,
-  `JOB_PRUNE_LIMIT`, `JOB_LEASE_DURATION_MS`, `JOB_MAINTENANCE_INTERVAL_SECS`, and
-  `JOB_PRUNE_INTERVAL_SECS`
+- verify invalid env configuration fails startup for callback-specific keys such
+  as `CALLBACK_MAX_ATTEMPTS`, `CALLBACK_TIMEOUT_SECS`, and
+  `CALLBACK_RETRY_DELAY_MS`
 - verify logs or metrics distinguish lease recovery from pruning
 
 **Why deferred:** In-process tests cover registry, endpoint, SQLite, callback,
