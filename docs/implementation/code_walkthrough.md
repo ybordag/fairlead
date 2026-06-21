@@ -519,6 +519,11 @@ explicit `WORKLOAD_POOLS_JSON`, it remains permissive through Phase 7C. Phase 7D
 will decide whether explicit policy should become strict after the sync and
 async paths share the same pool vocabulary.
 
+Phase 7C applies the same policy to async worker placement. Worker registration
+accepts pool metadata, scheduler preview only pairs jobs with workers whose pool
+is allowed by the job type, and worker-pull claims only lease eligible queued
+jobs for the claiming worker's pool.
+
 ### 5. Initialize Tracing
 
 ```rust

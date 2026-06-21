@@ -37,7 +37,7 @@ detail.
 ## Current Work
 
 - [`current_work/phase_7c_tactician.md`](current_work/phase_7c_tactician.md) —
-  active Phase 7C async worker pool placement notes.
+  completed Phase 7C async worker pool placement notes.
 - [`current_work/phase_7b_trimmer.md`](current_work/phase_7b_trimmer.md) —
   completed Phase 7B synchronous backend pool routing notes.
 - [`current_work/phase_7a_helm.md`](current_work/phase_7a_helm.md) — completed

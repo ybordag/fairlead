@@ -180,9 +180,9 @@ system.
 - [x] Complete synchronous pool-aware backend configuration and routing policy.
   Phase 7B applies workload pool policy to chat and embedding routing with
   ordered pool fallback.
-- [ ] Complete async worker pool placement. Deferred to **Phase 7C:
-  Async Worker Pool Placement** so queued jobs and registered workers use the
-  same pool vocabulary as synchronous backends.
+- [x] Complete async worker pool placement. Phase 7C applies workload pool
+  policy to worker registration metadata, scheduler preview, worker-pull claims,
+  and async placement metrics.
 - [x] Preserve a default backend pool for today's simple `BACKENDS` config.
 - [x] Add provider/header forwarding policy:
   content type,
