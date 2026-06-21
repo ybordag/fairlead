@@ -36,7 +36,8 @@ Immediate coverage includes:
 - selected worker claims emit async pool selection and candidate-worker metrics
 - no-compatible-pool worker claims emit skipped-job metrics
 
-## Remaining 7C Work
+## Deferrals
 
-- Review whether worker registration should validate pools against configured
-  `POOLS_JSON` once the shared demo shape is clearer.
+- Worker registration pool validation against configured `POOLS_JSON` is
+  deferred to Phase 7D, where shared sync/async pool demos can clarify whether
+  worker pools should be centrally enumerated or remain permissive metadata.
