@@ -61,7 +61,23 @@ Implemented:
 - Added tests proving chat and embeddings with the same thread ID can keep
   independent backend affinity.
 
+## Fourth Slice
+
+Implemented:
+
+- Added explicit upstream request header policy.
+- Preserve incoming `content-type`; default to `application/json` when missing.
+- Forward `authorization`.
+- Forward allowlisted provider opt-in headers:
+  - `openai-organization`
+  - `openai-project`
+  - `anthropic-version`
+  - `anthropic-beta`
+  - `x-goog-api-key`
+- Do not forward Fairlead routing/control headers such as
+  `x-fairlead-thread-id`, `x-fairlead-origin-node`, and
+  `x-fairlead-priority`.
+
 Next likely slice:
 
-- Add provider/header forwarding policy for content type, authorization, and
-  provider-specific opt-in headers.
+- Add `GET /v1/models` from configured workloads and backend metadata.

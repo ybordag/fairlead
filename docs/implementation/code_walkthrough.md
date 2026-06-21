@@ -952,7 +952,7 @@ http://spark-a:8000/v1/chat/completions
 let upstream = match state
     .client
     .post(&url)
-    .header("content-type", "application/json")
+    .with_upstream_headers(headers)
     .body(body)
     .send()
     .await
@@ -971,6 +971,17 @@ let upstream = match state
 ```
 
 This uses `reqwest` to send the raw request body to the selected backend.
+
+`with_upstream_headers` applies Fairlead's request-header policy:
+
+- Preserve incoming `content-type`, or default to `application/json` if it is
+  missing.
+- Forward `authorization`.
+- Forward allowlisted provider opt-in headers such as `openai-organization`,
+  `openai-project`, `anthropic-version`, `anthropic-beta`, and `x-goog-api-key`.
+- Do not forward Fairlead routing/control headers such as
+  `x-fairlead-thread-id`, `x-fairlead-origin-node`, or
+  `x-fairlead-priority`.
 
 The `match` handles success or failure:
 

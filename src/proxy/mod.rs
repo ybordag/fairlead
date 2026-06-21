@@ -3,7 +3,10 @@ pub mod types;
 use axum::{
     body::Body,
     extract::State,
-    http::{header::CONTENT_TYPE, HeaderMap, StatusCode},
+    http::{
+        header::{AUTHORIZATION, CONTENT_TYPE},
+        HeaderMap, StatusCode,
+    },
     response::{IntoResponse, Response},
 };
 use bytes::Bytes;
@@ -18,6 +21,15 @@ use crate::{
     router::{select_backend_excluding_resource, BackendState, ResourceRank},
     AppState,
 };
+
+const DEFAULT_UPSTREAM_CONTENT_TYPE: &str = "application/json";
+const FORWARDED_UPSTREAM_HEADERS: &[&str] = &[
+    "openai-organization",
+    "openai-project",
+    "anthropic-version",
+    "anthropic-beta",
+    "x-goog-api-key",
+];
 
 pub async fn chat_completions(
     State(state): State<AppState>,
@@ -246,7 +258,7 @@ async fn forward(
         let upstream = match state
             .client
             .post(&url)
-            .header("content-type", "application/json")
+            .with_upstream_headers(headers)
             .body(body.clone())
             .send()
             .await
@@ -418,6 +430,35 @@ async fn forward(
 
 fn affinity_key(workload: WorkloadKind, thread_id: &str) -> String {
     format!("{}:{thread_id}", workload.as_str())
+}
+
+trait UpstreamHeaderPolicy {
+    fn with_upstream_headers(self, headers: &HeaderMap) -> Self;
+}
+
+impl UpstreamHeaderPolicy for reqwest::RequestBuilder {
+    fn with_upstream_headers(mut self, headers: &HeaderMap) -> Self {
+        match headers.get(CONTENT_TYPE) {
+            Some(content_type) => {
+                self = self.header(CONTENT_TYPE, content_type.clone());
+            }
+            None => {
+                self = self.header(CONTENT_TYPE, DEFAULT_UPSTREAM_CONTENT_TYPE);
+            }
+        }
+
+        if let Some(authorization) = headers.get(AUTHORIZATION) {
+            self = self.header(AUTHORIZATION, authorization.clone());
+        }
+
+        for name in FORWARDED_UPSTREAM_HEADERS {
+            if let Some(value) = headers.get(*name) {
+                self = self.header(*name, value.clone());
+            }
+        }
+
+        self
+    }
 }
 
 fn fallback_reason(
@@ -945,6 +986,92 @@ mod tests {
         assert_eq!(resp.status(), 200);
         let received: serde_json::Value = resp.json().await.unwrap();
         assert_eq!(received["choices"][0]["message"]["content"], "Hello!");
+    }
+
+    #[tokio::test]
+    async fn upstream_header_policy_forwards_only_allowed_headers() {
+        let mock = Router::new().route(
+            "/v1/chat/completions",
+            post(|headers: HeaderMap| async move {
+                axum::Json(json!({
+                    "content_type": headers
+                        .get(CONTENT_TYPE)
+                        .and_then(|v| v.to_str().ok()),
+                    "authorization": headers
+                        .get(AUTHORIZATION)
+                        .and_then(|v| v.to_str().ok()),
+                    "openai_organization": headers
+                        .get("openai-organization")
+                        .and_then(|v| v.to_str().ok()),
+                    "anthropic_version": headers
+                        .get("anthropic-version")
+                        .and_then(|v| v.to_str().ok()),
+                    "fairlead_thread": headers
+                        .get("x-fairlead-thread-id")
+                        .and_then(|v| v.to_str().ok()),
+                    "fairlead_origin": headers
+                        .get("x-fairlead-origin-node")
+                        .and_then(|v| v.to_str().ok()),
+                    "request_id": headers
+                        .get("x-request-id")
+                        .and_then(|v| v.to_str().ok()),
+                }))
+            }),
+        );
+        let backend = start_mock(mock).await;
+        let fairlead = start_fairlead(&[&backend]).await;
+
+        let resp = reqwest::Client::new()
+            .post(format!("{}/v1/chat/completions", fairlead))
+            .header("content-type", "application/json; charset=utf-8")
+            .header("authorization", "Bearer upstream-token")
+            .header("openai-organization", "org-test")
+            .header("anthropic-version", "2023-06-01")
+            .header("x-fairlead-thread-id", "thread-1")
+            .header("x-fairlead-origin-node", "node-a")
+            .header("x-fairlead-priority", "batch")
+            .header("x-request-id", "request-1")
+            .body(r#"{"model":"m","messages":[]}"#)
+            .send()
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), 200);
+        let received: serde_json::Value = resp.json().await.unwrap();
+        assert_eq!(received["content_type"], "application/json; charset=utf-8");
+        assert_eq!(received["authorization"], "Bearer upstream-token");
+        assert_eq!(received["openai_organization"], "org-test");
+        assert_eq!(received["anthropic_version"], "2023-06-01");
+        assert_eq!(received["fairlead_thread"], serde_json::Value::Null);
+        assert_eq!(received["fairlead_origin"], serde_json::Value::Null);
+        assert_eq!(received["request_id"], serde_json::Value::Null);
+    }
+
+    #[tokio::test]
+    async fn upstream_header_policy_defaults_missing_content_type_to_json() {
+        let mock = Router::new().route(
+            "/v1/chat/completions",
+            post(|headers: HeaderMap| async move {
+                axum::Json(json!({
+                    "content_type": headers
+                        .get(CONTENT_TYPE)
+                        .and_then(|v| v.to_str().ok()),
+                }))
+            }),
+        );
+        let backend = start_mock(mock).await;
+        let fairlead = start_fairlead(&[&backend]).await;
+
+        let resp = reqwest::Client::new()
+            .post(format!("{}/v1/chat/completions", fairlead))
+            .body(r#"{"model":"m","messages":[]}"#)
+            .send()
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), 200);
+        let received: serde_json::Value = resp.json().await.unwrap();
+        assert_eq!(received["content_type"], DEFAULT_UPSTREAM_CONTENT_TYPE);
     }
 
     #[tokio::test]
