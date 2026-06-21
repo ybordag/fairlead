@@ -1053,8 +1053,7 @@ pub async fn list_jobs(State(state): State<AppState>) -> Json<JobListResponse> {
 }
 
 pub async fn prune_jobs(State(state): State<AppState>) -> Json<JobPruneResponse> {
-    let report = state.jobs.prune_terminal_jobs().await;
-    state.metrics.record_job_prune(&report);
+    let report = crate::scheduler::prune_terminal_jobs(&state).await;
     Json(JobPruneResponse { pruned: report })
 }
 

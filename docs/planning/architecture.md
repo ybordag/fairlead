@@ -410,7 +410,12 @@ Current async scheduler behavior:
   key to be reused after the retained job record is gone
 - pruning persists to SQLite when `JOB_STORE=sqlite` is enabled
 - `/metrics` exposes `fairlead_job_prunes_total{status}`
-- there is no background scheduler loop yet
+- a background lease recovery loop periodically applies the same expired-lease
+  sweep used by worker claims, so timed-out jobs can requeue or fail without
+  waiting for another worker request
+- optional background terminal-job pruning applies the same retention,
+  per-run-limit, pending-callback, SQLite, idempotency-key, and metric behavior
+  as `POST /v1/jobs/prune`; operators can leave it disabled and prune manually
 
 Current worker-pull execution flow:
 
@@ -422,8 +427,9 @@ job submitted
   → worker processes async
   → worker completes or renews the job lease before it expires
   → Fairlead records completion/failure and releases worker capacity
-  → if the lease expires first, Fairlead records timeout error state and
-    requeues or fails the job by remaining attempts
+  → if the lease expires first, claim-time sweeps or the background maintenance
+    loop record timeout error state and requeue or fail the job by remaining
+    attempts
   → terminal callback state is persisted when callback_url exists
   → Fairlead posts the terminal job payload to the callback_url until a 2xx
     response is recorded
@@ -458,7 +464,9 @@ job submitted
   job duration, callback delivery outcomes, and terminal job pruning
 - Persistent callback-attempt state and pending callback recovery are
   implemented for SQLite-backed job state.
-- Background pruning remains deferred to Phase 8D; Phase 8B pruning is explicit.
+- Background lease recovery runs on `JOB_MAINTENANCE_INTERVAL_SECS`.
+- Optional background terminal-job pruning runs when `JOB_PRUNE_INTERVAL_SECS`
+  is configured. Manual `POST /v1/jobs/prune` remains available.
 
 ### Worker-pull claim decision
 

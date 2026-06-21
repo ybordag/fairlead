@@ -170,6 +170,11 @@ impl RoutingMetrics {
         }
     }
 
+    #[cfg(test)]
+    pub fn render_for_tests(&self) -> String {
+        self.render()
+    }
+
     fn render(&self) -> String {
         let guard = self.inner.lock().expect("routing metrics mutex poisoned");
         let mut body = String::from(

@@ -155,6 +155,13 @@ async fn main() -> anyhow::Result<()> {
         callback_policy,
         jobs,
     );
+    scheduler::spawn_lease_recovery_loop(
+        state.clone(),
+        Duration::from_secs(cfg.job_maintenance_interval_secs),
+    );
+    if let Some(interval_secs) = cfg.job_prune_interval_secs {
+        scheduler::spawn_job_pruning_loop(state.clone(), Duration::from_secs(interval_secs));
+    }
     let app = build_router(state);
 
     let addr: SocketAddr = format!("0.0.0.0:{}", cfg.port).parse()?;

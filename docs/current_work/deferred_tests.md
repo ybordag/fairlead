@@ -4,6 +4,34 @@ Tests that are useful but intentionally deferred because they need heavier
 fixtures or a CI-friendly demo harness. The low-risk unit and proxy tests
 previously listed here have been implemented.
 
+## Summary
+
+There are now 18 actionable deferred test groups plus one Phase 7 umbrella index
+after consolidating duplicate Phase 8 process-level cases. Most are not missing
+unit coverage; they need process lifecycle control, port allocation, fake
+backends/workers, callback receiver processes, SQLite restart checks, remote
+DGX access, or future cloud/provider features.
+
+Phase 8E should make the biggest dent. Once a reusable local process harness
+exists, we should be able to implement the local process portions of roughly 11
+groups:
+
+- local routing demo smoke coverage
+- Phase 7A startup/config validation
+- Phase 7B sync pool routing process e2e
+- Phase 7C async worker pool process e2e
+- Phase 7D strict worker pool process e2e
+- Phase 7D strict workload pool process e2e
+- consolidated Phase 8 scheduler hardening process e2e
+- Phase 6C local worker claim/lease process e2e
+- Phase 6D local worker execution/utilization process e2e
+- Phase 6E SQLite restart/recovery process e2e
+- Phase 6F callback delivery process e2e
+
+The remaining groups stay deferred after 8E because they need real DGX Spark
+hosts, future cloud/provider features, storage fault injection, or heavier
+concurrency/stress infrastructure.
+
 ---
 
 ## Demo Harness
@@ -104,29 +132,23 @@ allocation, log capture, and timeout handling.
 
 ### `phase_7_pool_placement_e2e_matrix`
 
-After Phase 7B and 7C consume the validated policy, add local and DGX Spark e2e
-tests for complete pool placement behavior:
+Umbrella tracker for complete pool placement behavior. The canonical test cases
+are split below by harness type:
 
-- synchronous workload pool allowlists select only eligible backend pools
-- ordered pool fallback chains behave as documented
-- pool policy interacts correctly with origin locality, affinity, resource
-  ranking, circuit state, and same-request retry
-- async workers register with pools and only claim jobs whose workload can use
-  that worker pool
-- strict worker pool mode accepts configured worker pools and rejects typos
-  before rejected workers appear in `GET /v1/workers`
-- omitted worker pools deserialize to `default`, and strict mode accepts or
-  rejects that default based on whether `default` is configured or derived
-- strict workload pool mode fails process startup when explicit policy is absent
-  or partial, and starts when every known workload has policy
-- per-pool metrics report candidate counts, selected pool/backend or worker,
-  no-compatible-pool cases, fallback reasons, and capacity pressure
-- local mock e2e and two-node DGX Spark e2e use the same sanitized pool config
-  shape
+- local synchronous routing: `phase_7b_sync_pool_routing_process_e2e`
+- DGX synchronous routing: `phase_7b_dgx_sync_pool_routing_smoke_test`
+- local async worker placement: `phase_7c_async_worker_pool_process_e2e`
+- DGX async worker placement: `phase_7c_dgx_async_worker_pool_smoke_test`
+- strict worker pool validation:
+  `phase_7d_strict_worker_pool_registration_process_e2e`
+- strict workload pool validation:
+  `phase_7d_strict_workload_pool_startup_process_e2e`
+- DGX strict pool validation:
+  `phase_7d_dgx_strict_pool_registration_smoke_test`
 
-**Why deferred:** Phase 7A intentionally stops at config and validation. The
-routing, async placement, and deployment behavior belongs to Phase 7B through
-7D and needs a richer process/deployment harness.
+**Why deferred:** The local cases need the Phase 8E-style process harness. The
+DGX cases need remote host access, fake worker lifecycle management, vLLM
+startup, and deployment log collection.
 
 ### `phase_7b_sync_pool_routing_process_e2e`
 
@@ -313,173 +335,103 @@ future phase, add e2e coverage for mixed local/peer/cloud placement:
 registration, cost/rate-limit policy, or a CI-safe cloud test fixture. This
 belongs with the future cloud overflow phase rather than Phase 7D.
 
-### `phase_8a_worker_lifecycle_process_e2e`
+### `phase_8e_scheduler_hardening_process_harness`
 
-Add an opt-in process-level e2e for worker drain, reactivation, and
-deregistration:
+Consolidated process-level e2e backlog for Phase 8A through 8D. This should be
+the first Phase 8E target because it unlocks most of the local deferred tests in
+one harness.
 
-- start Fairlead with local fake workers and SQLite job storage
+Harness requirements:
+
+- start and stop a Fairlead process with isolated ports and env vars
+- start fake async workers and callback receivers
+- use temporary SQLite job storage
+- poll `/health`, `/metrics`, `/v1/jobs`, and `/v1/workers`
+- support clean shutdown and forced restart
+- capture stdout/stderr or structured logs for startup and maintenance-loop
+  assertions
+
+Worker lifecycle cases:
+
 - register two workers for the same job type
 - drain one worker and verify preview/claim uses the other worker
 - reactivate the drained worker and verify it can claim new work again
 - delete an idle worker and verify it disappears from `GET /v1/workers`
-- claim a job, delete the busy worker, verify delete returns `202 Accepted`,
-  then complete the held job successfully while the worker is draining
-- renew a held lease after the busy worker has been deregistered into draining
-  state
-- report retryable and terminal failures after the busy worker has been
-  deregistered into draining state
-- verify a retryable failure from a draining worker is reassigned to another
-  compatible worker rather than reclaimed by the draining worker
-- verify repeated drain/reactivate/delete calls are safe when fake workers are
-  concurrently polling
-- restart Fairlead after worker lifecycle operations and verify documented
-  in-memory worker registry behavior remains clear
-- restart Fairlead with SQLite jobs while a worker was draining before restart,
-  and verify pending/running job recovery remains understandable despite the
-  intentionally in-memory worker registry
-- scrape `/metrics` and verify worker availability includes
-  `status="draining"` while drained workers are registered
-- run the same lifecycle sequence against two DGX Spark nodes with one worker on
-  each node and verify drain on the local node causes claims to move to the peer
-- verify an operator can delete the draining worker after its last held job
-  completes or fails
-- verify a drained worker that keeps heartbeating remains visible as draining,
-  not silently reactivated
-- verify a worker re-registering while drained remains drained until explicit
-  reactivation
+- delete a busy worker, verify `202 Accepted`, then renew/complete/fail the
+  held job while the worker is draining
+- verify retryable failure from a draining worker is reassigned to another
+  compatible worker
+- verify repeated drain/reactivate/delete calls are safe while fake workers poll
+- verify drained workers that heartbeat or re-register remain draining until
+  explicit reactivation
 - verify route ordering does not let `/v1/workers/{id}` shadow claim, drain,
-  reactivate, heartbeat, or result routes in a real HTTP process
-- verify graceful shutdown behavior when Fairlead receives drain/delete calls
-  while fake workers are polling and reporting results concurrently
+  reactivate, heartbeat, or result routes
 
-**Why deferred:** The in-process tests cover the registry and endpoint behavior.
-This e2e needs process lifecycle management, port allocation, fake worker
-scripts, SQLite job storage, restart assertions, and optional DGX Spark access.
+Retention, pruning, and maintenance cases:
 
-### `phase_8b_retention_pruning_process_e2e`
-
-Add an opt-in process-level e2e for terminal-job retention and pruning:
-
-- start Fairlead with `JOB_STORE=sqlite`, low `JOB_RETENTION_SECS`, and a small
-  `JOB_PRUNE_LIMIT`
+- start with `JOB_STORE=sqlite`, low `JOB_RETENTION_SECS`, small
+  `JOB_PRUNE_LIMIT`, short `JOB_MAINTENANCE_INTERVAL_SECS`, and optional
+  `JOB_PRUNE_INTERVAL_SECS`
 - submit jobs that complete, fail, cancel, remain queued, and remain running
 - create terminal jobs with pending and delivered callbacks
-- call `POST /v1/jobs/prune` and verify only eligible terminal jobs are removed
+- verify manual `POST /v1/jobs/prune` removes only eligible terminal jobs
 - verify pending-callback terminal jobs are retained until delivery succeeds
 - verify delivered-callback terminal jobs become prunable
-- verify queued and running jobs survive pruning and can still be claimed,
-  renewed, completed, failed, or cancelled afterward
-- restart Fairlead and verify pruned jobs stay absent while retained jobs
-  recover from SQLite
-- scrape `/metrics` and verify `fairlead_job_prunes_total{status}` increments
-  by terminal status
-- run a larger bounded-prune scenario where multiple prune calls are needed
-  because `JOB_PRUNE_LIMIT` is smaller than the eligible terminal set
-- verify `GET /v1/jobs` ordering remains stable for retained jobs after pruning
-- verify `GET /v1/jobs/{id}` returns `404` for pruned jobs and still returns
-  retained terminal/running/queued jobs
-- verify queue depth, queue wait, terminal duration, callback, and prune metrics
-  stay internally consistent after pruning
+- verify queued/running jobs survive manual and background pruning
 - verify repeated prune calls with no eligible jobs return `removed: 0` and do
   not create misleading prune metrics
-- verify invalid environment configuration fails startup for
-  `JOB_RETENTION_SECS` and `JOB_PRUNE_LIMIT`
-- verify a large SQLite database with many terminal jobs can be pruned in
-  bounded batches without blocking request handling for an unacceptable time
-- verify pruning does not delete or corrupt callback delivery state for pending
-  callbacks across a restart
-- verify pruning after failed callback attempts retains the job until delivery
-  succeeds or a future callback-retention policy explicitly allows removal
-
-**Why deferred:** In-process tests cover registry behavior, SQLite persistence,
-the endpoint response, and metrics. This e2e needs process lifecycle
-management, port allocation, callback receiver processes, SQLite restart
-assertions, and timing control around retention age.
-
-### `phase_8c_idempotency_process_e2e`
-
-Add an opt-in process-level e2e for async job idempotency:
-
-- start Fairlead with `JOB_STORE=sqlite`
-- submit a job with `idempotency_key`, simulate a client retry with the same
-  body, and verify both responses return the same job ID
-- restart Fairlead and retry the same submission again, verifying the recovered
-  SQLite registry still returns the original job instead of enqueueing a
-  duplicate
-- fire many concurrent `POST /v1/jobs` requests with the same `idempotency_key`
-  against a real Fairlead process and verify only one job is created
-- reuse the same key with a different payload, callback URL, priority, or job
-  type and verify Fairlead rejects the request without mutating queue depth
-- submit an overlong or blank `idempotency_key` through the process-level API
-  and verify Fairlead rejects the request without mutating queue depth
-- complete, fail, or cancel the original job, then retry the original submit
-  and verify it still returns the retained terminal job while that job has not
-  been pruned
-- cancel a queued job, retry `DELETE /v1/jobs/{id}` before and after restart,
-  and verify the existing cancelled job is returned without duplicate callback
-  delivery or queue metric mutation
-- attempt to cancel completed and failed jobs and verify the process-level API
-  still returns conflict
-- complete a leased job with `attempt`, retry the same completion before and
-  after restart, and verify Fairlead returns the existing terminal job without
-  duplicate callback delivery or worker capacity mutation
-- retry terminal completion with the same worker/attempt but a different result
-  payload and verify Fairlead returns conflict
-- terminally fail a leased job with `attempt`, retry the same failure before and
-  after restart, and verify Fairlead returns the existing terminal job without
-  duplicate callback delivery or worker capacity mutation
-- retry terminal failure with the same worker/attempt but a different error or
-  retryable flag and verify Fairlead returns conflict
-- report complete/fail with a mismatched running lease attempt and verify
-  Fairlead rejects the report
-- prune the retained terminal job after it becomes eligible, then reuse the
-  same idempotency key and verify Fairlead creates a new job
-- run the same sequence while fake workers are concurrently claiming jobs to
-  verify duplicate submits never create duplicate running leases
-- race duplicate terminal result reports against fresh worker claims and verify
-  idempotent replay never releases capacity for a different in-flight job
-- simulate a crash after a worker terminal result is accepted but before the
-  worker receives the HTTP response, then retry the result after restart and
-  verify terminal-attempt metadata makes the retry idempotent
-- scrape `/metrics` during the flow and verify queue depth, queue wait, terminal
-  duration, and prune metrics remain internally consistent
-- run the submit/retry/restart sequence against the DGX Spark two-node setup
-  with fake async workers so network retries and process restarts are exercised
-  without real model execution
-
-**Why deferred:** In-process tests cover the registry, SQLite recovery, mismatch
-rejection, and pruning behavior. This e2e needs process lifecycle management,
-port allocation, SQLite restart assertions, fake workers, and optional DGX Spark
-access.
-
-### `phase_8d_background_maintenance_process_e2e`
-
-When Phase 8D adds background maintenance loops, add opt-in process-level e2e
-coverage for automatic lease expiry/recovery and background pruning:
-
-- start Fairlead with a short maintenance interval and SQLite job storage
-- submit a running job with an expired lease and verify the background loop
-  requeues or fails it without waiting for another worker claim
-- submit eligible terminal jobs and verify the background pruning loop removes
-  them without a manual `POST /v1/jobs/prune` call
-- verify the same pruning eligibility rules still apply in the background loop:
-  queued/running jobs are retained, recent terminal jobs are retained, and
-  pending-callback terminal jobs are retained
-- verify manual `POST /v1/jobs/prune` still works when the background loop is
-  enabled
-- verify background pruning respects the configured per-run prune limit and
-  makes progress across multiple intervals
-- verify background maintenance metrics or logs distinguish lease recovery from
-  pruning
-- restart Fairlead while a background maintenance interval is due and verify the
-  loop resumes without duplicating destructive work
+- verify manual prune works while background pruning is enabled
+- run manual prune concurrently with background pruning and verify pruning is
+  idempotent, bounded, and does not double-count metrics
+- verify background pruning respects the per-run prune limit and makes progress
+  across multiple intervals
+- verify omitting `JOB_PRUNE_INTERVAL_SECS` disables background pruning while
+  leaving manual pruning enabled
+- verify expired running leases requeue or fail through the background recovery
+  loop without waiting for another worker claim
+- verify exhausted expired leases dispatch terminal callbacks through the
+  background recovery loop after process restart
 - verify shutdown does not interrupt SQLite writes in a way that corrupts job
   state
 
-**Why deferred:** Phase 8D has not introduced background maintenance tasks yet.
-These tests need process lifecycle control, deterministic maintenance timing,
-SQLite restart checks, and log/metric scraping.
+Idempotency and restart cases:
+
+- submit a job with `idempotency_key`, retry the same body before and after
+  restart, and verify all responses return the same job ID
+- reuse the same key with a different payload, callback URL, priority, or job
+  type and verify rejection without queue mutation
+- submit overlong or blank `idempotency_key` values through the process API and
+  verify rejection without queue mutation
+- complete, fail, or cancel the original job, then retry the original submit and
+  verify it returns the retained terminal job until pruning removes it
+- retry `DELETE /v1/jobs/{id}` for an already-cancelled job before and after
+  restart without duplicate callback delivery
+- retry exact terminal complete/fail reports with `attempt` before and after
+  restart without duplicate callback delivery or worker-capacity mutation
+- retry contradictory terminal complete/fail reports and verify conflict
+- report complete/fail with a mismatched running lease attempt and verify
+  rejection
+- prune a retained terminal job, reuse the same idempotency key, and verify a
+  new job is created
+- simulate crash after accepting a terminal result but before the worker
+  receives the HTTP response; retry after restart and verify terminal-attempt
+  metadata makes the retry idempotent
+
+Metrics and config cases:
+
+- scrape `/metrics` and verify worker availability, queue depth, queue wait,
+  terminal duration, callback, prune, and maintenance-related behavior remain
+  internally consistent
+- verify invalid env configuration fails startup for `JOB_RETENTION_SECS`,
+  `JOB_PRUNE_LIMIT`, `JOB_MAINTENANCE_INTERVAL_SECS`, and
+  `JOB_PRUNE_INTERVAL_SECS`
+- verify logs or metrics distinguish lease recovery from pruning
+
+**Why deferred:** In-process tests cover registry, endpoint, SQLite, callback,
+idempotency, pruning, and maintenance-loop behavior. These cases need a
+CI-friendly process harness with port allocation, process restart, fake worker
+scripts, callback receivers, SQLite files, log capture, and deterministic
+maintenance timing.
 
 ### `phase_6c_worker_claims_and_leases`
 
@@ -488,8 +440,6 @@ reporting, add tests for:
 
 - concurrent cancellation versus complete/fail requests against the same leased
   job
-- background lease sweep behavior, if Fairlead adds a scheduler loop instead of
-  claim-time opportunistic sweeps only
 - opt-in local multi-process e2e: start Fairlead, register two fake workers,
   submit jobs, claim/renew/cancel/requeue through HTTP, and assert final job
   state and metrics
@@ -505,9 +455,10 @@ unsupported job types, priority ordering, FIFO ordering, queued/running
 cancellation basics, claim-time expired lease requeue/failure, lease renewal,
 renewal ownership checks, and cancellation ordering around running leases and
 requeued jobs. Halyard adds result endpoints, timeout state, capacity
-accounting, and duration metrics. The remaining race and e2e tests need a
-heavier multi-process/deployment harness. Halyard's in-process suite covers
-duplicate result reports after terminal state.
+accounting, and duration metrics. Clove covers background lease recovery in
+process. The remaining race and e2e tests should share the Phase 8E
+multi-process harness or the DGX deployment harness. Halyard's in-process suite
+covers duplicate result reports after terminal state.
 
 ### `phase_6d_worker_execution_and_utilization`
 

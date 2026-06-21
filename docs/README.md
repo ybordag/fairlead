@@ -38,6 +38,10 @@ detail.
 
 ## Current Work
 
+- [`current_work/phase_8d_clove.md`](current_work/phase_8d_clove.md) —
+  active Phase 8D background maintenance loop notes.
+- [`current_work/phase_8c_splice.md`](current_work/phase_8c_splice.md) —
+  completed Phase 8C idempotency notes.
 - [`current_work/phase_8b_stopper.md`](current_work/phase_8b_stopper.md) —
   completed Phase 8B terminal-job retention and pruning notes.
 - [`current_work/phase_8a_bowline.md`](current_work/phase_8a_bowline.md) —
