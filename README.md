@@ -7,10 +7,10 @@ health, circuit state, and session affinity.
 
 The name comes from sailing: a fairlead is a fitting that guides lines in exactly the right direction without friction or fouling.
 
-**Status:** Phase 4 complete. Fairlead currently runs as an Axum HTTP service
-with `/health`, `/metrics`, `/v1/chat/completions`, and `/v1/embeddings`.
-The `bluewater` branch is the generalization effort to make Fairlead useful
-beyond a single application.
+**Status:** Phase 5 is scoped and ready for PR on the `trim` branch. Fairlead
+currently runs as an Axum HTTP service with `/health`, `/metrics`,
+`/v1/resources`, `/v1/resources/report`, `/v1/chat/completions`, and
+`/v1/embeddings`.
 
 ---
 
@@ -29,8 +29,16 @@ The current service provides:
 - **Origin-node locality** through `X-Fairlead-Origin-Node`.
 - **Same-request retry** across eligible backends for connection failures,
   timeouts, and 5xx responses before response bytes are streamed.
+- **Cooperative resource reporting** through `/v1/resources/report` and
+  `/v1/resources`, with stale-report detection.
+- **Priority metadata** through `X-Fairlead-Priority` with `realtime`, `batch`,
+  and `background` values. Missing priority defaults to `realtime`.
+- **Per-priority admission limits** for synchronous proxy requests. A full
+  priority bucket fails fast with `429 Too Many Requests` instead of silently
+  overloading the service.
 - **Prometheus-style metrics** for backend circuit state, request outcomes,
-  latency, fallback reasons, and retry reasons.
+  latency, fallback reasons, retry reasons, priority limits/in-flight counts,
+  and reported resource state.
 
 Fairlead does **not** run inference itself. It routes requests to model servers
 such as vLLM. vLLM owns model loading, GPU execution, KV cache management, and
@@ -39,12 +47,12 @@ those model servers.
 
 ---
 
-## Bluewater Direction
+## Roadmap Direction
 
-Bluewater is the effort to make Fairlead a general-purpose local/edge compute
-router rather than a Rhizome-specific proxy.
+Fairlead is intended to become a general-purpose local/edge compute router rather
+than a Rhizome-specific proxy.
 
-Planned work includes:
+Implemented generalization work includes:
 
 - **Workload abstraction** for chat, embeddings, rerank, vision, batch jobs, and
   future non-OpenAI-compatible adapters.
@@ -56,13 +64,17 @@ Planned work includes:
   other GPU consumers.
 - **Richer retry policy and observability** for retry reasons, retry counts, and
   backend-level outcomes.
-- **Priority queues and async jobs** for background work that should yield to
-  realtime user requests.
+- **Priority admission limits** for synchronous requests that should fail fast
+  instead of overloading a saturated priority bucket.
 - **Workload-aware observability** for selected backend, fallback reason,
-  latency, queue depth, and resource state.
+  latency, priority admission, and resource state.
 
-See [`docs/bluewater_generalization.md`](docs/bluewater_generalization.md) for
-the implementation plan and acceptance criteria.
+Future phases add durable priority queues, async jobs, worker registration,
+backend pools, `/v1/models`, adapter boundaries, queue wait-time metrics, and
+cloud fallback.
+
+See [`docs/planning/roadmap.md`](docs/planning/roadmap.md) for the
+implementation plan and acceptance criteria.
 
 ---
 
@@ -80,7 +92,7 @@ Fairlead
     └── vLLM on spark-b
 ```
 
-Intended Bluewater topology:
+Intended future topology:
 
 ```
 Applications / agents
@@ -139,9 +151,9 @@ BACKENDS_JSON='[
 ]' PORT=7000 cargo run
 ```
 
-`BACKENDS` remains the simplest local setup path. `BACKENDS_JSON` is the
-Bluewater configuration path for stable backend IDs, node identity, backend
-pools, and workload support. By default, health probes append `models` to the
+`BACKENDS` remains the simplest local setup path. `BACKENDS_JSON` is the richer
+configuration path for stable backend IDs, node identity, backend pools, and
+workload support. By default, health probes append `models` to the
 backend API base URL, so `http://spark-a:8000/v1` is probed at
 `http://spark-a:8000/v1/models`. Backends that expose health elsewhere can set
 `health_path`, for example `"/health"`.
@@ -158,6 +170,45 @@ Metrics:
 curl http://localhost:7000/metrics
 ```
 
+Resource report:
+
+```bash
+curl http://localhost:7000/v1/resources/report \
+  -H 'content-type: application/json' \
+  -d '{"node_id":"spark-a","backend_id":"spark-a-vllm","total_vram_mb":64000,"reserved_vram_mb":16000,"current_load":0.25}'
+```
+
+Current resource state:
+
+```bash
+curl http://localhost:7000/v1/resources
+```
+
+Resource-aware routing is opt-in. When enabled, Fairlead skips healthy backends
+that do not have a fresh report with enough available VRAM for the workload,
+then ranks eligible fallback candidates by lower load and higher available VRAM:
+
+```bash
+RESOURCE_AWARE_ROUTING=true \
+CHAT_COMPLETIONS_REQUIRED_VRAM_MB=1024 \
+EMBEDDINGS_REQUIRED_VRAM_MB=512 \
+cargo run
+```
+
+Priority admission limits are synchronous request caps, not durable queues. Tune
+them with:
+
+```bash
+PRIORITY_REALTIME_LIMIT=8 \
+PRIORITY_BATCH_LIMIT=4 \
+PRIORITY_BACKGROUND_LIMIT=2 \
+cargo run
+```
+
+When a bucket is full, Fairlead returns `429 Too Many Requests` and records
+`outcome="priority_limited"` in request metrics. Full priority queues, wait-time
+metrics, and async job scheduling remain future scheduler work.
+
 Chat completions are proxied to one of the configured backends:
 
 ```bash
@@ -165,16 +216,17 @@ curl http://localhost:7000/v1/chat/completions \
   -H 'content-type: application/json' \
   -H 'X-Fairlead-Origin-Node: spark-a' \
   -H 'X-Fairlead-Thread-Id: demo-thread' \
+  -H 'X-Fairlead-Priority: realtime' \
   -d '{"model":"local-model","messages":[{"role":"user","content":"hello"}]}'
 ```
 
-## Bluewater Demo
+## Routing Demo
 
 Run the GPU-free local demo to see locality, fallback, same-request retry,
 recovery, metrics, and structured traces:
 
 ```bash
-./demo/run_bluewater_demo.sh
+./demo/run_routing_demo.sh
 ```
 
 The demo starts two mock OpenAI-compatible backends named `spark-a` and
@@ -197,8 +249,8 @@ DGX Spark node
         API: http://<node-hostname>:8000/v1
 ```
 
-See [`docs/dgx_spark_deployment.md`](docs/dgx_spark_deployment.md) for the
-manual two-node deployment notes using vLLM, `uv`, and Fairlead.
+See [`docs/implementation/dgx_spark_deployment.md`](docs/implementation/dgx_spark_deployment.md)
+for the manual two-node deployment notes using vLLM, `uv`, and Fairlead.
 
 ---
 
@@ -219,18 +271,24 @@ what the model result means.
 
 ## Documentation
 
-- [`docs/architecture.md`](docs/architecture.md) — system architecture,
-  vLLM/Fairlead responsibilities, and the spark-a/spark-b routing example.
-- [`docs/code_walkthrough.md`](docs/code_walkthrough.md) — Rust code walkthrough
-  from process startup to proxied response.
-- [`docs/bluewater_generalization.md`](docs/bluewater_generalization.md) —
-  generalization plan, feature epics, and acceptance criteria.
-- [`docs/dgx_spark_deployment.md`](docs/dgx_spark_deployment.md) — manual
-  deployment notes for two DGX Spark nodes connected over InfiniBand.
-- [`docs/fixture_examples.md`](docs/fixture_examples.md) — conventions for
-  sanitized test fixtures and ignored local deployment config.
-- [`demo/README.md`](demo/README.md) — GPU-free Bluewater routing demo.
-- [`docs/deferred_tests.md`](docs/deferred_tests.md) — known test gaps.
+Start with [`docs/README.md`](docs/README.md) for the full documentation map.
+
+- [`docs/planning/architecture.md`](docs/planning/architecture.md) — system
+  architecture, vLLM/Fairlead responsibilities, and the spark-a/spark-b routing
+  example.
+- [`docs/implementation/code_walkthrough.md`](docs/implementation/code_walkthrough.md)
+  — Rust code walkthrough from process startup to proxied response.
+- [`docs/planning/design.md`](docs/planning/design.md) — design horizon and
+  longer-term product shape.
+- [`docs/planning/roadmap.md`](docs/planning/roadmap.md) — generalization plan,
+  feature epics, and acceptance criteria.
+- [`docs/implementation/dgx_spark_deployment.md`](docs/implementation/dgx_spark_deployment.md)
+  — manual deployment notes for two DGX Spark nodes connected over InfiniBand.
+- [`docs/implementation/fixture_examples.md`](docs/implementation/fixture_examples.md)
+  — conventions for sanitized test fixtures and ignored local deployment config.
+- [`demo/README.md`](demo/README.md) — GPU-free routing demo.
+- [`docs/current_work/deferred_tests.md`](docs/current_work/deferred_tests.md) —
+  known test gaps.
 
 ---
 

@@ -15,6 +15,41 @@ impl WorkloadKind {
     pub fn default_proxy_workloads() -> Vec<Self> {
         vec![Self::ChatCompletions, Self::Embeddings]
     }
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::ChatCompletions => "chat_completions",
+            Self::Embeddings => "embeddings",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Priority {
+    #[default]
+    Realtime,
+    Batch,
+    Background,
+}
+
+impl Priority {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Realtime => "realtime",
+            Self::Batch => "batch",
+            Self::Background => "background",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_lowercase().as_str() {
+            "realtime" => Some(Self::Realtime),
+            "batch" => Some(Self::Batch),
+            "background" => Some(Self::Background),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -77,6 +112,20 @@ pub struct Config {
     pub circuit_cooldown_secs: u64,
     /// Seconds between background health probes per backend. Default: 10.
     pub health_probe_interval_secs: u64,
+    /// Seconds before a resource report is considered stale. Default: 30.
+    pub resource_report_ttl_secs: u64,
+    /// Enable resource-aware backend eligibility. Default: false.
+    pub resource_aware_routing: bool,
+    /// Coarse VRAM estimate for chat completion requests. Default: 1024 MB.
+    pub chat_completions_required_vram_mb: u64,
+    /// Coarse VRAM estimate for embedding requests. Default: 512 MB.
+    pub embeddings_required_vram_mb: u64,
+    /// Max in-flight realtime requests. Default: 8.
+    pub priority_realtime_limit: usize,
+    /// Max in-flight batch requests. Default: 4.
+    pub priority_batch_limit: usize,
+    /// Max in-flight background requests. Default: 2.
+    pub priority_background_limit: usize,
 }
 
 impl Config {
@@ -115,6 +164,40 @@ impl Config {
                 .unwrap_or_else(|_| "10".to_string())
                 .parse()
                 .map_err(|e| anyhow!("invalid HEALTH_PROBE_INTERVAL_SECS: {}", e))?,
+
+            resource_report_ttl_secs: get("RESOURCE_REPORT_TTL_SECS")
+                .unwrap_or_else(|_| "30".to_string())
+                .parse()
+                .map_err(|e| anyhow!("invalid RESOURCE_REPORT_TTL_SECS: {}", e))?,
+
+            resource_aware_routing: get("RESOURCE_AWARE_ROUTING")
+                .map(|v| v.to_lowercase() == "true")
+                .unwrap_or(false),
+
+            chat_completions_required_vram_mb: get("CHAT_COMPLETIONS_REQUIRED_VRAM_MB")
+                .unwrap_or_else(|_| "1024".to_string())
+                .parse()
+                .map_err(|e| anyhow!("invalid CHAT_COMPLETIONS_REQUIRED_VRAM_MB: {}", e))?,
+
+            embeddings_required_vram_mb: get("EMBEDDINGS_REQUIRED_VRAM_MB")
+                .unwrap_or_else(|_| "512".to_string())
+                .parse()
+                .map_err(|e| anyhow!("invalid EMBEDDINGS_REQUIRED_VRAM_MB: {}", e))?,
+
+            priority_realtime_limit: get("PRIORITY_REALTIME_LIMIT")
+                .unwrap_or_else(|_| "8".to_string())
+                .parse()
+                .map_err(|e| anyhow!("invalid PRIORITY_REALTIME_LIMIT: {}", e))?,
+
+            priority_batch_limit: get("PRIORITY_BATCH_LIMIT")
+                .unwrap_or_else(|_| "4".to_string())
+                .parse()
+                .map_err(|e| anyhow!("invalid PRIORITY_BATCH_LIMIT: {}", e))?,
+
+            priority_background_limit: get("PRIORITY_BACKGROUND_LIMIT")
+                .unwrap_or_else(|_| "2".to_string())
+                .parse()
+                .map_err(|e| anyhow!("invalid PRIORITY_BACKGROUND_LIMIT: {}", e))?,
         })
     }
 }
@@ -245,6 +328,18 @@ mod tests {
     }
 
     #[test]
+    fn priority_parse_accepts_known_values_case_insensitively() {
+        assert_eq!(Priority::parse("realtime"), Some(Priority::Realtime));
+        assert_eq!(Priority::parse("BATCH"), Some(Priority::Batch));
+        assert_eq!(Priority::parse(" background "), Some(Priority::Background));
+    }
+
+    #[test]
+    fn priority_parse_rejects_unknown_values() {
+        assert_eq!(Priority::parse("urgent"), None);
+    }
+
+    #[test]
     fn backends_empty_by_default() {
         let cfg = Config::from_lookup(env(&[])).unwrap();
         assert!(cfg.backends.is_empty());
@@ -256,6 +351,13 @@ mod tests {
         assert_eq!(cfg.circuit_failure_threshold, 3);
         assert_eq!(cfg.circuit_cooldown_secs, 30);
         assert_eq!(cfg.health_probe_interval_secs, 10);
+        assert_eq!(cfg.resource_report_ttl_secs, 30);
+        assert!(!cfg.resource_aware_routing);
+        assert_eq!(cfg.chat_completions_required_vram_mb, 1024);
+        assert_eq!(cfg.embeddings_required_vram_mb, 512);
+        assert_eq!(cfg.priority_realtime_limit, 8);
+        assert_eq!(cfg.priority_batch_limit, 4);
+        assert_eq!(cfg.priority_background_limit, 2);
     }
 
     #[test]
@@ -264,11 +366,25 @@ mod tests {
             ("CIRCUIT_FAILURE_THRESHOLD", "5"),
             ("CIRCUIT_COOLDOWN_SECS", "60"),
             ("HEALTH_PROBE_INTERVAL_SECS", "15"),
+            ("RESOURCE_REPORT_TTL_SECS", "45"),
+            ("RESOURCE_AWARE_ROUTING", "true"),
+            ("CHAT_COMPLETIONS_REQUIRED_VRAM_MB", "2048"),
+            ("EMBEDDINGS_REQUIRED_VRAM_MB", "256"),
+            ("PRIORITY_REALTIME_LIMIT", "16"),
+            ("PRIORITY_BATCH_LIMIT", "6"),
+            ("PRIORITY_BACKGROUND_LIMIT", "3"),
         ]))
         .unwrap();
         assert_eq!(cfg.circuit_failure_threshold, 5);
         assert_eq!(cfg.circuit_cooldown_secs, 60);
         assert_eq!(cfg.health_probe_interval_secs, 15);
+        assert_eq!(cfg.resource_report_ttl_secs, 45);
+        assert!(cfg.resource_aware_routing);
+        assert_eq!(cfg.chat_completions_required_vram_mb, 2048);
+        assert_eq!(cfg.embeddings_required_vram_mb, 256);
+        assert_eq!(cfg.priority_realtime_limit, 16);
+        assert_eq!(cfg.priority_batch_limit, 6);
+        assert_eq!(cfg.priority_background_limit, 3);
     }
 
     #[test]
@@ -299,6 +415,46 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("invalid HEALTH_PROBE_INTERVAL_SECS"));
+    }
+
+    #[test]
+    fn invalid_resource_report_ttl_returns_err() {
+        let result = Config::from_lookup(env(&[("RESOURCE_REPORT_TTL_SECS", "abc")]));
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("invalid RESOURCE_REPORT_TTL_SECS"));
+    }
+
+    #[test]
+    fn invalid_chat_required_vram_returns_err() {
+        let result = Config::from_lookup(env(&[("CHAT_COMPLETIONS_REQUIRED_VRAM_MB", "abc")]));
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("invalid CHAT_COMPLETIONS_REQUIRED_VRAM_MB"));
+    }
+
+    #[test]
+    fn invalid_embeddings_required_vram_returns_err() {
+        let result = Config::from_lookup(env(&[("EMBEDDINGS_REQUIRED_VRAM_MB", "abc")]));
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("invalid EMBEDDINGS_REQUIRED_VRAM_MB"));
+    }
+
+    #[test]
+    fn invalid_priority_limit_returns_err() {
+        let result = Config::from_lookup(env(&[("PRIORITY_REALTIME_LIMIT", "abc")]));
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("invalid PRIORITY_REALTIME_LIMIT"));
     }
 
     #[test]

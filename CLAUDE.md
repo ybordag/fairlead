@@ -2,23 +2,25 @@
 
 ## What this project is
 
-Fairlead is a priority-aware compute task router written in Rust. It routes LLM
-inference requests and async compute jobs across local GPU nodes and cloud providers,
-manages circuit breaking and session failover, and tracks VRAM consumption across
-all GPU consumers on the cluster.
+Fairlead is a priority-aware compute task router written in Rust. It currently
+routes synchronous OpenAI-compatible inference requests across local GPU nodes,
+manages circuit breaking and session failover, and tracks cooperative VRAM/load
+reports from model servers and other GPU consumers.
 
-It exposes an OpenAI-compatible inference API and a generic async job API. The
-inference path is synchronous (request → response). The job path is async
-(submit → job_id → callback on completion).
+It exposes an OpenAI-compatible inference API. A generic async job API is planned
+for a later phase. The inference path is synchronous (request → response). The
+future job path is async (submit → job_id → callback on completion).
 
-See `design.md` for the full architecture.
+See `docs/planning/design.md` for the design horizon and
+`docs/planning/architecture.md` for the current architecture.
 
 ## Related repos
 
 - **Rhizome** (Python) — the agent. Points its model client at Fairlead `/v1`.
-  Submits async compute jobs (vision, embeddings, indexing) to Fairlead `/v1/jobs`.
+  Will submit async compute jobs to Fairlead once the Phase 6B job API exists.
 - **Cambium** (Go) — the API gateway. Calls Rhizome; Rhizome calls Fairlead.
-- **Fairlead** (this repo, Rust) — routes to vLLM on spark-a/spark-b or cloud fallback.
+- **Fairlead** (this repo, Rust) — routes to vLLM on spark-a/spark-b; cloud
+  fallback is a future phase.
 
 ## Tech stack
 
@@ -49,7 +51,8 @@ cargo watch -x run
 
 ## Current status
 
-**Phase 4 complete** (spinnaker → main). **Phase 5 in progress** (trim branch).
+**Phase 4 complete** (spinnaker → main). **Phase 5 scoped on trim**: resource-aware
+synchronous routing plus priority admission, without durable queues or async jobs.
 
 | Phase | Branch | Status |
 |---|---|---|
@@ -57,13 +60,14 @@ cargo watch -x run
 | 2 — Transparent proxy | telltale → main | ✅ complete |
 | 3 — Circuit breaker + health | batten → main | ✅ complete |
 | 4 — Fallback chain + session affinity | spinnaker → main | ✅ complete |
-| 5 — VRAM accounting + priority queues | trim | 🔨 in progress |
-| 6 — Async job dispatch | — | pending |
+| 5 — VRAM accounting + priority admission | trim | ready for PR |
+| 6A — Synchronous surface cleanup | — | pending |
+| 6B — Async job dispatch | — | pending |
 | 7 — Advanced compute + full metrics | — | pending |
 
 ## Project layout
 
-**What exists now (Phases 1–4):**
+**What exists now (Phases 1–5):**
 
 ```
 src/
@@ -72,6 +76,8 @@ src/
   error.rs          — FairleadError enum with IntoResponse impl
   health.rs         — GET /health → {"status":"ok"}
   metrics.rs        — GET /metrics → Prometheus circuit_state gauge per backend
+  priority.rs       — per-priority synchronous admission limiter
+  resources.rs      — POST/GET resource reports for VRAM/load control-plane state
   router/
     mod.rs          — module entry point
     circuit.rs      — CircuitBreaker: Closed/Open/HalfOpen state machine
@@ -83,7 +89,7 @@ src/
     types.rs        — OpenAI-compatible request/response serde structs
 ```
 
-**Planned layout (Phases 5–7):**
+**Planned layout (Phases 6–7):**
 
 ```
 src/
@@ -91,8 +97,6 @@ src/
 
   router/
     ...  (circuit.rs, backend.rs, fallback.rs, affinity.rs as above)
-    priority.rs        — priority-aware request scheduling (realtime/batch/background)
-
   jobs/
     mod.rs             — async job API: submit, query, dispatch
     queue.rs           — three-tier priority queue (realtime > batch > background)
@@ -114,10 +118,15 @@ src/
 ```
 POST /v1/chat/completions    — OpenAI-compatible, streaming supported
 POST /v1/embeddings          — OpenAI-compatible embedding generation
+```
+
+Planned for Phase 6A:
+
+```text
 GET  /v1/models              — list available backends/models
 ```
 
-### Async jobs
+### Planned async jobs
 
 ```
 POST   /v1/jobs              — submit a job, returns job_id immediately
@@ -135,7 +144,7 @@ Job request body:
 }
 ```
 
-### Worker registration
+### Planned worker registration
 
 ```
 POST   /v1/workers/register     — worker announces: job types, VRAM cost, endpoint
@@ -146,12 +155,11 @@ GET    /v1/workers              — list registered workers and their status
 ### VRAM accounting
 
 ```
-POST   /v1/vram/register        — consumer reports allocation: node, name, mb
-DELETE /v1/vram/register/{id}   — release on shutdown
-GET    /v1/vram                 — current VRAM state per node
+POST   /v1/resources/report     — consumer reports node/backend VRAM and load
+GET    /v1/resources            — current resource state per node/backend
 ```
 
-## Priority queue model
+## Priority model
 
 Every request — inference or job — carries one of three priority levels:
 
@@ -161,8 +169,12 @@ Every request — inference or job — carries one of three priority levels:
 | `batch`      | Vision analysis, per-request embeddings (user submitted but not blocked) | Scheduled when no realtime demand |
 | `background` | Knowledge base ingestion, index rebuilds, clustering | Scheduled only when both higher tiers are idle |
 
-Fairlead implements this with three Tokio channels and a scheduler that always
-drains higher-priority channels before accepting lower-priority work:
+Current synchronous proxy behavior is admission limiting, not queueing. Each
+priority has its own in-flight cap. If the cap is full, Fairlead returns `429`
+and records `outcome="priority_limited"`.
+
+Future async job scheduling should use three Tokio channels and a scheduler that
+always drains higher-priority channels before accepting lower-priority work:
 
 ```rust
 tokio::select! {
@@ -172,8 +184,10 @@ tokio::select! {
 }
 ```
 
-This guarantees a user is never queued behind a background knowledge base rebuild,
-even when the GPU is heavily loaded.
+The current limiter guarantees a full lower-priority bucket does not block a
+higher-priority bucket. The future queued scheduler should guarantee that a user
+is never queued behind a background knowledge base rebuild, even when the GPU is
+heavily loaded.
 
 ## Job types
 
@@ -198,20 +212,35 @@ Priority: `background`. CPU or GPU (cuML) depending on available worker.
 
 ## Environment variables
 
+Current implementation:
+
 ```
 PORT                         — listen port (default: 7000)
 BACKENDS                     — comma-separated backend URLs in priority order
                                e.g. http://node-a:8000/v1,http://node-b:8000/v1
-CLOUD_PROVIDERS              — JSON array of cloud provider configs (url, api_key_env)
+BACKENDS_JSON                — structured backend config with id, url, node_id,
+                               pool, workloads, and health_path
+LOG_LEVEL                    — tracing level: error, warn, info, debug, trace (default: info)
+LOG_FORMAT                   — "json" for structured JSON logs
 CIRCUIT_FAILURE_THRESHOLD    — consecutive failures to open circuit (default: 3)
 CIRCUIT_COOLDOWN_SECS        — seconds before half-open probe (default: 30)
-SESSION_AFFINITY             — "thread" | "user" (default: "thread")
+HEALTH_PROBE_INTERVAL_SECS   — seconds between background health probes (default: 10)
+RESOURCE_REPORT_TTL_SECS     — seconds before a resource report is stale (default: 30)
+RESOURCE_AWARE_ROUTING       — enable resource-aware eligibility (default: false)
+CHAT_COMPLETIONS_REQUIRED_VRAM_MB — coarse chat request estimate (default: 1024)
+EMBEDDINGS_REQUIRED_VRAM_MB  — coarse embedding request estimate (default: 512)
 PRIORITY_REALTIME_LIMIT      — max concurrent realtime requests (default: 8)
-PRIORITY_BATCH_LIMIT         — max concurrent batch jobs (default: 4)
-PRIORITY_BACKGROUND_LIMIT    — max concurrent background jobs (default: 2)
-JOB_CALLBACK_TIMEOUT_SECS   — time to attempt callback delivery (default: 30)
-WORKER_HEARTBEAT_SECS        — interval workers must heartbeat or be deregistered (default: 30)
-LOG_LEVEL                    — tracing level: error, warn, info, debug, trace (default: info)
+PRIORITY_BATCH_LIMIT         — max concurrent batch-priority sync requests (default: 4)
+PRIORITY_BACKGROUND_LIMIT    — max concurrent background-priority sync requests (default: 2)
+```
+
+Planned later phases may add:
+
+```text
+CLOUD_PROVIDERS              — JSON array of cloud provider configs
+SESSION_AFFINITY             — configurable affinity key policy
+JOB_CALLBACK_TIMEOUT_SECS    — time to attempt callback delivery
+WORKER_HEARTBEAT_SECS        — interval before a worker is considered stale
 ```
 
 ## Build phases
@@ -245,34 +274,74 @@ LOG_LEVEL                    — tracing level: error, warn, info, debug, trace 
 - Multiple backends in priority order; try next on circuit-open or retryable error
 - `SessionAffinity`: `thread_id → preferred_backend` (`Arc<RwLock<HashMap>>`)
 - Soft affinity: prefer known backend, fall back if unavailable or overloaded
-- Cloud provider support (OpenAI, Gemini, Anthropic — same OpenAI-compatible interface)
+- Same-request retry for retryable upstream failures before bytes are streamed
 - Test: primary down → secondary; same thread_id routes to same node while available
 
-### Phase 5 — VRAM accounting and priority queues
+### Phase 5 — VRAM accounting and priority admission
 
-- `VramRegistry`: per-node consumer list with allocated MB
-- `POST /v1/vram/register` and `DELETE /v1/vram/register/{id}`
-- Router checks available VRAM before selecting a backend
-- Three-tier priority queue with Tokio channels (realtime / batch / background)
-- Scheduler drains higher-priority channels before accepting lower-priority work
-- Inference requests carry a `X-Fairlead-Priority` header (default: `realtime`)
-- Test: backend with insufficient VRAM is skipped; background jobs yield to realtime
+- `ResourceRegistry`: per-node/backend resource reports with VRAM, load, and TTL
+- `POST /v1/resources/report` and `GET /v1/resources`
+- Router checks available VRAM before selecting a backend when
+  `RESOURCE_AWARE_ROUTING=true`; after locality and affinity, it prefers lower
+  reported load and then higher available VRAM
+- Inference requests carry a `X-Fairlead-Priority` header (default:
+  `realtime`)
+- Synchronous proxy requests are admitted through per-priority in-flight limits:
+  `realtime`, `batch`, and `background`
+- A full synchronous priority bucket returns `429 Too Many Requests`; it does not
+  wait in a durable queue
+- Priority limit and in-flight gauges are exposed on `/metrics`
+- Durable three-tier queues with Tokio channels are deferred to the async job
+  scheduler
+- Test: backend with insufficient VRAM is skipped; a full batch bucket does not
+  block realtime admission
 
-### Phase 6 — Async job dispatch
+### Phase 6A — Synchronous surface cleanup
+
+- Move route-specific behavior into workload metadata.
+- Add route metadata: path, method, streaming behavior, retry policy, backend
+  pool, and metric labels.
+- Split backend configuration by pool so different synchronous workloads can
+  target different backend sets.
+- Decide whether session affinity is global, per workload, or per backend pool.
+- Add provider/header forwarding policy for content type, authorization,
+  organization/project headers, and provider-specific opt-in headers.
+- Add `GET /v1/models` backed by configured workloads and backend metadata.
+- Keep cloud-provider fallback and provider credentials deferred unless a demo or
+  deployment path needs external overflow capacity.
+
+### Phase 6B — Async job dispatch
 
 - Job API: `POST /v1/jobs`, `GET /v1/jobs/{id}`, `DELETE /v1/jobs/{id}`
+- Durable priority queues with queue depth and queue wait-time metrics
 - Worker registration API: `POST /v1/workers/register`, heartbeat, deregister
+- Worker availability and utilization metrics
 - Workers declare: job types they handle, VRAM cost per job, endpoint URL
 - Scheduler: match job type → registered workers; pick based on VRAM headroom and load
+- Job manager: bounded attempts, leases, timeouts, retry limits, cancellation,
+  and completed-job pruning
+- Persistence path: in-memory for focused tests, SQLite first for local durable
+  state, Postgres later for multiple Fairlead instances
 - Callback delivery: on completion, POST to `callback_url` with result payload; retry on failure
+- Job duration and callback success/failure metrics
 - Built-in job types: `vision_analysis`, `embed_batch`
 - Test: submit vision job → dispatched to registered worker → callback fires with result
+
+Temporal is deferred. Fairlead owns compute job orchestration; Rhizome owns
+domain workflow state. Add Temporal only if Rhizome starts needing durable
+multi-step workflows with long waits, fanout/fanin, or compensation logic.
 
 ### Phase 7 — Advanced compute jobs and full metrics
 
 - `index_build` job type: pgvector (CPU) and FAISS (GPU) backends
 - `cluster` job type: k-means and HDBSCAN via registered compute worker
+- Adapter boundaries for non-OpenAI-compatible synchronous and async endpoints,
+  such as rerank, image generation, and vision analysis
 - GPU-aware job scheduling: prefer GPU worker for index/cluster; fall back to CPU worker
+- Richer resource dimensions beyond coarse VRAM/load when needed: CPU slots, GPU
+  slots, model residency, disk bandwidth, or custom worker capacity
+- Cloud-provider fallback and credential policy if local/edge deployment needs
+  external overflow capacity
 - Full Prometheus `/metrics`: requests_total, queue_depth per priority, job_duration,
   worker_utilization, vram_used per node, circuit_state per backend
 - Test: index_build job completes and callback fires; metrics reflect job throughput
@@ -291,22 +360,23 @@ LOG_LEVEL                    — tracing level: error, warn, info, debug, trace 
 - **Circuit breaker state is the routing source of truth.** Always check circuit
   state before selecting a backend. Never route to an open circuit.
 
-- **Priority is always respected.** The scheduler must never dispatch a `background`
-  job while a `realtime` request is waiting. This is the central guarantee Fairlead
-  makes to its callers.
+- **Priority is always respected.** Current synchronous requests use separate
+  in-flight caps per priority. The future queued scheduler must never dispatch a
+  `background` job while a `realtime` request is waiting.
 
 - **VRAM accounting is cooperative.** Fairlead cannot read GPU memory directly.
-  Fail safe: treat unregistered consumers as using zero VRAM (invisible to
-  accounting). This can cause OOM — document it clearly and encourage registration.
-  Never assume VRAM is available if it has not been reported.
+  When resource-aware routing is enabled, backends without fresh reports are
+  ineligible. Unreported external consumers are still invisible to accounting,
+  so document that limitation and encourage registration.
 
 - **Fairlead is application-agnostic.** Job payloads are opaque to Fairlead's
   routing logic. It does not know what `vision_analysis` means, what a plant is,
   or what a `thread_id` represents. It routes jobs to workers. Keep it that way.
 
-- **Jobs do not store results.** Fairlead holds job status (`queued`, `running`,
-  `complete`, `failed`) and fires the callback. It does not persist results —
-  the caller's callback handler is responsible for storing them.
+- **Future jobs do not store domain results.** Fairlead should hold job status
+  (`queued`, `running`, `complete`, `failed`) and fire the callback. It should
+  not persist application results; the caller's callback handler is responsible
+  for storing them.
 
 - **Streaming responses must be proxied without buffering.** Use reqwest's
   streaming body and Axum's `StreamBody`. Collecting the full response body

@@ -1,13 +1,20 @@
 # Fairlead — Design Document
 
-**Status:** Initial design
+**Status:** Design horizon; current implementation is documented in
+[`../../README.md`](../../README.md), [`architecture.md`](architecture.md), and
+[`../implementation/code_walkthrough.md`](../implementation/code_walkthrough.md).
 **Version:** 0.1
 
 ---
 
 ## What it is
 
-Fairlead is a resource router for AI agent systems. It sits between an agent application and its compute backend, routing inference requests to the right hardware, managing agent worker processes, and handling failover when nodes become unavailable.
+Fairlead is a resource router for AI agent systems. It sits between an agent
+application and its compute backends, routing inference requests to the right
+hardware, tracking cooperative capacity reports, and handling failover when
+nodes become unavailable. Future phases add async job scheduling for registered
+compute workers, but Fairlead should not supervise or restart those worker
+processes itself.
 
 The name comes from sailing: a fairlead is a fitting that guides lines in exactly the right direction without friction or fouling. It does not generate power or hold cargo — it ensures that what needs to flow, flows correctly.
 
@@ -23,7 +30,9 @@ An AI agent application that makes LLM calls against local hardware faces severa
 - **No cloud fallback.** When local hardware is saturated, requests queue indefinitely or are dropped.
 - **No VRAM awareness.** Multiple GPU consumers (LLM serving, vision sidecars, embedding servers) compete for memory with no coordination, causing OOM failures.
 - **No session continuity.** A mid-session node failure has no recovery path.
-- **No worker management.** The application has no way to scale agent processes or restart crashed ones.
+- **No compute-worker dispatch.** The application has no infrastructure-level
+  way to submit bounded compute jobs, select eligible workers, enforce leases,
+  or retry failed attempts.
 
 Solving these problems inside the application couples infrastructure concerns to business logic. Fairlead solves them as a separate infrastructure layer.
 
@@ -31,17 +40,34 @@ Solving these problems inside the application couples infrastructure concerns to
 
 ## Interface
 
-Fairlead exposes an **OpenAI-compatible HTTP endpoint**. Any client that speaks the OpenAI API speaks Fairlead — LangChain, LlamaIndex, the `openai` SDK, or a raw HTTP client — without modification.
+Fairlead exposes an **OpenAI-compatible HTTP endpoint**. Any client that speaks
+the OpenAI API can speak to Fairlead — LangChain, LlamaIndex, the `openai` SDK,
+or a raw HTTP client — without modification.
+
+Current implemented endpoints:
 
 ```
 POST /v1/chat/completions
 POST /v1/embeddings
-GET  /v1/models
 GET  /health
 GET  /metrics
+POST /v1/resources/report
+GET  /v1/resources
 ```
 
-The application points its model client at `http://fairlead/v1` instead of a cloud endpoint. Routing, failover, and worker management happen transparently behind that address.
+Planned endpoints:
+
+```text
+GET  /v1/models
+POST /v1/jobs
+GET  /v1/jobs/{id}
+POST /v1/workers/register
+```
+
+The application points its model client at `http://fairlead/v1` instead of a
+single model-server endpoint. Routing, failover, resource-aware backend
+eligibility, and priority admission happen transparently behind that address.
+Worker registration and async job dispatch are future phases.
 
 ---
 
@@ -81,26 +107,34 @@ Per-node circuit breakers prevent cascading failures:
 
 The circuit opens after N consecutive failures or a response timeout threshold. It half-opens after a configurable cooldown.
 
-### 4. Agent worker pool
+### 4. Future worker registry
 
-Manages the pool of agent application processes:
+Future Fairlead phases may manage a registry of compute workers:
 
-- Maintains N configured worker processes
-- Restarts crashed workers automatically
-- Routes incoming agent requests to available workers (least-busy)
-- Exposes worker pool health through the `/health` and `/metrics` endpoints
+- Tracks registered worker processes and their capabilities
+- Marks workers stale when heartbeats expire
+- Dispatches jobs to available workers based on workload support, resource
+  reports, and priority policy
+- Exposes worker health through the `/health` and `/metrics` endpoints
 
-This is separate from inference routing. The worker pool manages application-layer processes; the inference router manages GPU-layer capacity.
+This is separate from process supervision. k3s, Docker, or systemd should restart
+crashed worker processes. Fairlead should track worker capabilities and dispatch
+jobs, not own application domain logic.
 
 ### 5. VRAM accounting
 
-Maintains a real-time view of GPU memory consumption across all consumers on each node:
+Maintains a cooperative view of GPU memory consumption across reported consumers
+on each node:
 
 - Primary LLM serving process
 - MCP sidecar processes (vision servers, embedding servers)
 - Any other registered GPU consumers
 
-VRAM accounting is cooperative: each consumer registers its allocation at startup and releases at shutdown. The router uses this view to avoid scheduling requests onto nodes that cannot serve them without going OOM. Consumers that do not register are invisible to the accounting layer.
+VRAM accounting is cooperative: each consumer reports its allocation/load, and
+the router uses this view to avoid scheduling requests onto nodes that cannot
+serve them without going OOM. Consumers that do not report are invisible to the
+accounting layer, so this is a control-plane hint rather than CUDA-level memory
+management.
 
 ### 6. Session failover
 
@@ -157,8 +191,7 @@ models but requires vLLM's distributed serving mode and adds latency.
 ```
   1. vLLM on spark-a           (local, fast, no API cost)
   2. vLLM on spark-b           (local secondary, if spark-a is down)
-  3. Gemini Flash           (cloud, cheap + fast)
-  4. Claude Haiku           (cloud, last resort)
+  3. future cloud provider  (overflow, if configured)
 ```
 
 ---
@@ -193,7 +226,7 @@ it on crash, or allocate GPU resources. That is k3s's job.
 
 ## Extensibility
 
-- **Async embedding service** — `/v1/embeddings` with its own routing and batching
+- **Async embedding service** — future job queue for batch embeddings
 - **Context chunking service** — async chunking for RAG pipelines, job-queue backed
 - **Additional agent applications** — each registers its own worker pool
 

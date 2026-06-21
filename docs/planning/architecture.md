@@ -15,12 +15,13 @@ Cambium          Go API gateway — auth, provider key management, SSE proxy
   ↓  HTTP /internal/agent (SSE)
 Rhizome          Python LangGraph agent — 93 tools, planning, triage, DB
   ↓  HTTP /v1/chat/completions (OpenAI-compatible)
-Fairlead         Rust compute router — inference, job dispatch, circuit breaking
+Fairlead         Rust compute router — inference routing, resource admission, circuit breaking
   ↓  HTTP /v1
 vLLM             Python model server — GPU inference on spark-a
-  OR
-Cloud APIs       Gemini, Claude, OpenAI — fallback when local is unavailable
 ```
+
+Future phases may add async job dispatch and cloud-provider fallback, but those
+are not part of the current synchronous proxy surface.
 
 **Cambium** handles everything external-facing: verifies JWT tokens, decrypts the
 user's stored API key, injects it into the Rhizome request. It knows about users
@@ -30,9 +31,11 @@ and sessions. It does not know about gardens.
 weather → triage → LLM → tools → loop. It knows about plants, projects, tasks,
 incidents. It does not know which GPU served its last LLM call.
 
-**Fairlead** is a compute infrastructure layer. It receives OpenAI-compatible
-requests and async job submissions. It knows about nodes, VRAM, circuit states,
-and job queues. It does not know what a garden is.
+**Fairlead** is a compute infrastructure layer. Today it receives
+OpenAI-compatible synchronous requests. Its planned async surface will also
+receive job submissions. It knows about nodes, reported VRAM/load, circuit
+states, priority admission, and future job queues. It does not know what a
+garden is.
 
 **vLLM** serves the model. It knows about GPU memory, batching, and
 PagedAttention. It knows nothing above itself.
@@ -77,9 +80,9 @@ client or agent
 ### GPU resource management
 
 Fairlead does not manage GPU memory at the CUDA allocator level. vLLM and other
-GPU workers manage their own memory internally. Fairlead's future role is
-admission control: decide where work is allowed to go based on reported capacity,
-health, priority, and current load.
+GPU workers manage their own memory internally. Fairlead's role is admission
+control: decide where work is allowed to go based on reported capacity, health,
+priority, and current load.
 
 There are three separate layers:
 
@@ -89,9 +92,9 @@ There are three separate layers:
 | Process placement | k3s / Docker / systemd | Start, stop, restart, and place containers |
 | Request admission | Fairlead | Pick backend, skip unhealthy nodes, avoid oversubscribed resources |
 
-The planned VRAM accounting model is cooperative. GPU consumers register their
-resource use with Fairlead, and Fairlead uses that control-plane view to avoid
-sending new work to nodes without enough reported headroom.
+The current VRAM/load accounting model is cooperative. GPU consumers report
+their resource use to Fairlead, and Fairlead uses that control-plane view to
+avoid sending new work to nodes without enough reported headroom.
 
 Example:
 
@@ -109,10 +112,11 @@ on workers and model servers reporting capacity, or on future node probes that
 publish capacity into Fairlead's registry. This is why the resource registry is a
 scheduler input, not the source of truth for GPU execution.
 
-The current code implements only the gateway part: backend selection, circuit
-breaking, health probing, soft affinity, streaming proxying, and basic metrics.
-VRAM accounting, priority queues, worker registration, and async job dispatch are
-planned later phases.
+The current code implements the synchronous gateway path: backend selection,
+circuit breaking, health probing, soft affinity, streaming proxying, resource
+reporting, resource-aware backend eligibility, priority admission, and basic
+metrics. Durable priority queues, worker registration, and async job dispatch
+are planned later phases.
 
 ### Rhizome example: spark-a and spark-b
 
@@ -138,7 +142,7 @@ flowchart LR
     vllm_a --> gpu_a["spark-a GPU"]
     vllm_b --> gpu_b["spark-b GPU"]
 
-    fairlead -. planned .-> registry["Resource registry health + VRAM + load + locality"]
+    fairlead --> registry["Resource registry health + VRAM + load + locality"]
     registry -. informs .-> fairlead
 ```
 
@@ -149,8 +153,8 @@ Rhizome request starts on spark-a
   -> prefer vLLM on spark-a, because same-node traffic should have lower latency
   -> if spark-a vLLM is unhealthy, overloaded, or lacks reported GPU headroom,
      route to spark-b vLLM
-  -> if both local GPU backends are unavailable or full, either queue by priority
-     or fall back to a cloud provider, depending on policy
+  -> if both local GPU backends are unavailable or full, return 503 today
+     (future phases may queue or use cloud fallback)
 ```
 
 The same applies in reverse for a Rhizome request that starts on spark-b:
@@ -159,11 +163,12 @@ The same applies in reverse for a Rhizome request that starts on spark-b:
 Rhizome request starts on spark-b
   -> prefer vLLM on spark-b
   -> if spark-b is unavailable or full, route to spark-a
-  -> if both are unavailable or full, queue or cloud fallback
+  -> if both are unavailable or full, return 503 today
+     (future phases may queue or use cloud fallback)
 ```
 
-To make this work, Fairlead needs more metadata than the current Phase 4 code
-has:
+To make this work, Fairlead uses metadata that was added across the generalized
+proxy and Trim work:
 
 - **Backend node identity:** each backend must know whether it lives on `spark-a`,
   `spark-b`, or another node.
@@ -173,8 +178,8 @@ has:
   reserved VRAM, current load, or an equivalent schedulable signal.
 - **Workload metadata:** chat completions, embeddings, vision jobs, and batch
   jobs may have different resource estimates and priority rules.
-- **Queue policy:** realtime inference may fail fast or wait briefly; background
-  jobs can queue longer and yield to realtime work.
+- **Queue policy:** current synchronous requests fail fast by priority-admission
+  limit; future background jobs can queue longer and yield to realtime work.
 
 With those inputs, the router can make a decision like:
 
@@ -186,16 +191,18 @@ prefer backend on request origin node
 then prefer existing session affinity
 then prefer lower load / higher free capacity
 if none eligible:
-  queue, return 503, or fall back to cloud according to workload policy
+  return 503 now; future phases may queue or fall back to cloud by workload policy
 ```
 
-Current Fairlead implements the first locality-aware slice: backends can carry
-`node_id` metadata, requests can carry `X-Fairlead-Origin-Node`, and the router
-prefers an eligible same-node backend before falling back to affinity or
-configured order. It does not yet implement VRAM-aware routing, backend-pool
-selection, queueing, or cloud fallback. The full spark-a/spark-b behavior above
-is the intended Bluewater/Fairlead direction once resource accounting and
-priority queues are added.
+Current Fairlead implements locality-aware routing and an opt-in
+resource-aware slice. Backends can carry `node_id` metadata, requests can carry
+`X-Fairlead-Origin-Node`, and workers/backends can report resource state through
+`/v1/resources/report`. When `RESOURCE_AWARE_ROUTING=true`, the router skips
+backends without a fresh report that satisfies the workload's coarse VRAM
+estimate, applies locality and affinity precedence, then ranks remaining
+eligible candidates by lower reported load, higher available VRAM, and
+configured order. It does not yet implement backend-pool selection, durable
+queueing, or cloud fallback.
 
 ---
 
@@ -208,7 +215,12 @@ Two distinct surfaces.
 ```
 POST /v1/chat/completions   — receive, select backend, proxy, stream back
 POST /v1/embeddings         — same pattern for embedding requests
-GET  /v1/models             — list available backends
+```
+
+Planned synchronous surface:
+
+```text
+GET /v1/models              — list configured backend/model metadata
 ```
 
 Every inference request goes through a decision pipeline:
@@ -216,25 +228,34 @@ Every inference request goes through a decision pipeline:
 ```
 request arrives
   → check priority (realtime / batch / background)
+  → acquire a synchronous admission slot for that priority, or return 429
   → find eligible backends (circuit closed + VRAM headroom)
   → check session affinity (prefer same node for KV cache)
   → proxy to selected backend, stream response back
   → if backend fails: try next in fallback chain
-  → if all local fail: try cloud providers
+  → if all eligible backends fail: return 502/503
 ```
 
 ### Surface 2: Async job dispatch
 
+This is planned for Phase 6B, not implemented in the current synchronous proxy.
+The design belongs in the architecture because it defines Fairlead's boundary:
+Fairlead should be a compute control plane, not a general-purpose workflow
+engine.
+
 ```
 POST /v1/jobs        — submit, get job_id immediately
 GET  /v1/jobs/{id}   — poll status
+DELETE /v1/jobs/{id} — cancel queued or running work when supported
 ```
 
 ```
 job submitted
   → queued by priority (realtime > batch > background)
   → scheduler selects a registered worker with matching job type + VRAM headroom
+  → Fairlead records a bounded lease for the running attempt
   → worker processes async
+  → worker completes or heartbeats before the lease expires
   → callback fires to caller on completion
 ```
 
@@ -246,12 +267,158 @@ job submitted
 
 **Supporting infrastructure:**
 - `POST /v1/workers/register` — workers announce capabilities and VRAM cost
-- `POST /v1/vram/register` — GPU consumers report allocation
+- `POST /v1/resources/report` — GPU consumers and workers report capacity
+- `GET /v1/resources` — current resource control-plane state
 - `GET /metrics` — Prometheus: queue depth, circuit states, VRAM per node
+- Persistent job state for running attempts, retries, callbacks, and pruning.
+
+### Scheduler boundaries
+
+The scheduler exists because Fairlead can run for days, weeks, or indefinitely
+as a service while individual compute jobs should stay bounded. If an
+image-processing job runs longer than a few minutes, that is probably an
+execution failure, not a normal workflow that needs durable multi-day
+orchestration.
+
+Layer ownership should stay split this way:
+
+```text
+k3s / Docker:
+  run containers
+  restart crashed services
+  expose services
+  apply node labels and GPU placement constraints
+
+Fairlead:
+  accept compute jobs
+  queue by priority
+  select workers/backends by health, node, workload, and resources
+  track job attempts
+  enforce timeouts and leases
+  retry failed compute attempts
+  expose job status
+  deliver callbacks
+
+Rhizome:
+  own garden/user/domain state
+  create VisionJob records
+  interpret model results
+  create incidents, interactions, and user-visible records
+  reconcile pending domain work
+
+Temporal, if added later:
+  durable multi-step workflow orchestration
+  long waits
+  fanout/fanin
+  cross-service retries and compensation
+  recovery of product workflows after crashes
+```
+
+Fairlead should know where compute can run. It should not know what a plant
+diagnosis means or which user-facing record should be created.
+
+### Scheduler state model
+
+The Fairlead scheduler should treat jobs as bounded state machines:
+
+```text
+pending
+  -> leased/running
+  -> succeeded
+  -> failed
+  -> cancelled
+```
+
+Failure paths:
+
+```text
+leased/running
+  -> timed_out -> retry_pending or failed
+  -> worker_lost -> retry_pending or failed
+  -> cancelled
+```
+
+The key mechanism is a lease. When a worker starts a job, Fairlead records the
+worker ID and a `lease_expires_at` timestamp. The worker must complete or
+heartbeat before the lease expires. If it does not, Fairlead releases any
+resource reservation and either retries the job on another worker or marks it
+failed. This avoids holding an open process relationship for days; Fairlead only
+stores job state and watches bounded leases.
+
+The first useful workload is `vision_analysis`: a user-triggered image workflow
+that should outrank background indexing but yield to realtime chat or retrieval.
+
+### Scheduler persistence
+
+An in-memory queue is acceptable for a prototype demo, but production-like
+Fairlead should persist job state. The scheduler mostly needs durable state
+transitions, not a massive distributed datastore.
+
+Core records look relational:
+
+```text
+job_id
+status
+priority
+workload_kind
+worker_id
+attempt_count
+lease_expires_at
+created_at
+updated_at
+input_ref
+result_ref
+error
+callback_url
+callback_status
+```
+
+Common scheduler operations must be atomic:
+
+```text
+claim the oldest pending high-priority job
+mark it running
+increment attempt_count
+set lease_expires_at
+reserve resources
+```
+
+Recommended persistence path:
+
+- **SQLite first:** good for a local appliance, single Fairlead process, demos,
+  and portfolio deployment. It is durable, inspectable, transactional, and does
+  not require another service.
+- **Postgres later:** better when multiple Fairlead instances need to coordinate
+  safely. Row locking and transactions map well to job claiming and leases.
+- **Redis optionally:** useful for fast queues, pub/sub, rate limits, or caches,
+  but less ideal as the canonical job history and recovery database.
+- **NATS JetStream or RabbitMQ optionally:** useful when broker semantics become
+  more important than direct SQL-backed job state.
+- **Kafka/Redpanda:** useful for high-throughput event logs and replay, likely
+  overkill for Fairlead's early scheduler.
+- **Cassandra:** not a good fit unless Fairlead becomes a massive distributed
+  event store. It makes ordering, leases, transactions, and debugging harder than
+  this project needs.
+
+### When Temporal becomes worth it
+
+Temporal is useful if Rhizome workflows become more complex than bounded compute
+jobs. Signs that Temporal is justified:
+
+- Steps wait for hours or days.
+- A workflow fans out to many workers and collects partial results.
+- Only failed branches should retry.
+- Multiple services must be updated with compensation logic.
+- Cancellations can happen halfway through a multi-step workflow.
+- Recovery after service restart would otherwise require rebuilding a workflow
+  engine inside Rhizome or Fairlead.
+
+Until then, Fairlead should provide compute job orchestration, and Rhizome should
+own the domain-level VisionJob state machine.
 
 ---
 
-## The priority queue model
+## Priority Admission Now, Priority Queues Later
 
 The core scheduling guarantee:
 
@@ -261,8 +428,19 @@ The core scheduling guarantee:
 | `batch` | Vision jobs, async embeddings | User submitted and moved on. Schedule when no realtime demand. |
 | `background` | Index builds, clustering, KB ingestion | No user waiting. Only run when the GPU has nothing more important to do. |
 
-A background index rebuild that started at midnight will not slow down a user's
-chat response at 9am. This is enforced structurally, not by policy.
+The long-term goal is that a background index rebuild that started at midnight
+will not slow down a user's chat response at 9am. That will be enforced
+structurally by the future scheduler, not by application policy.
+
+Current Fairlead parses `X-Fairlead-Priority` on synchronous requests, defaults
+missing priority to `realtime`, rejects unknown values with `400`, enforces
+per-priority in-flight admission limits, and exposes priority on routing
+metrics.
+
+This is not yet a durable priority queue. A full synchronous bucket fails fast
+with `429 Too Many Requests`; Fairlead does not currently wait in a queue for
+capacity. Queue depth, queue wait time, starvation policy, and async job
+scheduling remain future scheduler work.
 
 ---
 
@@ -273,13 +451,19 @@ chat response at 9am. This is enforced structurally, not by policy.
 | 1 | Axum server, /health, config, tracing | Something that runs |
 | 2 | OpenAI proxy, single backend, streaming | Rhizome can call Fairlead instead of cloud |
 | 3 | Circuit breaker, health checks, basic /metrics | Automatic failover when vLLM crashes |
-| 4 | Fallback chain, session affinity, cloud providers | Full resilience across local + cloud |
-| 5 | VRAM accounting, priority queue | Vision sidecar coexists without OOM; background work yields to users |
-| 6 | Async job API, worker registration, callbacks | Vision and embedding jobs go through Fairlead |
-| 7 | Index/cluster job types, FAISS/GPU, full metrics | Advanced RAG indexing, complete observability |
+| 4 | Fallback chain, session affinity, same-request retry | Local resilience across configured backends |
+| 5 | Resource registry, VRAM accounting, priority admission | Synchronous inference avoids oversubscribed local GPUs and fails fast by priority |
+| 6A | Synchronous surface cleanup: workload metadata, backend pools, header policy, `/v1/models` | More synchronous workloads can share the proxy cleanly |
+| 6B | Async job API, durable priority queues, worker registration, leases, callbacks | Vision and embedding jobs go through Fairlead |
+| 7 | Adapter boundaries, index/cluster job types, FAISS/GPU, cloud fallback, full metrics | Advanced RAG indexing, external overflow, complete observability |
 
 Phases 1–3 give you a working proxy in a few days. Phases 4–5 give you
 production resilience. Phases 6–7 complete the async compute platform.
+
+Temporal is intentionally deferred. Fairlead's scheduler should handle bounded
+compute jobs with leases, retries, cancellation, callbacks, and recoverable job
+state. Temporal becomes useful later only if Rhizome needs durable multi-step
+business workflows with long waits, fanout/fanin, or compensation logic.
 
 ---
 
@@ -312,7 +496,7 @@ The type encodes the concurrency pattern.
 Fairlead's shared state objects, each `Arc`-wrapped and cloned into each handler
 and background task:
 - `Arc<RwLock<BackendMap>>` — backend states and circuit breakers
-- `Arc<RwLock<VramRegistry>>` — VRAM accounting per node
+- `Arc<RwLock<ResourceRegistry>>` — cooperative resource reports per node/backend
 - `Arc<RwLock<AffinityMap>>` — thread_id → preferred backend
 - `Arc<RwLock<WorkerRegistry>>` — registered job workers
 
@@ -329,7 +513,7 @@ This forces a clear architecture split.
 ```rust
 async fn handle_chat_completions(/* ... */) -> Response {
     let backend = router
-        .select_backend_excluding(&attempted)
+        .select_backend_excluding_resource(&attempted, &resource_state)
         .await;                                    // async: checks circuit state
     let response = client.post(&backend.url)
         .send().await?;                            // async: network I/O
@@ -373,10 +557,10 @@ you'd accidentally skip in a string-based approach.
 The same applies to job status, backend health, and priority levels. Everything
 with a finite set of states becomes an enum. Exhaustiveness is enforced.
 
-### 4. Channels replace shared queues
+### 4. Future queues use channels instead of shared queue locks
 
-The idiomatic Rust approach to the priority queue is Tokio channels — one per
-priority level — rather than a shared data structure with a lock:
+The future async job scheduler should use Tokio channels — one per priority
+level — rather than a shared queue data structure with a lock:
 
 ```rust
 let (realtime_tx, mut realtime_rx) = mpsc::channel::<Job>(256);

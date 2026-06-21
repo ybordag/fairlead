@@ -1,8 +1,8 @@
-# Bluewater Generalization Plan
+# Fairlead Roadmap
 
 ## Purpose
 
-Bluewater is the effort to make Fairlead a general compute router, not a
+This document tracks the effort to make Fairlead a general compute router, not a
 Rhizome-specific inference proxy.
 
 The intended shape is:
@@ -20,13 +20,13 @@ request or job
 OpenAI-compatible chat and embeddings are the first implemented workload types.
 They should remain first-class, but they should not define the whole system.
 
-## Bluewater Scope Boundary
+## Completed Generalized Proxy Scope Boundary
 
-Bluewater should finish the generalized synchronous inference proxy. It should
-make today's request path resilient, explainable, and demonstrable without
-starting the future scheduler or async job system.
+The completed generalized proxy work made today's request path resilient,
+explainable, and demonstrable without starting the future scheduler or async job
+system.
 
-Bluewater includes:
+Completed generalized proxy scope includes:
 
 - OpenAI-compatible synchronous proxying for chat completions and embeddings.
 - Node-aware backend metadata.
@@ -38,17 +38,49 @@ Bluewater includes:
 - A repeatable small-cluster or mock demo.
 - Documentation for local/edge deployment and sanitized fixtures.
 
-Bluewater does not include:
+The completed generalized proxy scope does not include:
 
 - Resource registry or VRAM-aware scheduling.
 - Resource-aware backend selection.
-- Priority queues.
+- Durable priority queues.
 - Async job submission, status, cancellation, worker registration, or callbacks.
 - Cloud-provider fallback and provider credential policy.
 - Full adapter implementations for non-OpenAI-compatible protocols.
 
-Those deferred items belong to later branches/phases so this branch stays a
-coherent synchronous-router milestone.
+Those deferred items belong to later branches/phases so each branch stays a
+coherent milestone.
+
+## Trim Scope Boundary
+
+Trim is the follow-on Phase 5 branch. It should finish resource-aware synchronous
+routing and priority admission without implementing the async compute scheduler.
+
+Trim includes:
+
+- Cooperative resource reports through `POST /v1/resources/report`.
+- Resource snapshots through `GET /v1/resources`.
+- Stale-report handling.
+- Resource-aware backend eligibility when `RESOURCE_AWARE_ROUTING=true`.
+- Load/headroom ranking among eligible backends.
+- Priority parsing for synchronous proxy requests.
+- Per-priority synchronous in-flight limits.
+- `429 Too Many Requests` when a synchronous priority bucket is full.
+- Priority limit and in-flight metrics.
+
+Trim does not include:
+
+- Durable priority queues.
+- Queue depth or queue wait-time metrics.
+- Worker registration, worker heartbeat, or worker utilization metrics.
+- Async job submission, status, cancellation, leases, retries, or callbacks.
+- Job duration metrics.
+- Backend pool splitting by workload.
+- Provider/header forwarding policy.
+- `/v1/models`.
+- Adapter boundaries for non-OpenAI-compatible protocols.
+- Cloud-provider fallback and credential policy.
+
+Those items are explicitly assigned to future phases below.
 
 ## Current Baseline
 
@@ -56,6 +88,8 @@ Fairlead currently provides:
 
 - Axum HTTP service with `/health`, `/metrics`, `/v1/chat/completions`, and
   `/v1/embeddings`.
+- Resource reporting and resource snapshots through `/v1/resources/report` and
+  `/v1/resources`.
 - Ordered backend selection from `BACKENDS`.
 - Per-backend circuit breakers with background health probes.
 - Health probes use derived or configured health URLs instead of probing the
@@ -64,8 +98,11 @@ Fairlead currently provides:
 - Origin-node locality through `X-Fairlead-Origin-Node`.
 - Streaming proxy support for Server-Sent Events.
 - Prometheus circuit-state, request, retry, fallback, and latency metrics.
+- Prometheus resource metrics and priority admission metrics.
 - Node-aware backend metadata through `BACKENDS_JSON`.
 - `WorkloadKind` metadata for chat completions and embeddings.
+- Resource-aware routing when enabled.
+- Per-priority synchronous admission limits.
 - Documentation for a manual two-node DGX Spark deployment.
 - Sanitized fixture conventions and ignore rules for private local config.
 
@@ -74,16 +111,16 @@ It does not yet provide:
 - Workload-aware route selection.
 - Separate backend pools by workload type.
 - Provider-specific auth/header policies.
-- VRAM or CPU resource accounting.
-- Priority queues.
+- CPU resource accounting and richer resource dimensions beyond coarse VRAM/load.
+- Durable priority queues.
 - Async job submission, status, cancellation, worker registration, or callbacks.
 
 ## Easy Tasks
 
 These should be achievable without changing the core architecture.
 
-- [x] Update `README.md` so it reflects the current runnable Phase 4 service and
-  the Bluewater generalization direction.
+- [x] Update `README.md` so it reflects the current runnable service and
+  generalization direction.
 - [ ] Add a short glossary for `backend`, `provider`, `worker`, `workload`,
   `route`, and `affinity` so future docs use the terms consistently.
 - [ ] Document the current supported workload shape: HTTP request in, selected
@@ -97,7 +134,8 @@ These should be achievable without changing the core architecture.
   observations.
 - [x] Add fixture/local-config hygiene docs and `.gitignore` rules for private
   local deployment files.
-- [x] Add the deferred low-risk tests listed in `docs/deferred_tests.md`.
+- [x] Add the deferred low-risk tests listed in
+  `docs/current_work/deferred_tests.md`.
 - [x] Run and require the current quality gate:
   `cargo fmt --check`, `cargo clippy --all -- -D warnings`, and `cargo test`.
 
@@ -139,8 +177,8 @@ system.
 
 ## Implementation Epics
 
-These are the first implementation-ready Bluewater epics. They turn the broad
-plan above into features with concrete acceptance criteria.
+These are the first implementation-ready epics. They turn the broad plan above
+into features with concrete acceptance criteria.
 
 ### 1. Node-Aware Backend Model
 
@@ -281,10 +319,11 @@ Acceptance criteria:
 - The same policy can later be pointed at real vLLM servers on spark-a and
   spark-b.
 
-## Deferred Future Epics
+## Detailed Epic Notes
 
-These epics are intentionally out of scope for Bluewater. They are listed here
-to preserve the plan without pulling future-branch work into the current branch.
+These notes preserve the implementation details behind completed and future
+phases. Completed Trim items remain checked here; unchecked items belong to the
+future phase named in the milestone proposal.
 
 ### Resource Registry v1
 
@@ -292,12 +331,12 @@ Goal: give Fairlead a simple control-plane view of node/backend capacity.
 
 Scope:
 
-- [ ] Define resource structs for node ID, backend ID, total VRAM, reserved VRAM,
+- [x] Define resource structs for node ID, backend ID, total VRAM, reserved VRAM,
   current load, and timestamp.
-- [ ] Add an in-memory registry guarded by `Arc<RwLock<_>>`.
-- [ ] Add registration/update endpoint for cooperative reporting.
-- [ ] Add stale-report handling.
-- [ ] Add tests for resource registration, update, stale expiry, and lookup.
+- [x] Add an in-memory registry guarded by `Arc<RwLock<_>>`.
+- [x] Add registration/update endpoint for cooperative reporting.
+- [x] Add stale-report handling.
+- [x] Add tests for resource registration, update, stale expiry, and lookup.
 
 Initial API sketch:
 
@@ -309,7 +348,8 @@ GET  /v1/resources
 Acceptance criteria:
 
 - vLLM or a mock worker can report capacity for `spark-a` and `spark-b`.
-- Fairlead can read the latest reported capacity during backend selection.
+- Fairlead can read the latest fresh report from the registry during backend
+  selection when resource-aware routing is enabled.
 - Stale reports stop being trusted after a configurable timeout.
 
 ### Resource-Aware Selection
@@ -318,11 +358,12 @@ Goal: incorporate resource state into synchronous backend selection.
 
 Scope:
 
-- [ ] Extend backend eligibility to include reported headroom or load.
-- [ ] Add workload-level resource estimates, starting with a coarse default for
+- [x] Extend backend eligibility to include reported headroom.
+- [x] Add workload-level resource estimates, starting with a coarse default for
   chat and embeddings.
-- [ ] Decide conservative behavior when no resource report exists.
-- [ ] Add tests for local backend full -> peer backend selected.
+- [x] Decide conservative behavior when no resource report exists.
+- [x] Add tests for local backend full -> peer backend selected.
+- [x] Rank eligible candidates by load/headroom after locality and affinity.
 
 Proposed decision pipeline:
 
@@ -341,8 +382,8 @@ Acceptance criteria:
 - If spark-a has capacity, requests from spark-a select spark-a.
 - If spark-a reports insufficient headroom, requests from spark-a select
   spark-b.
-- If both spark-a and spark-b are ineligible, Fairlead returns the configured
-  no-capacity behavior: queue, 503, or cloud fallback.
+- If both spark-a and spark-b are ineligible, Fairlead returns 503. Queueing and
+  cloud fallback remain future workload-policy work.
 
 ### Full Observability
 
@@ -351,7 +392,8 @@ and async-job behavior.
 
 Scope:
 
-- [ ] Add resource metrics for reported VRAM/load per node.
+- [x] Add resource metrics for reported VRAM/load per node.
+- [x] Add synchronous priority limit and in-flight gauges.
 - [ ] Add queue depth by priority and workload.
 - [ ] Add queue wait time by priority and workload.
 - [ ] Add worker availability and utilization.
@@ -401,11 +443,25 @@ Priority levels:
 - `batch`: user-triggered async work, such as vision analysis.
 - `background`: ingestion, index builds, clustering, cleanup.
 
+Implemented groundwork:
+
+- [x] Define the priority values.
+- [x] Parse `X-Fairlead-Priority` on synchronous requests.
+- [x] Default missing priority to `realtime`.
+- [x] Return `400` for unknown priority values.
+- [x] Add priority labels to synchronous request, retry, fallback, and latency
+  metrics.
+- [x] Enforce per-priority synchronous admission limits.
+- [x] Return `429` when a synchronous priority bucket is full.
+- [x] Expose per-priority limit and in-flight metrics.
+
 Hard parts:
 
 - Avoid starving background work forever during heavy realtime use.
-- Bound concurrency per workload and per resource pool.
-- Decide whether synchronous HTTP requests can queue or should fail fast.
+- Bound concurrency per workload and per resource pool, not only by coarse
+  priority.
+- Decide whether any synchronous HTTP requests should queue instead of failing
+  fast.
 - Make queue depth and wait time observable.
 - Keep strict priority without accidentally blocking the Tokio runtime.
 
@@ -429,16 +485,33 @@ Needed concepts:
 - Priority.
 - Payload.
 - Status: queued, running, complete, failed, cancelled.
+- Attempt count and retry limit.
+- Per-job timeout and worker lease expiration.
 - Callback URL and callback delivery state.
+- Resource reservation and release for running attempts.
 - Retry policy.
 - Expiration and cleanup.
 
 Open questions:
 
-- Is job state in memory first, or backed by a lightweight database?
+- Does the first implementation use in-memory state only, or SQLite-backed state?
 - Are completed results stored, or only status plus callback outcome?
 - How are duplicate submissions made idempotent?
 - How are cancellations propagated to workers?
+
+Early implementation scope:
+
+- Start with bounded compute jobs, not arbitrary long-running workflows.
+- Treat a multi-minute image-processing attempt as timed out unless the workload
+  opts into a longer timeout.
+- Use leases so Fairlead can recover from worker loss without holding an open
+  process relationship indefinitely.
+- Keep Rhizome as the source of truth for domain objects such as `VisionJob`.
+- Defer Temporal until product workflows need durable multi-step orchestration,
+  fanout/fanin, long waits, or compensation logic.
+
+See `docs/planning/architecture.md` for the scheduler boundary, persistence
+rationale, and Temporal deferral rule.
 
 ### Worker Registration
 
@@ -529,38 +602,75 @@ Docker, or the provider accounts themselves.
 
 ## Milestone Proposal
 
-### Bluewater 1: Generalized Synchronous Proxy
+### Phase 4/Completed: Generalized Synchronous Proxy
 
-- Complete the easy tasks.
-- Introduce `WorkloadKind`.
-- Add route/workload metadata.
-- Add backend pools.
-- Add provider/header policy.
-- Add `/v1/models`.
-- Clean up backend health probe targets.
-- Add basic same-request retry for safe synchronous upstream failures.
-- Add workload-aware routing metrics and retry/fallback counters.
-- Add a repeatable local mock demo.
+- [x] Complete the easy tasks that support the synchronous proxy.
+- [x] Introduce `WorkloadKind`.
+- [x] Clean up backend health probe targets.
+- [x] Add basic same-request retry for safe synchronous upstream failures.
+- [x] Add workload-aware routing metrics and retry/fallback counters.
+- [x] Add a repeatable local mock demo.
+- [ ] Move route-specific behavior into workload metadata. Deferred to
+  **Phase 6A: Synchronous Surface Cleanup**.
+- [ ] Add backend pools. Deferred to **Phase 6A: Synchronous Surface Cleanup**.
+- [ ] Add provider/header policy. Deferred to **Phase 6A: Synchronous Surface
+  Cleanup**.
+- [ ] Add `/v1/models`. Deferred to **Phase 6A: Synchronous Surface Cleanup**.
 
-### Bluewater 2: Resource-Aware Routing
+### Phase 5/Trim: Resource-Aware Routing and Priority Admission
 
-- Add resource registry.
-- Add resource-aware backend eligibility.
-- Add conservative behavior for unknown capacity.
-- Add resource metrics.
+- [x] Add resource registry.
+- [x] Add resource-aware backend eligibility.
+- [x] Add conservative behavior for unknown capacity.
+- [x] Add resource metrics.
+- [x] Add per-priority synchronous admission limits.
+- [x] Return 429 instead of queueing when a synchronous priority bucket is full.
 
-### Bluewater 3: Async Compute Router
+### Phase 6A: Synchronous Surface Cleanup
 
-- Add job API.
-- Add priority queues.
+This phase keeps the synchronous proxy surface clean before adding async jobs.
+It should not introduce queues, workers, or job state.
+
+- Move route-specific behavior out of `forward(state, path, headers, body)` and
+  into workload metadata.
+- Add route metadata for path, method, streaming behavior, retry policy, backend
+  pool, and metric labels.
+- Split backend configuration by pool so different synchronous workloads can
+  target different backend sets.
+- Decide whether session affinity is global, per workload, or per backend pool.
+- Add provider/header forwarding policy for content type, authorization,
+  organization/project headers, and provider-specific opt-in headers.
+- Add `GET /v1/models` backed by configured workloads and backend metadata.
+- Keep cloud-provider fallback and provider credentials deferred unless a clear
+  demo need appears.
+
+### Phase 6B: Async Compute Router
+
+- Add job API: submit, status, and cancellation.
+- Add durable priority queues.
+- Add queue depth and queue wait-time metrics by priority and workload.
 - Add worker registration and heartbeat.
+- Add worker availability and utilization metrics.
+- Add bounded job attempts with timeouts, leases, retry limits, and cancellation.
+- Add durable-enough job state, starting with in-memory state for tests and
+  SQLite as the first persistent backend.
 - Add callback delivery.
+- Add job duration and callback success/failure metrics.
 - Add async workload metrics.
+- Document Temporal as deferred unless Rhizome needs durable multi-step workflow
+  orchestration beyond compute dispatch.
 
-### Bluewater 4: Advanced Workloads
+### Phase 7: Advanced Workloads
 
-- Add adapters for rerank, image, vision, batch embeddings, index builds, and
-  clustering.
+- Add adapter boundaries for non-OpenAI-compatible synchronous and async
+  endpoints, such as `/v1/rerank`, image generation, and vision analysis.
+- Add concrete adapters for rerank, image, vision, batch embeddings, index
+  builds, and clustering.
 - Add cancellation and idempotency.
 - Add richer retry policies.
+- Add richer resource dimensions beyond coarse VRAM/load where workloads need
+  CPU slots, GPU slots, model residency, disk bandwidth, or custom worker
+  capacity.
+- Add cloud-provider fallback and provider credential policy if local/edge
+  deployment needs external overflow capacity.
 - Add deployment documentation for multiple applications sharing Fairlead.

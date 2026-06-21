@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Tiny OpenAI-compatible mock backend for the Bluewater demo."""
+"""Tiny OpenAI-compatible mock backend for the routing demo."""
 
 from __future__ import annotations
 

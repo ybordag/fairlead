@@ -14,6 +14,7 @@ start process
   -> start background health probes
   -> register HTTP routes
   -> accept requests
+  -> check priority admission
   -> pick an available backend
   -> proxy the request to that backend
   -> stream the response back
@@ -36,7 +37,7 @@ flowchart TD
     probes --> probe_loop["background health loop\nGET backend health URL"]
     probe_loop --> circuit
 
-    main --> app_state["AppState\nclient + backends + affinity"]
+    main --> app_state["AppState\nclient + backends + affinity + resources + priority limiter"]
     app_state --> router_build["build_router()"]
 
     router_build --> health_route["GET /health\nhealth::health()"]
@@ -47,8 +48,9 @@ flowchart TD
     chat_route --> forward["src/proxy/mod.rs\nforward()"]
     embed_route --> forward
 
+    forward --> priority["src/priority.rs\nPriorityLimiter::try_acquire()"]
     forward --> affinity_read["src/router/affinity.rs\nSessionAffinity::preferred()"]
-    forward --> select["src/router/fallback.rs\nselect_backend_excluding()"]
+    forward --> select["src/router/fallback.rs\nselect_backend_excluding_resource()"]
     select --> circuit
 
     forward --> reqwest["reqwest::Client\nPOST selected backend"]
@@ -67,8 +69,10 @@ Important shared state:
 
 - `CircuitBreaker` is shared by request handlers, health probes, and metrics.
 - `SessionAffinity` is shared by request handlers.
+- `PriorityLimiter` is shared by request handlers so concurrent requests compete
+  for the same per-priority admission slots.
 - `AppState` is cloned into handlers, but its interior circuit breakers and
-  affinity map still point at shared allocations.
+  shared maps/limiters still point at shared allocations.
 
 ## Rust Concepts Used Here
 
@@ -97,7 +101,9 @@ mod config;
 mod error;
 mod health;
 mod metrics;
+mod priority;
 mod proxy;
+mod resources;
 mod router;
 ```
 
@@ -105,7 +111,9 @@ These lines tell the Rust compiler to compile files or directories with those
 names:
 
 - `mod config;` loads `src/config.rs`.
+- `mod priority;` loads `src/priority.rs`.
 - `mod proxy;` loads `src/proxy/mod.rs`.
+- `mod resources;` loads `src/resources.rs`.
 - `mod router;` loads `src/router/mod.rs`.
 
 This is closer to declaring compilation units than to copying source text into
@@ -216,10 +224,13 @@ type being cloned.
 Shared state means multiple independently running parts of the program can
 observe or update the same underlying value.
 
-In Fairlead, there are two important shared-state objects:
+In Fairlead, the important shared-state objects are:
 
 - Each backend's `CircuitBreaker`.
 - The global `SessionAffinity` map.
+- The `ResourceRegistry` of reported VRAM/load snapshots.
+- The `PriorityLimiter` admission buckets.
+- The in-process `RoutingMetrics` counters and summaries.
 
 These must be shared because the server has many concurrent activities:
 
@@ -282,13 +293,19 @@ pub struct AppState {
     pub client: reqwest::Client,
     pub backends: Vec<BackendState>,
     pub affinity: SessionAffinity,
+    pub metrics: RoutingMetrics,
+    pub resources: ResourceRegistry,
+    pub resource_policy: ResourceRoutingPolicy,
+    pub priority_limiter: PriorityLimiter,
 }
 ```
 
 Cloning `AppState` does not create independent circuit breakers or independent
 affinity maps. `BackendState` contains an `Arc<RwLock<CircuitBreaker>>`, and
 `SessionAffinity` contains an `Arc<RwLock<HashMap<...>>>`, so cloned handlers
-still coordinate through the same underlying state.
+still coordinate through the same underlying state. `PriorityLimiter` also
+contains shared semaphore state, so cloned handlers compete for the same
+realtime, batch, and background admission capacity.
 
 ### Tokio
 
@@ -359,7 +376,9 @@ mod config;
 mod error;
 mod health;
 mod metrics;
+mod priority;
 mod proxy;
+mod resources;
 mod router;
 ```
 
@@ -373,6 +392,10 @@ pub struct AppState {
     pub client: reqwest::Client,
     pub backends: Vec<BackendState>,
     pub affinity: SessionAffinity,
+    pub metrics: RoutingMetrics,
+    pub resources: ResourceRegistry,
+    pub resource_policy: ResourceRoutingPolicy,
+    pub priority_limiter: PriorityLimiter,
 }
 ```
 
@@ -382,6 +405,10 @@ pub struct AppState {
 - `backends` is the ordered list of backend runtime states: URL, stable backend
   ID, optional node ID, pool, supported workloads, and circuit breaker.
 - `affinity` maps thread IDs to preferred backend indexes.
+- `metrics` stores in-process request/retry/fallback aggregates.
+- `resources` stores cooperative VRAM/load reports.
+- `resource_policy` controls whether resource-aware eligibility is active.
+- `priority_limiter` stores per-priority synchronous admission limits.
 
 `#[derive(Clone)]` asks Rust to generate a `clone()` implementation. Axum clones
 state handles into request handlers. This is cheap here because the expensive
@@ -414,6 +441,13 @@ environment variables:
 - `CIRCUIT_FAILURE_THRESHOLD`
 - `CIRCUIT_COOLDOWN_SECS`
 - `HEALTH_PROBE_INTERVAL_SECS`
+- `RESOURCE_REPORT_TTL_SECS`
+- `RESOURCE_AWARE_ROUTING`
+- `CHAT_COMPLETIONS_REQUIRED_VRAM_MB`
+- `EMBEDDINGS_REQUIRED_VRAM_MB`
+- `PRIORITY_REALTIME_LIMIT`
+- `PRIORITY_BATCH_LIMIT`
+- `PRIORITY_BACKGROUND_LIMIT`
 
 `BACKENDS` is parsed as a comma-separated list:
 
@@ -421,8 +455,8 @@ environment variables:
 http://spark-a:8000/v1,http://spark-b:8000/v1
 ```
 
-`BACKENDS_JSON` is the node-aware Bluewater configuration path. It can describe
-stable backend IDs, node IDs, pools, and supported workloads:
+`BACKENDS_JSON` is the richer configuration path. It can describe stable backend
+IDs, node IDs, pools, supported workloads, and optional health probe paths:
 
 ```json
 [
@@ -431,7 +465,8 @@ stable backend IDs, node IDs, pools, and supported workloads:
     "url": "http://spark-a:8000/v1",
     "node_id": "spark-a",
     "pool": "local-llm",
-    "workloads": ["chat_completions", "embeddings"]
+    "workloads": ["chat_completions", "embeddings"],
+    "health_path": "/v1/models"
   }
 ]
 ```
@@ -545,11 +580,24 @@ let state = AppState {
     client,
     backends,
     affinity: SessionAffinity::default(),
+    metrics: RoutingMetrics::default(),
+    resources: ResourceRegistry::new(Duration::from_secs(cfg.resource_report_ttl_secs)),
+    resource_policy: ResourceRoutingPolicy {
+        enabled: cfg.resource_aware_routing,
+        chat_completions_required_vram_mb: cfg.chat_completions_required_vram_mb,
+        embeddings_required_vram_mb: cfg.embeddings_required_vram_mb,
+    },
+    priority_limiter: PriorityLimiter::new(
+        cfg.priority_realtime_limit,
+        cfg.priority_batch_limit,
+        cfg.priority_background_limit,
+    ),
 };
 ```
 
-This packages the HTTP client, backend list, and empty affinity map into one
-value that Axum can pass to handlers.
+This packages the HTTP client, backend list, empty affinity map, metrics,
+resource registry, resource policy, and priority limiter into one value that Axum
+can pass to handlers.
 
 ### 10. Build the HTTP Router
 
@@ -563,6 +611,8 @@ let app = build_router(state);
 Router::new()
     .route("/health", get(health::health))
     .route("/metrics", get(metrics::metrics))
+    .route("/v1/resources", get(resources::list_resources))
+    .route("/v1/resources/report", post(resources::report_resources))
     .route("/v1/chat/completions", post(proxy::chat_completions))
     .route("/v1/embeddings", post(proxy::embeddings))
     .with_state(state)
@@ -572,6 +622,8 @@ This means:
 
 - `GET /health` calls `health::health`.
 - `GET /metrics` calls `metrics::metrics`.
+- `GET /v1/resources` calls `resources::list_resources`.
+- `POST /v1/resources/report` calls `resources::report_resources`.
 - `POST /v1/chat/completions` calls `proxy::chat_completions`.
 - `POST /v1/embeddings` calls `proxy::embeddings`.
 
@@ -620,7 +672,14 @@ pub async fn chat_completions(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    forward(&state, "chat/completions", &headers, body).await
+    forward(
+        &state,
+        WorkloadKind::ChatCompletions,
+        "chat/completions",
+        &headers,
+        body,
+    )
+    .await
 }
 ```
 
@@ -632,19 +691,20 @@ The parameters are Axum extractors:
 
 The function immediately calls `forward`.
 
-`POST /v1/embeddings` works the same way, except it passes `"embeddings"` as the
-backend path.
+`POST /v1/embeddings` works the same way, except it passes
+`WorkloadKind::Embeddings` and `"embeddings"`.
 
-### 2. Reject if No Backends Are Configured
+### 2. Parse Priority
 
 ```rust
-if state.backends.is_empty() {
-    return (StatusCode::SERVICE_UNAVAILABLE, "no backends configured").into_response();
-}
+let priority = match parse_priority(headers) {
+    Ok(priority) => priority,
+    Err(message) => return (StatusCode::BAD_REQUEST, message).into_response(),
+};
 ```
 
-If `BACKENDS` was empty, there is nowhere to send the request. Fairlead returns
-HTTP 503.
+`parse_priority` reads `X-Fairlead-Priority`. Missing priority defaults to
+`realtime`. Unknown values return HTTP 400 before any backend is selected.
 
 ### 3. Extract Optional Routing Headers
 
@@ -674,7 +734,44 @@ The return type is `Option<String>`:
 checked before use, except the compiler forces the check before the inner value
 can be accessed.
 
-### 4. Look Up Preferred Backend
+### 4. Reject if No Backends Are Configured
+
+```rust
+if state.backends.is_empty() {
+    return (StatusCode::SERVICE_UNAVAILABLE, "no backends configured").into_response();
+}
+```
+
+If `BACKENDS` was empty, there is nowhere to send the request. Fairlead returns
+HTTP 503.
+
+### 5. Acquire Priority Admission
+
+```rust
+let Some(priority_permit) = state.priority_limiter.try_acquire(priority) else {
+    return (StatusCode::TOO_MANY_REQUESTS, "priority limit reached").into_response();
+};
+```
+
+`PriorityLimiter` owns one Tokio semaphore per priority level: `realtime`,
+`batch`, and `background`. `try_acquire` is non-blocking:
+
+- If the bucket has capacity, it returns a `PriorityPermit`.
+- If the bucket is full, it returns `None` and Fairlead returns HTTP 429.
+
+The permit is intentionally stored as a value. In Rust, a value is dropped when
+its owner goes away. Dropping the permit releases the semaphore slot and
+decrements the in-flight metric.
+
+For a successful upstream response, Fairlead moves the permit into the streamed
+response body wrapper. That keeps the priority slot occupied until the caller
+finishes or drops the response body, not merely until upstream response headers
+arrive.
+
+This is admission control, not a queue. Fairlead does not currently wait for
+priority capacity on synchronous proxy requests.
+
+### 6. Look Up Preferred Backend
 
 ```rust
 let preferred = match thread_id {
@@ -689,7 +786,24 @@ thread already has a preferred backend index.
 The `ref` means "borrow the string inside `Some` rather than moving it." We still
 need `thread_id` later when recording affinity.
 
-### 5. Select a Backend
+### 7. Build Resource Selection State
+
+```rust
+let resource_state = resource_selection_state(state, &workload_kind).await;
+```
+
+If `RESOURCE_AWARE_ROUTING=false`, this returns an empty selection state and the
+router behaves like the circuit/locality/affinity proxy. If it is enabled,
+Fairlead checks each backend for:
+
+- a configured `node_id`
+- a fresh backend-level or node-level resource report
+- enough available VRAM for the workload estimate
+
+Backends without fresh capacity are marked ineligible. Eligible backends get a
+rank containing current load and available VRAM.
+
+### 8. Select a Backend
 
 ```rust
 let mut attempted = Vec::new();
@@ -699,11 +813,13 @@ loop {
     let idx = match next_backend.take() {
         Some(idx) => idx,
         None => {
-            let Some(idx) = select_backend_excluding(
+            let Some(idx) = select_backend_excluding_resource(
                 &state.backends,
                 preferred,
                 origin_node.as_deref(),
                 &attempted,
+                &resource_state.ineligible,
+                &resource_state.ranks,
             )
             .await else {
                 return StatusCode::SERVICE_UNAVAILABLE.into_response();
@@ -732,28 +848,32 @@ if result is Some(idx), continue with idx
 otherwise return 503
 ```
 
-### 6. How `select_backend_excluding` Works
+### 9. How `select_backend_excluding_resource` Works
 
 `src/router/fallback.rs`:
 
 ```rust
-pub async fn select_backend_excluding(
+pub async fn select_backend_excluding_resource(
     backends: &[BackendState],
     preferred: Option<usize>,
     origin_node: Option<&str>,
     excluded: &[usize],
+    resource_ineligible: &[usize],
+    ranks: &[Option<ResourceRank>],
 ) -> Option<usize> {
     if let Some(origin) = origin_node {
         // try available backends whose node_id matches origin,
-        // skipping indexes in excluded
+        // skipping indexes in excluded or resource_ineligible
     }
 
     if let Some(idx) = preferred {
-        // try affinity backend if it was not already checked or excluded
+        // try affinity backend if it was not already checked, excluded, or ineligible
     }
 
     for (i, backend) in backends.iter().enumerate() {
-        // walk configured backend order, skipping checked or excluded candidates
+        // walk configured backend order, skipping checked/excluded/ineligible candidates
+        // when there is no locality or affinity winner, ranks prefer lower load,
+        // then higher available VRAM
     }
 
     None
@@ -766,11 +886,11 @@ It checks candidates in this order:
 2. Existing session-affinity backend from `X-Fairlead-Thread-Id`.
 3. Remaining backends in configured order.
 
-Each check locks that backend's circuit breaker for writing because
+Each availability check locks that backend's circuit breaker for writing because
 `is_available()` may mutate circuit state from `Open` to `HalfOpen` if cooldown
 has elapsed.
 
-### 7. How the Circuit Breaker Works
+### 10. How the Circuit Breaker Works
 
 `src/router/circuit.rs` defines:
 
@@ -793,7 +913,7 @@ States:
 `record_failure()` increments failures and opens the circuit when the configured
 threshold is reached.
 
-### 8. Build the Upstream URL
+### 11. Build the Upstream URL
 
 Back in `forward`:
 
@@ -820,7 +940,7 @@ then the final upstream URL is:
 http://spark-a:8000/v1/chat/completions
 ```
 
-### 9. Forward the Request to the Backend
+### 12. Forward the Request to the Backend
 
 ```rust
 let upstream = match state
@@ -835,7 +955,7 @@ let upstream = match state
     Err(_) => {
         backend.circuit.write().await.record_failure();
         attempted.push(idx);
-        next_backend = select_backend_excluding(...).await;
+        next_backend = select_backend_excluding_resource(...).await;
         if next_backend.is_some() {
             continue;
         }
@@ -855,7 +975,7 @@ On connection failure, Fairlead records a circuit failure. If another eligible
 backend exists, it retries the same request body there. If no backend remains,
 it returns HTTP 502.
 
-### 10. Record Backend Success or Failure
+### 13. Record Backend Success or Failure
 
 ```rust
 let status = upstream.status();
@@ -863,7 +983,7 @@ let status = upstream.status();
 if status.is_server_error() {
     backend.circuit.write().await.record_failure();
     attempted.push(idx);
-    next_backend = select_backend_excluding(...).await;
+    next_backend = select_backend_excluding_resource(...).await;
     if next_backend.is_some() {
         continue;
     }
@@ -897,7 +1017,7 @@ thread_id -> backend_index
 
 That is session affinity.
 
-### 11. Preserve Streaming Headers
+### 14. Preserve Streaming Headers
 
 ```rust
 let content_type = upstream.headers().get(CONTENT_TYPE).cloned();
@@ -919,10 +1039,13 @@ if is_sse {
 }
 ```
 
-### 12. Stream the Response Back
+### 15. Stream the Response Back
 
 ```rust
-let stream = upstream.bytes_stream();
+let stream = upstream.bytes_stream().map(move |chunk| {
+    let _permit = &priority_permit;
+    chunk
+});
 let mut builder = Response::builder().status(status);
 builder.body(Body::from_stream(stream)).unwrap()
 ```
@@ -930,6 +1053,9 @@ builder.body(Body::from_stream(stream)).unwrap()
 This is the actual proxy behavior. Fairlead does not wait for the full backend
 response body. It turns the upstream byte stream into an Axum response body and
 returns it to the caller.
+
+The stream wrapper also owns the `PriorityPermit`, so the priority admission slot
+is held until the caller finishes or drops the response body.
 
 For LLM streaming, this is important because tokens can flow back as the backend
 generates them.
@@ -992,16 +1118,37 @@ The same endpoint also renders synchronous routing metrics recorded by
 `proxy::forward`:
 
 ```text
-fairlead_requests_total{workload="chat_completions",backend="spark-a-vllm",node="spark-a",pool="local-llm",origin_node="spark-a",status="200",outcome="completed"} 1
-fairlead_request_latency_seconds_count{workload="chat_completions",backend="spark-a-vllm",node="spark-a",pool="local-llm",origin_node="spark-a",status="200",outcome="completed"} 1
-fairlead_request_latency_seconds_sum{workload="chat_completions",backend="spark-a-vllm",node="spark-a",pool="local-llm",origin_node="spark-a",status="200",outcome="completed"} 0.012345
+fairlead_requests_total{workload="chat_completions",priority="realtime",backend="spark-a-vllm",node="spark-a",pool="local-llm",origin_node="spark-a",status="200",outcome="completed"} 1
+fairlead_request_latency_seconds_count{workload="chat_completions",priority="realtime",backend="spark-a-vllm",node="spark-a",pool="local-llm",origin_node="spark-a",status="200",outcome="completed"} 1
+fairlead_request_latency_seconds_sum{workload="chat_completions",priority="realtime",backend="spark-a-vllm",node="spark-a",pool="local-llm",origin_node="spark-a",status="200",outcome="completed"} 0.012345
 ```
 
 Fallback and retry decisions have separate counters:
 
 ```text
-fairlead_fallbacks_total{workload="chat_completions",backend="spark-b-vllm",node="spark-b",pool="local-llm",origin_node="spark-a",reason="origin_unavailable"} 1
-fairlead_retries_total{workload="chat_completions",backend="spark-a-vllm",node="spark-a",pool="local-llm",origin_node="spark-a",reason="server_error"} 1
+fairlead_fallbacks_total{workload="chat_completions",priority="realtime",backend="spark-b-vllm",node="spark-b",pool="local-llm",origin_node="spark-a",reason="origin_unavailable"} 1
+fairlead_retries_total{workload="chat_completions",priority="realtime",backend="spark-a-vllm",node="spark-a",pool="local-llm",origin_node="spark-a",reason="server_error"} 1
+```
+
+Priority admission exposes current in-flight counts and configured caps:
+
+```text
+fairlead_priority_in_flight{priority="realtime"} 0
+fairlead_priority_limit{priority="realtime"} 8
+fairlead_priority_in_flight{priority="batch"} 0
+fairlead_priority_limit{priority="batch"} 4
+fairlead_priority_in_flight{priority="background"} 0
+fairlead_priority_limit{priority="background"} 2
+```
+
+Resource reporting exposes the cooperative capacity view:
+
+```text
+fairlead_resource_vram_total_mb{node="spark-a",backend="spark-a-vllm"} 64000
+fairlead_resource_vram_reserved_mb{node="spark-a",backend="spark-a-vllm"} 16000
+fairlead_resource_vram_available_mb{node="spark-a",backend="spark-a-vllm"} 48000
+fairlead_resource_load{node="spark-a",backend="spark-a-vllm"} 0.250000
+fairlead_resource_report_stale{node="spark-a",backend="spark-a-vllm"} 0
 ```
 
 The proxy logs structured fields for the same decision: request ID, workload,
@@ -1039,16 +1186,21 @@ Fairlead does:
 
 1. Axum routes to `proxy::chat_completions`.
 2. `chat_completions` calls `forward`.
-3. `forward` checks that backends exist.
+3. `forward` parses priority, defaulting to `realtime` when no priority header is
+   present.
 4. `forward` extracts origin node `spark-a` and thread ID `abc`.
-5. `SessionAffinity::preferred("abc")` returns a preferred index or `None`.
-6. `select_backend` prefers an available backend on `spark-a`, then affinity, then
-   configured order.
-7. `forward` builds the upstream URL.
-8. `reqwest` sends the request body to vLLM or another compatible backend.
-9. Fairlead records success or failure on that backend's circuit breaker.
-10. On success, Fairlead records `abc -> selected_backend_index`.
-11. Fairlead streams the backend response back to the caller.
+5. `forward` checks that backends exist.
+6. `forward` acquires a realtime priority admission slot.
+7. `SessionAffinity::preferred("abc")` returns a preferred index or `None`.
+8. `resource_selection_state` marks resource-ineligible backends if resource-aware
+   routing is enabled.
+9. `select_backend_excluding_resource` prefers an available backend on `spark-a`,
+   then affinity, then resource rank/configured order.
+10. `forward` builds the upstream URL.
+11. `reqwest` sends the request body to vLLM or another compatible backend.
+12. Fairlead records success or failure on that backend's circuit breaker.
+13. On success, Fairlead records `abc -> selected_backend_index`.
+14. Fairlead streams the backend response back to the caller.
 
 ## What Is Not Happening Yet
 
@@ -1058,9 +1210,9 @@ The current code does not:
 - Inspect model-specific request JSON.
 - Estimate token count or memory use.
 - Manage CUDA memory.
-- Retry the same request on another backend after a single upstream failure.
 - Keep separate backend pools per workload.
 - Implement job queues or worker registration.
-- Implement VRAM accounting.
+- Reserve GPU memory for a request; resource reports are cooperative control-plane
+  hints, not allocator-level reservations.
 
-Those are future Bluewater phases, not current behavior.
+Those are future roadmap phases, not current behavior.
