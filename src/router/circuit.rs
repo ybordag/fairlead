@@ -112,7 +112,10 @@ mod tests {
         c.record_success(); // resets counter
         c.record_failure();
         c.record_failure();
-        assert!(c.is_available(), "counter was reset so should still be closed");
+        assert!(
+            c.is_available(),
+            "counter was reset so should still be closed"
+        );
     }
 
     #[test]
@@ -153,7 +156,10 @@ mod tests {
         std::thread::sleep(Duration::from_millis(20));
         assert!(c.is_available()); // transitions to HalfOpen
         c.record_failure();
-        assert!(!c.is_available(), "should be open again after failure in half-open");
+        assert!(
+            !c.is_available(),
+            "should be open again after failure in half-open"
+        );
         assert!(matches!(c.state(), CircuitState::Open { .. }));
     }
 }

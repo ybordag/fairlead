@@ -17,7 +17,7 @@ Rhizome          Python LangGraph agent — 93 tools, planning, triage, DB
   ↓  HTTP /v1/chat/completions (OpenAI-compatible)
 Fairlead         Rust compute router — inference, job dispatch, circuit breaking
   ↓  HTTP /v1
-vLLM             Python model server — GPU inference on Loki
+vLLM             Python model server — GPU inference on spark-a
   OR
 Cloud APIs       Gemini, Claude, OpenAI — fallback when local is unavailable
 ```
@@ -36,6 +36,166 @@ and job queues. It does not know what a garden is.
 
 **vLLM** serves the model. It knows about GPU memory, batching, and
 PagedAttention. It knows nothing above itself.
+
+---
+
+## Mental model: vLLM vs Fairlead
+
+Fairlead is not an inference runtime. It does not load model weights, run CUDA
+kernels, implement attention, tokenize prompts, or produce tokens directly. It is
+the request gateway and control-plane layer in front of inference runtimes.
+
+vLLM is the data-plane inference server. A vLLM process owns:
+
+- Loading model weights into GPU memory.
+- Tokenization and request execution.
+- KV cache management.
+- Continuous batching.
+- GPU kernel execution through CUDA/PyTorch.
+- Streaming OpenAI-compatible responses.
+- Tensor parallelism when configured.
+
+Fairlead owns routing and operational policy around those inference servers. It
+can decide:
+
+- Which backend URL should receive a request.
+- Whether a backend should be skipped because its circuit is open.
+- Whether a thread should prefer the same backend for cache locality.
+- Whether a request should be rejected, retried, or routed elsewhere.
+- What metrics and traces should describe the routing decision.
+
+That means Fairlead is a control-plane gateway, while vLLM is the model-serving
+data plane:
+
+```text
+client or agent
+  -> Fairlead decides where work should go
+  -> vLLM runs the model on GPU
+  -> Fairlead streams the response back
+```
+
+### GPU resource management
+
+Fairlead does not manage GPU memory at the CUDA allocator level. vLLM and other
+GPU workers manage their own memory internally. Fairlead's future role is
+admission control: decide where work is allowed to go based on reported capacity,
+health, priority, and current load.
+
+There are three separate layers:
+
+| Layer | Owner | Example responsibility |
+|---|---|---|
+| GPU execution | vLLM / CUDA / PyTorch | Load weights, allocate KV cache, run kernels |
+| Process placement | k3s / Docker / systemd | Start, stop, restart, and place containers |
+| Request admission | Fairlead | Pick backend, skip unhealthy nodes, avoid oversubscribed resources |
+
+The planned VRAM accounting model is cooperative. GPU consumers register their
+resource use with Fairlead, and Fairlead uses that control-plane view to avoid
+sending new work to nodes without enough reported headroom.
+
+Example:
+
+```text
+node: spark-a
+  total_vram_mb: 24576
+  registered_consumers:
+    - vllm-llama: 18432 MB
+    - vision-worker: 6144 MB
+  schedulable_headroom: 0 MB
+```
+
+Fairlead does not infer this from CUDA directly in the current design. It relies
+on workers and model servers reporting capacity, or on future node probes that
+publish capacity into Fairlead's registry. This is why the resource registry is a
+scheduler input, not the source of truth for GPU execution.
+
+The current code implements only the gateway part: backend selection, circuit
+breaking, health probing, soft affinity, streaming proxying, and basic metrics.
+VRAM accounting, priority queues, worker registration, and async job dispatch are
+planned later phases.
+
+### Rhizome example: spark-a and spark-b
+
+Assume a deployment with two GPU nodes:
+
+- `spark-a`: runs a Rhizome worker and a local vLLM server.
+- `spark-b`: runs a Rhizome worker and a local vLLM server.
+- Fairlead can run as one shared service, or as a local sidecar per node. The
+  routing policy is easiest to reason about as one logical Fairlead control
+  plane.
+
+```mermaid
+flowchart LR
+    cambium["Cambium API gateway"] --> rhizome_a["Rhizome worker on spark-a"]
+    cambium --> rhizome_b["Rhizome worker on spark-b"]
+
+    rhizome_a --> fairlead["Fairlead routing/control plane"]
+    rhizome_b --> fairlead
+
+    fairlead --> vllm_a["vLLM on spark-a GPU"]
+    fairlead --> vllm_b["vLLM on spark-b GPU"]
+
+    vllm_a --> gpu_a["spark-a GPU"]
+    vllm_b --> gpu_b["spark-b GPU"]
+
+    fairlead -. planned .-> registry["Resource registry health + VRAM + load + locality"]
+    registry -. informs .-> fairlead
+```
+
+The desired routing behavior is locality-aware and resource-aware:
+
+```text
+Rhizome request starts on spark-a
+  -> prefer vLLM on spark-a, because same-node traffic should have lower latency
+  -> if spark-a vLLM is unhealthy, overloaded, or lacks reported GPU headroom,
+     route to spark-b vLLM
+  -> if both local GPU backends are unavailable or full, either queue by priority
+     or fall back to a cloud provider, depending on policy
+```
+
+The same applies in reverse for a Rhizome request that starts on spark-b:
+
+```text
+Rhizome request starts on spark-b
+  -> prefer vLLM on spark-b
+  -> if spark-b is unavailable or full, route to spark-a
+  -> if both are unavailable or full, queue or cloud fallback
+```
+
+To make this work, Fairlead needs more metadata than the current Phase 4 code
+has:
+
+- **Backend node identity:** each backend must know whether it lives on `spark-a`,
+  `spark-b`, or another node.
+- **Request origin identity:** Rhizome or the local Fairlead sidecar must provide
+  where the request originated, for example `X-Fairlead-Origin-Node: spark-a`.
+- **Resource state:** vLLM and other GPU consumers must report usable capacity,
+  reserved VRAM, current load, or an equivalent schedulable signal.
+- **Workload metadata:** chat completions, embeddings, vision jobs, and batch
+  jobs may have different resource estimates and priority rules.
+- **Queue policy:** realtime inference may fail fast or wait briefly; background
+  jobs can queue longer and yield to realtime work.
+
+With those inputs, the router can make a decision like:
+
+```text
+candidates = all backends serving the requested model/workload
+candidates = remove backends with open circuits
+candidates = remove backends without enough reported capacity
+prefer backend on request origin node
+then prefer existing session affinity
+then prefer lower load / higher free capacity
+if none eligible:
+  queue, return 503, or fall back to cloud according to workload policy
+```
+
+Current Fairlead implements the first locality-aware slice: backends can carry
+`node_id` metadata, requests can carry `X-Fairlead-Origin-Node`, and the router
+prefers an eligible same-node backend before falling back to affinity or
+configured order. It does not yet implement VRAM-aware routing, backend-pool
+selection, queueing, or cloud fallback. The full spark-a/spark-b behavior above
+is the intended Bluewater/Fairlead direction once resource accounting and
+priority queues are added.
 
 ---
 
@@ -79,7 +239,7 @@ job submitted
 ```
 
 **Job types:**
-- `vision_analysis` — route to vision MCP sidecar on Loki GPU
+- `vision_analysis` — route to vision MCP sidecar on spark-a GPU
 - `embed_batch` — batch embedding generation
 - `index_build` — pgvector or FAISS index construction
 - `cluster` — k-means or HDBSCAN over an embedding space
@@ -168,7 +328,9 @@ This forces a clear architecture split.
 **Async path** — request handlers, forwarding, queue checks:
 ```rust
 async fn handle_chat_completions(/* ... */) -> Response {
-    let backend = router.select_backend().await;   // async: checks circuit state
+    let backend = router
+        .select_backend_excluding(&attempted)
+        .await;                                    // async: checks circuit state
     let response = client.post(&backend.url)
         .send().await?;                            // async: network I/O
     Body::from_stream(response.bytes_stream())     // async: stream back

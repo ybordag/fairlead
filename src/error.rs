@@ -1,9 +1,15 @@
-use axum::{http::StatusCode, response::{IntoResponse, Response}};
+use axum::{
+    http::StatusCode,
+    response::{IntoResponse, Response},
+};
 use thiserror::Error;
 
 #[cfg_attr(
     not(test),
-    expect(dead_code, reason = "variants wired into routing handlers from Phase 3 onward")
+    expect(
+        dead_code,
+        reason = "variants wired into routing handlers from Phase 3 onward"
+    )
 )]
 #[derive(Debug, Error)]
 pub enum FairleadError {
@@ -24,10 +30,10 @@ pub enum FairleadError {
 impl IntoResponse for FairleadError {
     fn into_response(self) -> Response {
         let status = match &self {
-            FairleadError::NoBackend        => StatusCode::SERVICE_UNAVAILABLE,
-            FairleadError::NoWorker(_)      => StatusCode::BAD_REQUEST,
-            FairleadError::Backend(_)       => StatusCode::BAD_GATEWAY,
-            FairleadError::Config(_)        => StatusCode::INTERNAL_SERVER_ERROR,
+            FairleadError::NoBackend => StatusCode::SERVICE_UNAVAILABLE,
+            FairleadError::NoWorker(_) => StatusCode::BAD_REQUEST,
+            FairleadError::Backend(_) => StatusCode::BAD_GATEWAY,
+            FairleadError::Config(_) => StatusCode::INTERNAL_SERVER_ERROR,
         };
         (status, self.to_string()).into_response()
     }

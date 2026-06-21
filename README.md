@@ -1,40 +1,98 @@
-# fairlead
+# Fairlead
 
-A resource router for AI agent systems, written in Rust. Fairlead sits between an agent application and its compute backend, routing inference requests to the right hardware, handling failover, and managing GPU resources across nodes.
+Fairlead is a Rust inference gateway and compute-router prototype for local and
+edge AI systems. It sits between applications and model-serving backends,
+routing OpenAI-compatible requests to available inference servers while tracking
+health, circuit state, and session affinity.
 
 The name comes from sailing: a fairlead is a fitting that guides lines in exactly the right direction without friction or fouling.
 
-**Status:** Design phase — no runnable code yet.
+**Status:** Phase 4 complete. Fairlead currently runs as an Axum HTTP service
+with `/health`, `/metrics`, `/v1/chat/completions`, and `/v1/embeddings`.
+The `bluewater` branch is the generalization effort to make Fairlead useful
+beyond a single application.
 
 ---
 
-## What it does
+## Current Capabilities
 
-Fairlead solves the infrastructure problems that should not live inside an application:
+The current service provides:
 
-- **Inference routing** — routes LLM calls to the right backend based on health, VRAM availability, and current load
-- **Provider fallback chain** — when local hardware is unavailable, falls back through a configurable chain (local vLLM → cloud provider A → cloud provider B)
-- **Circuit breaking** — per-node circuit breakers prevent cascading failures; failed nodes are bypassed immediately and probed for recovery
-- **Session failover** — when a node dies mid-session, in-flight requests are retried on the next available backend; session state survives via the application's external checkpoint store
-- **VRAM accounting** — maintains a real-time view of GPU memory across all consumers (LLM server, vision sidecars, embedding servers) to prevent OOM scheduling
-- **Agent worker pool** — manages application process instances, restarts crashed workers, routes requests least-busy
+- **OpenAI-compatible proxying** for chat completions and embeddings.
+- **Streaming response passthrough** for Server-Sent Events.
+- **Ordered backend selection** from the `BACKENDS` environment variable.
+- **Node-aware backend metadata** through `BACKENDS_JSON` for richer local/edge
+  deployments.
+- **Per-backend circuit breakers** for connection failures and 5xx responses.
+- **Background health probes** that update circuit state.
+- **Soft session affinity** through `X-Fairlead-Thread-Id`.
+- **Origin-node locality** through `X-Fairlead-Origin-Node`.
+- **Same-request retry** across eligible backends for connection failures,
+  timeouts, and 5xx responses before response bytes are streamed.
+- **Prometheus-style metrics** for backend circuit state, request outcomes,
+  latency, fallback reasons, and retry reasons.
+
+Fairlead does **not** run inference itself. It routes requests to model servers
+such as vLLM. vLLM owns model loading, GPU execution, KV cache management, and
+token streaming. Fairlead owns request routing and control-plane policy around
+those model servers.
+
+---
+
+## Bluewater Direction
+
+Bluewater is the effort to make Fairlead a general-purpose local/edge compute
+router rather than a Rhizome-specific proxy.
+
+Planned work includes:
+
+- **Workload abstraction** for chat, embeddings, rerank, vision, batch jobs, and
+  future non-OpenAI-compatible adapters.
+- **Node-aware backend configuration** so backends know whether they run on
+  spark-a, spark-b, or another node.
+- **Locality-aware routing** so a request that starts on spark-a can prefer spark-a's
+  local vLLM backend before crossing the network to spark-b.
+- **Resource-aware admission** using cooperative VRAM/load reports from vLLM and
+  other GPU consumers.
+- **Richer retry policy and observability** for retry reasons, retry counts, and
+  backend-level outcomes.
+- **Priority queues and async jobs** for background work that should yield to
+  realtime user requests.
+- **Workload-aware observability** for selected backend, fallback reason,
+  latency, queue depth, and resource state.
+
+See [`docs/bluewater_generalization.md`](docs/bluewater_generalization.md) for
+the implementation plan and acceptance criteria.
 
 ---
 
 ## System topology
 
+Current simple topology:
+
 ```
-Cambium (Go API gateway)
-    │  OpenAI-compatible  /v1/chat/completions
+Application or OpenAI-compatible client
+    │  /v1/chat/completions or /v1/embeddings
     ▼
-Fairlead  ←  this repo  (Rust)
-    │  VRAM-aware routing, circuit breaking, fallback
-    ├── vLLM on Loki  (DGX Spark B — primary local inference)
-    ├── vLLM on Thor  (DGX Spark A — secondary / failover)
-    └── Cloud providers  (Gemini Flash, Claude Haiku — last resort)
+Fairlead
+    │  circuit-aware routing + streaming proxy
+    ├── vLLM on spark-a
+    └── vLLM on spark-b
 ```
 
-Fairlead exposes a standard **OpenAI-compatible API**. Any client that speaks the OpenAI API speaks Fairlead without modification — LangChain, LlamaIndex, the `openai` SDK, or a raw HTTP client.
+Intended Bluewater topology:
+
+```
+Applications / agents
+    │  OpenAI-compatible inference + async jobs
+    ▼
+Fairlead
+    │  workload-aware, node-aware, resource-aware routing
+    ├── vLLM on spark-a
+    ├── vLLM on spark-b
+    ├── embedding / vision / indexing workers
+    └── cloud providers as fallback
+```
 
 ---
 
@@ -50,18 +108,97 @@ Fairlead exposes a standard **OpenAI-compatible API**. Any client that speaks th
 
 ---
 
-## Local inference: vLLM
+## Running Locally
 
-Fairlead routes to **vLLM** instances on the DGX Spark nodes. vLLM's OpenAI-compatible API means Fairlead treats a local GPU server and a cloud provider identically — routing to local vs. cloud is a URL swap, not a protocol change.
+Example with two local OpenAI-compatible backends:
 
-Each inference node runs a vLLM container:
+```bash
+BACKENDS=http://spark-a:8000/v1,http://spark-b:8000/v1 \
+PORT=7000 \
+cargo run
+```
+
+Node-aware backend configuration:
+
+```bash
+BACKENDS_JSON='[
+  {
+    "id": "spark-a-vllm",
+    "url": "http://spark-a:8000/v1",
+    "node_id": "spark-a",
+    "pool": "local-llm",
+    "workloads": ["chat_completions", "embeddings"]
+  },
+  {
+    "id": "spark-b-vllm",
+    "url": "http://spark-b:8000/v1",
+    "node_id": "spark-b",
+    "pool": "local-llm",
+    "workloads": ["chat_completions", "embeddings"]
+  }
+]' PORT=7000 cargo run
+```
+
+`BACKENDS` remains the simplest local setup path. `BACKENDS_JSON` is the
+Bluewater configuration path for stable backend IDs, node identity, backend
+pools, and workload support. By default, health probes append `models` to the
+backend API base URL, so `http://spark-a:8000/v1` is probed at
+`http://spark-a:8000/v1/models`. Backends that expose health elsewhere can set
+`health_path`, for example `"/health"`.
+
+Health:
+
+```bash
+curl http://localhost:7000/health
+```
+
+Metrics:
+
+```bash
+curl http://localhost:7000/metrics
+```
+
+Chat completions are proxied to one of the configured backends:
+
+```bash
+curl http://localhost:7000/v1/chat/completions \
+  -H 'content-type: application/json' \
+  -H 'X-Fairlead-Origin-Node: spark-a' \
+  -H 'X-Fairlead-Thread-Id: demo-thread' \
+  -d '{"model":"local-model","messages":[{"role":"user","content":"hello"}]}'
+```
+
+## Bluewater Demo
+
+Run the GPU-free local demo to see locality, fallback, same-request retry,
+recovery, metrics, and structured traces:
+
+```bash
+./demo/run_bluewater_demo.sh
+```
+
+The demo starts two mock OpenAI-compatible backends named `spark-a` and
+`spark-b`, starts Fairlead, then asserts the expected routing behavior. See
+[`demo/README.md`](demo/README.md) for details.
+
+## Local Inference: vLLM
+
+Fairlead routes to **vLLM** instances on local GPU nodes. vLLM's
+OpenAI-compatible API means Fairlead treats a local GPU server and a cloud
+provider identically: routing to local vs. cloud is a URL swap, not a protocol
+change.
+
+In a small DGX Spark deployment, each inference node can run one vLLM server:
 
 ```
-Loki (DGX Spark B)
-  └── vLLM container (vllm/vllm-openai)
+DGX Spark node
+  └── vLLM server
         port: 8000
-        API: http://loki:8000/v1
+        API: http://<node-hostname>:8000/v1
 ```
+
+See [`docs/dgx_spark_deployment.md`](docs/dgx_spark_deployment.md) for the
+manual two-node deployment notes using vLLM, `uv`, and Fairlead.
 
 ---
 
@@ -71,22 +208,29 @@ Loki (DGX Spark B)
 |---|---|---|
 | Infrastructure | k3s / Docker | Where containers run, process restarts, scaling |
 | GPU execution | vLLM | Efficient model serving, PagedAttention, continuous batching |
-| Inference routing | **Fairlead** | Which backend handles this request, fallback, VRAM awareness |
-| Application | Rhizome | What the agent does with the result |
+| Inference routing | **Fairlead** | Which backend handles a request, fallback, admission policy |
+| Application | Rhizome or another app | What the agent or application does with the result |
 
-These layers do not overlap. k3s cannot make VRAM-aware routing decisions. Fairlead cannot schedule containers or restart crashed processes. Each solves the problem the others cannot.
+These layers do not overlap. k3s can place and restart containers. vLLM can run
+the model. Fairlead can decide where a request should go. Applications decide
+what the model result means.
 
 ---
 
-## Extensibility
+## Documentation
 
-Fairlead is not coupled to any specific agent application:
-
-- **Async embedding service** — `/v1/embeddings` with its own routing and batching
-- **Context chunking service** — async document chunking for RAG pipelines
-- **Additional agent applications** — each registers its own worker pool
-
-See [`design.md`](design.md) for the full architecture, open design questions, and component details.
+- [`docs/architecture.md`](docs/architecture.md) — system architecture,
+  vLLM/Fairlead responsibilities, and the spark-a/spark-b routing example.
+- [`docs/code_walkthrough.md`](docs/code_walkthrough.md) — Rust code walkthrough
+  from process startup to proxied response.
+- [`docs/bluewater_generalization.md`](docs/bluewater_generalization.md) —
+  generalization plan, feature epics, and acceptance criteria.
+- [`docs/dgx_spark_deployment.md`](docs/dgx_spark_deployment.md) — manual
+  deployment notes for two DGX Spark nodes connected over InfiniBand.
+- [`docs/fixture_examples.md`](docs/fixture_examples.md) — conventions for
+  sanitized test fixtures and ignored local deployment config.
+- [`demo/README.md`](demo/README.md) — GPU-free Bluewater routing demo.
+- [`docs/deferred_tests.md`](docs/deferred_tests.md) — known test gaps.
 
 ---
 
