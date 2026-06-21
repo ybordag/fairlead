@@ -202,15 +202,16 @@ if none eligible:
   return 503 now; future phases may queue or fall back to cloud by workload policy
 ```
 
-Current Fairlead implements locality-aware routing and an opt-in
-resource-aware slice. Backends can carry `node_id` metadata, requests can carry
-`X-Fairlead-Origin-Node`, and workers/backends can report resource state through
-`/v1/resources/report`. When `RESOURCE_AWARE_ROUTING=true`, the router skips
-backends without a fresh report that satisfies the workload's coarse VRAM
-estimate, applies locality and affinity precedence, then ranks remaining
-eligible candidates by lower reported load, higher available VRAM, and
-configured order. It does not yet implement backend-pool selection, durable
-queueing, or cloud fallback.
+Current Fairlead implements locality-aware routing, ordered synchronous
+backend-pool selection, and an opt-in resource-aware slice. Backends can carry
+`node_id` and `pool` metadata, requests can carry `X-Fairlead-Origin-Node`, and
+workers/backends can report resource state through `/v1/resources/report`. When
+`RESOURCE_AWARE_ROUTING=true`, the router skips backends without a fresh report
+that satisfies the workload's coarse VRAM estimate, applies pool policy,
+locality, and affinity precedence, then ranks remaining eligible candidates by
+lower reported load, higher available VRAM, and configured order inside the
+selected pool stage. It does not yet implement async worker pool placement,
+durable starvation policy beyond current queue ordering, or cloud fallback.
 
 ### Pool Policy Model
 
@@ -238,11 +239,37 @@ validation rejects empty pool IDs, duplicate pool IDs, backends that reference
 undeclared pools, unknown workload names, empty workload pool lists, duplicate
 pool references, and workload policies that reference undeclared pools.
 
-Phase 7A intentionally does not change dispatch. Synchronous routing still uses
-existing workload support and backend health/resource eligibility. Phase 7B
-will apply this validated policy to synchronous backend selection and fallback
-chains. Phase 7C will add worker pool metadata and apply the same vocabulary to
+Phase 7B applies this validated policy to synchronous backend selection. A
+backend is eligible for chat or embeddings only when it supports the requested
+workload and its pool is allowed by that workload's policy. If an explicit
+policy omits a workload, that workload remains permissive for now. If every
+backend is outside the workload's allowed pools, Fairlead returns `503` without
+contacting an upstream backend.
+
+Fairlead intentionally keeps omitted workloads permissive through Phase 7C while
+the same pool vocabulary is applied to async workers. Phase 7D will review the
+shared demos and decide whether explicit `WORKLOAD_POOLS_JSON` should become
+strict, meaning configured policy would need to mention every supported workload
+instead of acting as a partial override.
+
+For synchronous routing, the workload's pool list is ordered. Fairlead tries the
+first pool's eligible backends, then falls back to the next pool only when no
+backend in the earlier pool can be selected. Within each pool, the existing
+selection rules still apply: origin locality, session affinity, resource
+ranking, circuit state, and configured backend order choose the concrete
+backend. Phase 7C will add worker pool metadata and apply the same vocabulary to
 async worker placement.
+
+Synchronous pool routing emits Prometheus counters for each pool stage Fairlead
+evaluates:
+
+- `fairlead_pool_selections_total`
+- `fairlead_pool_candidate_backends_total`
+- `fairlead_pool_resource_ineligible_backends_total`
+
+These metrics expose selected or unavailable pool stages, the selected
+pool/backend when one exists, candidate backend counts, and resource pressure
+inside each pool.
 
 ---
 
@@ -264,8 +291,9 @@ Every inference request goes through a decision pipeline:
 request arrives
   → check priority (realtime / batch / background)
   → acquire a synchronous admission slot for that priority, or return 429
-  → find eligible backends (circuit closed + VRAM headroom)
-  → check session affinity (prefer same node for KV cache)
+  → find eligible backends (workload support + allowed pool + circuit/resource state)
+  → prefer origin node
+  → check session affinity
   → proxy to selected backend, stream response back
   → if backend fails: try next in fallback chain
   → if all eligible backends fail: return 502/503
@@ -667,9 +695,10 @@ work.
 
 Phases 1–3 give you a working proxy in a few days. Phases 4–5 give you
 production resilience. Phase 6 completes the core sync/async control-plane
-surfaces. Phase 7 adds complete pool-aware placement. Later phases harden the
-scheduler, add adapters, improve resource policy, evaluate scale/overflow, and
-only then add optional transport or SDK layers.
+surfaces. Phase 7 completes pool-aware placement across synchronous backends and
+async workers. Later phases harden the scheduler, add adapters, improve
+resource policy, evaluate scale/overflow, and only then add optional transport
+or SDK layers.
 
 Temporal is intentionally deferred. Fairlead's scheduler should handle bounded
 compute jobs with leases, retries, cancellation, callbacks, and recoverable job

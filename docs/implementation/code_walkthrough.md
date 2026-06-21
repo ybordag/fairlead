@@ -507,9 +507,17 @@ eligible pools:
 }
 ```
 
-At this stage the policy is parsed and validated but not yet applied to dispatch.
-If the pool list is omitted, Fairlead derives pools from backend metadata and
-keeps the `default` pool for compatibility with simple `BACKENDS` setup.
+Phase 7B applies this policy to synchronous chat and embedding dispatch. A
+backend must support the requested workload and sit in one of that workload's
+allowed pools before resource ranking, locality, affinity, or retry fallback can
+select it. The pool list is ordered, so Fairlead tries earlier pools before
+later pools; inside each pool it still uses origin locality, affinity, resource
+rank, circuit state, and configured backend order. If the pool list is omitted,
+Fairlead derives pools from backend metadata and keeps the `default` pool for
+compatibility with simple `BACKENDS` setup. If a workload is omitted from an
+explicit `WORKLOAD_POOLS_JSON`, it remains permissive through Phase 7C. Phase 7D
+will decide whether explicit policy should become strict after the sync and
+async paths share the same pool vocabulary.
 
 ### 5. Initialize Tracing
 
@@ -1223,6 +1231,18 @@ fairlead_fallbacks_total{workload="chat_completions",priority="realtime",backend
 fairlead_retries_total{workload="chat_completions",priority="realtime",backend="spark-a-vllm",node="spark-a",pool="local-llm",origin_node="spark-a",reason="server_error"} 1
 ```
 
+Phase 7B adds per-pool synchronous routing counters:
+
+```text
+fairlead_pool_selections_total{workload="chat_completions",priority="realtime",pool="local-llm",backend="spark-a-vllm",node="spark-a",origin_node="spark-a",outcome="selected"} 1
+fairlead_pool_candidate_backends_total{workload="chat_completions",priority="realtime",pool="local-llm",backend="spark-a-vllm",node="spark-a",origin_node="spark-a",outcome="selected"} 1
+fairlead_pool_resource_ineligible_backends_total{workload="chat_completions",priority="realtime",pool="local-llm",backend="spark-b-vllm",node="spark-b",origin_node="spark-a",outcome="selected"} 1
+```
+
+These record which pool stage selected a backend or was unavailable, how many
+route/resource-eligible candidates were seen in that pool, and how much resource
+pressure blocked candidates in that pool.
+
 Priority admission exposes current in-flight counts and configured caps:
 
 ```text
@@ -1407,16 +1427,20 @@ Fairlead does:
 6. `forward` acquires a realtime priority admission slot.
 7. `SessionAffinity::preferred("chat_completions:abc")` returns a preferred
    index or `None`.
-8. `resource_selection_state` marks resource-ineligible backends if resource-aware
+8. `route_ineligible_backends` removes backends that do not support the workload
+   or sit outside the workload's allowed pools.
+9. `resource_selection_state` marks resource-ineligible backends if resource-aware
    routing is enabled.
-9. `select_backend_excluding_resource` prefers an available backend on `spark-a`,
-   then affinity, then resource rank/configured order.
-10. `forward` builds the upstream URL.
-11. `reqwest` sends the request body to vLLM or another compatible backend.
-12. Fairlead records success or failure on that backend's circuit breaker.
-13. On success, Fairlead records
+10. `select_backend_for_route` tries the workload's allowed pools in order.
+11. Within the current pool, `select_backend_excluding_resource` prefers an
+   available backend on `spark-a`, then affinity, then resource rank/configured
+   order.
+12. `forward` builds the upstream URL.
+13. `reqwest` sends the request body to vLLM or another compatible backend.
+14. Fairlead records success or failure on that backend's circuit breaker.
+15. On success, Fairlead records
     `chat_completions:abc -> selected_backend_index`.
-14. Fairlead streams the backend response back to the caller.
+16. Fairlead streams the backend response back to the caller.
 
 ## What Is Not Happening Yet
 
@@ -1426,12 +1450,12 @@ The current code does not:
 - Inspect model-specific request JSON.
 - Estimate token count or memory use.
 - Manage CUDA memory.
-- Enforce complete pool-aware routing and placement policies.
+- Apply pool policy to async worker placement yet.
 - Push-dispatch jobs to workers.
 - Reserve GPU memory for a request; resource reports are cooperative control-plane
   hints, not allocator-level reservations.
 
-Push dispatch, completed-job pruning, complete pool-aware placement, and
+Push dispatch, async worker pool placement, completed-job pruning, and
 process-level restart harnesses are future roadmap phases, not current
-behavior. Durable job state and terminal callbacks are current behavior when the
-relevant job store and callback settings are configured.
+behavior. Synchronous backend pool routing, durable job state, and terminal
+callbacks are current behavior when the relevant configuration is enabled.

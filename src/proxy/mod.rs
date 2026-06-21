@@ -16,7 +16,7 @@ use tracing::{info, warn};
 
 use crate::{
     config::{Priority, WorkloadKind, WorkloadRoute},
-    metrics::{FallbackLabels, RequestLabels, RetryLabels},
+    metrics::{FallbackLabels, PoolDecisionLabels, RequestLabels, RetryLabels},
     priority::PriorityPermit,
     router::{select_backend_excluding_resource, BackendState, ResourceRank},
     AppState,
@@ -137,21 +137,22 @@ async fn forward(
 
     let mut attempted = Vec::new();
     let mut next_backend = None;
-    let route_ineligible = route_ineligible_backends(&state.backends, &route);
+    let route_ineligible = route_ineligible_backends(state, &route);
     let resource_state = resource_selection_state(state, &workload_kind).await;
-    let selection_ineligible = selection_ineligible(&route_ineligible, &resource_state.ineligible);
 
     loop {
         let idx = match next_backend.take() {
             Some(idx) => idx,
             None => {
-                let Some(idx) = select_backend_excluding_resource(
-                    &state.backends,
+                let Some(idx) = select_backend_for_route(
+                    state,
+                    &route,
+                    priority,
                     preferred,
                     origin_node.as_deref(),
                     &attempted,
-                    &selection_ineligible,
-                    &resource_state.ranks,
+                    &route_ineligible,
+                    &resource_state,
                 )
                 .await
                 else {
@@ -286,13 +287,15 @@ async fn forward(
                     "retrying after upstream failure"
                 );
                 attempted.push(idx);
-                next_backend = select_backend_excluding_resource(
-                    &state.backends,
+                next_backend = select_backend_for_route(
+                    state,
+                    &route,
+                    priority,
                     preferred,
                     origin_node.as_deref(),
                     &attempted,
-                    &selection_ineligible,
-                    &resource_state.ranks,
+                    &route_ineligible,
+                    &resource_state,
                 )
                 .await;
                 if next_backend.is_some() {
@@ -350,13 +353,15 @@ async fn forward(
                 "retrying after upstream failure"
             );
             attempted.push(idx);
-            next_backend = select_backend_excluding_resource(
-                &state.backends,
+            next_backend = select_backend_for_route(
+                state,
+                &route,
+                priority,
                 preferred,
                 origin_node.as_deref(),
                 &attempted,
-                &selection_ineligible,
-                &resource_state.ranks,
+                &route_ineligible,
+                &resource_state,
             )
             .await;
             if next_backend.is_some() {
@@ -526,21 +531,208 @@ fn fallback_reason(
     None
 }
 
-fn route_ineligible_backends(backends: &[BackendState], route: &WorkloadRoute) -> Vec<usize> {
-    backends
+fn route_ineligible_backends(state: &AppState, route: &WorkloadRoute) -> Vec<usize> {
+    state
+        .backends
         .iter()
         .enumerate()
-        .filter_map(|(idx, backend)| (!route_allows_backend(backend, route)).then_some(idx))
+        .filter_map(|(idx, backend)| {
+            (!route_allows_backend(backend, route, &state.workload_pools)).then_some(idx)
+        })
         .collect()
 }
 
-fn route_allows_backend(backend: &BackendState, route: &WorkloadRoute) -> bool {
-    route.backend_pool.allows(&backend.pool) && backend.workloads.contains(&route.kind)
+fn route_allows_backend(
+    backend: &BackendState,
+    route: &WorkloadRoute,
+    workload_pools: &crate::config::WorkloadPoolPolicy,
+) -> bool {
+    route.backend_pool.allows(&backend.pool)
+        && workload_pools.allows(route.kind.as_str(), &backend.pool)
+        && backend.workloads.contains(&route.kind)
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "route selection receives the current request, route policy, and precomputed eligibility state"
+)]
+async fn select_backend_for_route(
+    state: &AppState,
+    route: &WorkloadRoute,
+    priority: Priority,
+    preferred: Option<usize>,
+    origin_node: Option<&str>,
+    attempted: &[usize],
+    route_ineligible: &[usize],
+    resource_state: &ResourceSelectionState,
+) -> Option<usize> {
+    if let Some(pools) = state.workload_pools.pools_for(route.kind.as_str()) {
+        for pool in pools {
+            let pool_ineligible = pool_ineligible_backends(&state.backends, pool);
+            let (candidate_count, resource_ineligible_count) = pool_candidate_counts(
+                &state.backends,
+                pool,
+                attempted,
+                route_ineligible,
+                &resource_state.ineligible,
+            );
+            let ineligible = selection_ineligible_with_pool(
+                route_ineligible,
+                &resource_state.ineligible,
+                &pool_ineligible,
+            );
+            if let Some(idx) = select_backend_excluding_resource(
+                &state.backends,
+                preferred,
+                origin_node,
+                attempted,
+                &ineligible,
+                &resource_state.ranks,
+            )
+            .await
+            {
+                record_pool_decision(
+                    state,
+                    route,
+                    priority,
+                    pool,
+                    Some(&state.backends[idx]),
+                    origin_node,
+                    "selected",
+                    candidate_count,
+                    resource_ineligible_count,
+                );
+                return Some(idx);
+            }
+            record_pool_decision(
+                state,
+                route,
+                priority,
+                pool,
+                None,
+                origin_node,
+                "unavailable",
+                candidate_count,
+                resource_ineligible_count,
+            );
+        }
+        return None;
+    }
+
+    let (candidate_count, resource_ineligible_count) = any_pool_candidate_counts(
+        &state.backends,
+        attempted,
+        route_ineligible,
+        &resource_state.ineligible,
+    );
+    let ineligible = selection_ineligible(route_ineligible, &resource_state.ineligible);
+    let selected = select_backend_excluding_resource(
+        &state.backends,
+        preferred,
+        origin_node,
+        attempted,
+        &ineligible,
+        &resource_state.ranks,
+    )
+    .await;
+    record_pool_decision(
+        state,
+        route,
+        priority,
+        "",
+        selected.and_then(|idx| state.backends.get(idx)),
+        origin_node,
+        if selected.is_some() {
+            "selected"
+        } else {
+            "unavailable"
+        },
+        candidate_count,
+        resource_ineligible_count,
+    );
+    selected
+}
+
+fn pool_ineligible_backends(backends: &[BackendState], pool: &str) -> Vec<usize> {
+    backends
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, backend)| (backend.pool != pool).then_some(idx))
+        .collect()
+}
+
+fn pool_candidate_counts(
+    backends: &[BackendState],
+    pool: &str,
+    attempted: &[usize],
+    route_ineligible: &[usize],
+    resource_ineligible: &[usize],
+) -> (usize, usize) {
+    candidate_counts(
+        backends,
+        attempted,
+        route_ineligible,
+        resource_ineligible,
+        |backend| backend.pool == pool,
+    )
+}
+
+fn any_pool_candidate_counts(
+    backends: &[BackendState],
+    attempted: &[usize],
+    route_ineligible: &[usize],
+    resource_ineligible: &[usize],
+) -> (usize, usize) {
+    candidate_counts(
+        backends,
+        attempted,
+        route_ineligible,
+        resource_ineligible,
+        |_| true,
+    )
+}
+
+fn candidate_counts(
+    backends: &[BackendState],
+    attempted: &[usize],
+    route_ineligible: &[usize],
+    resource_ineligible: &[usize],
+    pool_matches: impl Fn(&BackendState) -> bool,
+) -> (usize, usize) {
+    let mut candidates = 0;
+    let mut resource_blocked = 0;
+
+    for (idx, backend) in backends.iter().enumerate() {
+        if attempted.contains(&idx) || route_ineligible.contains(&idx) || !pool_matches(backend) {
+            continue;
+        }
+        if resource_ineligible.contains(&idx) {
+            resource_blocked += 1;
+        } else {
+            candidates += 1;
+        }
+    }
+
+    (candidates, resource_blocked)
 }
 
 fn selection_ineligible(route_ineligible: &[usize], resource_ineligible: &[usize]) -> Vec<usize> {
     let mut ineligible = route_ineligible.to_vec();
     for idx in resource_ineligible {
+        if !ineligible.contains(idx) {
+            ineligible.push(*idx);
+        }
+    }
+    ineligible
+}
+
+fn selection_ineligible_with_pool(
+    route_ineligible: &[usize],
+    resource_ineligible: &[usize],
+    pool_ineligible: &[usize],
+) -> Vec<usize> {
+    let mut ineligible = selection_ineligible(route_ineligible, resource_ineligible);
+    for idx in pool_ineligible {
         if !ineligible.contains(idx) {
             ineligible.push(*idx);
         }
@@ -700,6 +892,39 @@ fn record_fallback(
     state.metrics.record_fallback(labels);
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "pool decision metrics map directly to Prometheus label dimensions"
+)]
+fn record_pool_decision(
+    state: &AppState,
+    route: &WorkloadRoute,
+    priority: Priority,
+    pool: &str,
+    backend: Option<&BackendState>,
+    origin_node: Option<&str>,
+    outcome: &str,
+    candidate_backends: usize,
+    resource_ineligible_backends: usize,
+) {
+    let labels = PoolDecisionLabels {
+        workload: route.kind.as_str().to_string(),
+        priority: priority.as_str().to_string(),
+        pool: pool.to_string(),
+        backend: backend
+            .map(|backend| backend.id.clone())
+            .unwrap_or_default(),
+        node: backend
+            .and_then(|backend| backend.node_id.clone())
+            .unwrap_or_default(),
+        origin_node: origin_node.unwrap_or("").to_string(),
+        outcome: outcome.to_string(),
+    };
+    state
+        .metrics
+        .record_pool_decision(labels, candidate_backends, resource_ineligible_backends);
+}
+
 fn record_retry(
     state: &AppState,
     workload: &str,
@@ -753,7 +978,7 @@ fn upstream_response(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{BackendConfig, WorkloadKind};
+    use crate::config::{BackendConfig, WorkloadKind, WorkloadPoolPolicy};
     use crate::{build_router, router::BackendState, router::SessionAffinity};
     use axum::{
         http::{Request, StatusCode},
@@ -762,6 +987,7 @@ mod tests {
     };
     use serde_json::json;
     use std::{
+        collections::BTreeMap,
         io,
         sync::{
             atomic::{AtomicBool, AtomicUsize, Ordering},
@@ -883,9 +1109,17 @@ mod tests {
     }
 
     async fn start_fairlead_with_backends(backends: Vec<BackendState>) -> String {
+        start_fairlead_with_workload_pools(backends, WorkloadPoolPolicy::default()).await
+    }
+
+    async fn start_fairlead_with_workload_pools(
+        backends: Vec<BackendState>,
+        workload_pools: WorkloadPoolPolicy,
+    ) -> String {
         let state = AppState {
             client: reqwest::Client::new(),
             backends,
+            workload_pools,
             affinity: SessionAffinity::default(),
             metrics: crate::metrics::RoutingMetrics::default(),
             callback_policy: crate::callbacks::CallbackPolicy::default(),
@@ -1197,6 +1431,7 @@ mod tests {
         let state = AppState {
             client: reqwest::Client::new(),
             backends: vec![BackendState::new(backend, 10, Duration::from_secs(60))],
+            workload_pools: WorkloadPoolPolicy::default(),
             affinity: SessionAffinity::default(),
             metrics: crate::metrics::RoutingMetrics::default(),
             callback_policy: crate::callbacks::CallbackPolicy::default(),
@@ -1276,6 +1511,7 @@ mod tests {
         let state = AppState {
             client: reqwest::Client::new(),
             backends: vec![BackendState::new(backend, 10, Duration::from_secs(60))],
+            workload_pools: WorkloadPoolPolicy::default(),
             affinity: SessionAffinity::default(),
             metrics: crate::metrics::RoutingMetrics::default(),
             callback_policy: crate::callbacks::CallbackPolicy::default(),
@@ -1337,6 +1573,7 @@ mod tests {
         let state = AppState {
             client: reqwest::Client::new(),
             backends: vec![BackendState::new(backend, 10, Duration::from_secs(60))],
+            workload_pools: WorkloadPoolPolicy::default(),
             affinity: SessionAffinity::default(),
             metrics: crate::metrics::RoutingMetrics::default(),
             callback_policy: crate::callbacks::CallbackPolicy::default(),
@@ -1769,6 +2006,351 @@ mod tests {
             "embedding"
         );
         assert_eq!(skipped_hits.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn chat_completions_skips_backend_outside_workload_pool() {
+        let skipped_hits = Arc::new(AtomicUsize::new(0));
+        let skipped_hits_for_route = skipped_hits.clone();
+        let skipped = Router::new().route(
+            "/v1/chat/completions",
+            post(move || {
+                let hits = skipped_hits_for_route.clone();
+                async move {
+                    hits.fetch_add(1, Ordering::SeqCst);
+                    axum::Json(json!({"source":"peer"}))
+                }
+            }),
+        );
+        let selected = Router::new().route(
+            "/v1/chat/completions",
+            post(|| async { axum::Json(json!({"source":"local"})) }),
+        );
+        let skipped_url = start_mock(skipped).await;
+        let selected_url = start_mock(selected).await;
+        let workload_pools = WorkloadPoolPolicy::new(BTreeMap::from([(
+            "chat_completions".to_string(),
+            vec!["local-llm".to_string()],
+        )]));
+        let fairlead = start_fairlead_with_workload_pools(
+            vec![
+                backend_with_workloads(
+                    skipped_url,
+                    "peer-chat",
+                    "peer-llm",
+                    vec![WorkloadKind::ChatCompletions],
+                ),
+                backend_with_workloads(
+                    selected_url,
+                    "local-chat",
+                    "local-llm",
+                    vec![WorkloadKind::ChatCompletions],
+                ),
+            ],
+            workload_pools,
+        )
+        .await;
+
+        let resp = reqwest::Client::new()
+            .post(format!("{}/v1/chat/completions", fairlead))
+            .json(&json!({"model":"m","messages":[]}))
+            .send()
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), 200);
+        assert_eq!(
+            resp.json::<serde_json::Value>().await.unwrap()["source"],
+            "local"
+        );
+        assert_eq!(skipped_hits.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn workload_pool_policy_order_precedes_backend_order() {
+        let peer = Router::new().route(
+            "/v1/chat/completions",
+            post(|| async { axum::Json(json!({"source":"peer"})) }),
+        );
+        let local = Router::new().route(
+            "/v1/chat/completions",
+            post(|| async { axum::Json(json!({"source":"local"})) }),
+        );
+        let peer_url = start_mock(peer).await;
+        let local_url = start_mock(local).await;
+        let workload_pools = WorkloadPoolPolicy::new(BTreeMap::from([(
+            "chat_completions".to_string(),
+            vec!["local-llm".to_string(), "peer-llm".to_string()],
+        )]));
+        let fairlead = start_fairlead_with_workload_pools(
+            vec![
+                backend_with_workloads(
+                    peer_url,
+                    "peer-chat",
+                    "peer-llm",
+                    vec![WorkloadKind::ChatCompletions],
+                ),
+                backend_with_workloads(
+                    local_url,
+                    "local-chat",
+                    "local-llm",
+                    vec![WorkloadKind::ChatCompletions],
+                ),
+            ],
+            workload_pools,
+        )
+        .await;
+
+        let resp = reqwest::Client::new()
+            .post(format!("{}/v1/chat/completions", fairlead))
+            .json(&json!({"model":"m","messages":[]}))
+            .send()
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), 200);
+        assert_eq!(
+            resp.json::<serde_json::Value>().await.unwrap()["source"],
+            "local"
+        );
+
+        let metrics = reqwest::get(format!("{}/metrics", fairlead))
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap();
+        assert!(metrics.contains(
+            "fairlead_pool_selections_total{workload=\"chat_completions\",priority=\"realtime\",pool=\"local-llm\",backend=\"local-chat\",node=\"\",origin_node=\"\",outcome=\"selected\"} 1"
+        ));
+        assert!(metrics.contains(
+            "fairlead_pool_candidate_backends_total{workload=\"chat_completions\",priority=\"realtime\",pool=\"local-llm\",backend=\"local-chat\",node=\"\",origin_node=\"\",outcome=\"selected\"} 1"
+        ));
+        assert!(metrics.contains(
+            "fairlead_pool_resource_ineligible_backends_total{workload=\"chat_completions\",priority=\"realtime\",pool=\"local-llm\",backend=\"local-chat\",node=\"\",origin_node=\"\",outcome=\"selected\"} 0"
+        ));
+    }
+
+    #[tokio::test]
+    async fn workload_pool_policy_falls_back_to_later_pool_when_earlier_pool_open() {
+        let local = Router::new().route(
+            "/v1/chat/completions",
+            post(|| async { axum::Json(json!({"source":"local"})) }),
+        );
+        let peer = Router::new().route(
+            "/v1/chat/completions",
+            post(|| async { axum::Json(json!({"source":"peer"})) }),
+        );
+        let local_url = start_mock(local).await;
+        let peer_url = start_mock(peer).await;
+        let local_backend = backend_with_workloads(
+            local_url,
+            "local-chat",
+            "local-llm",
+            vec![WorkloadKind::ChatCompletions],
+        );
+        for _ in 0..10 {
+            local_backend.circuit.write().await.record_failure();
+        }
+
+        let workload_pools = WorkloadPoolPolicy::new(BTreeMap::from([(
+            "chat_completions".to_string(),
+            vec!["local-llm".to_string(), "peer-llm".to_string()],
+        )]));
+        let fairlead = start_fairlead_with_workload_pools(
+            vec![
+                local_backend,
+                backend_with_workloads(
+                    peer_url,
+                    "peer-chat",
+                    "peer-llm",
+                    vec![WorkloadKind::ChatCompletions],
+                ),
+            ],
+            workload_pools,
+        )
+        .await;
+
+        let resp = reqwest::Client::new()
+            .post(format!("{}/v1/chat/completions", fairlead))
+            .json(&json!({"model":"m","messages":[]}))
+            .send()
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), 200);
+        assert_eq!(
+            resp.json::<serde_json::Value>().await.unwrap()["source"],
+            "peer"
+        );
+
+        let metrics = reqwest::get(format!("{}/metrics", fairlead))
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap();
+        assert!(metrics.contains(
+            "fairlead_pool_selections_total{workload=\"chat_completions\",priority=\"realtime\",pool=\"local-llm\",backend=\"\",node=\"\",origin_node=\"\",outcome=\"unavailable\"} 1"
+        ));
+        assert!(metrics.contains(
+            "fairlead_pool_candidate_backends_total{workload=\"chat_completions\",priority=\"realtime\",pool=\"local-llm\",backend=\"\",node=\"\",origin_node=\"\",outcome=\"unavailable\"} 1"
+        ));
+        assert!(metrics.contains(
+            "fairlead_pool_selections_total{workload=\"chat_completions\",priority=\"realtime\",pool=\"peer-llm\",backend=\"peer-chat\",node=\"\",origin_node=\"\",outcome=\"selected\"} 1"
+        ));
+        assert!(metrics.contains(
+            "fairlead_pool_candidate_backends_total{workload=\"chat_completions\",priority=\"realtime\",pool=\"peer-llm\",backend=\"peer-chat\",node=\"\",origin_node=\"\",outcome=\"selected\"} 1"
+        ));
+    }
+
+    #[tokio::test]
+    async fn workload_pool_order_precedes_origin_locality_across_pools() {
+        let local_pool_backend = Router::new().route(
+            "/v1/chat/completions",
+            post(|| async { axum::Json(json!({"source":"local-pool"})) }),
+        );
+        let origin_pool_backend = Router::new().route(
+            "/v1/chat/completions",
+            post(|| async { axum::Json(json!({"source":"origin-pool"})) }),
+        );
+        let local_pool_url = start_mock(local_pool_backend).await;
+        let origin_pool_url = start_mock(origin_pool_backend).await;
+        let workload_pools = WorkloadPoolPolicy::new(BTreeMap::from([(
+            "chat_completions".to_string(),
+            vec!["local-llm".to_string(), "peer-llm".to_string()],
+        )]));
+        let fairlead = start_fairlead_with_workload_pools(
+            vec![
+                BackendState::from_config(
+                    BackendConfig {
+                        id: "local-pool-chat".into(),
+                        url: local_pool_url,
+                        node_id: Some("node-a".into()),
+                        pool: "local-llm".into(),
+                        workloads: vec![WorkloadKind::ChatCompletions],
+                        health_path: None,
+                    },
+                    10,
+                    Duration::from_secs(60),
+                ),
+                BackendState::from_config(
+                    BackendConfig {
+                        id: "origin-peer-chat".into(),
+                        url: origin_pool_url,
+                        node_id: Some("node-b".into()),
+                        pool: "peer-llm".into(),
+                        workloads: vec![WorkloadKind::ChatCompletions],
+                        health_path: None,
+                    },
+                    10,
+                    Duration::from_secs(60),
+                ),
+            ],
+            workload_pools,
+        )
+        .await;
+
+        let resp = reqwest::Client::new()
+            .post(format!("{}/v1/chat/completions", fairlead))
+            .header("x-fairlead-origin-node", "node-b")
+            .json(&json!({"model":"m","messages":[]}))
+            .send()
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), 200);
+        assert_eq!(
+            resp.json::<serde_json::Value>().await.unwrap()["source"],
+            "local-pool"
+        );
+    }
+
+    #[tokio::test]
+    async fn workload_pool_policy_returns_503_when_no_backend_is_allowed() {
+        let hits = Arc::new(AtomicUsize::new(0));
+        let hits_for_route = hits.clone();
+        let backend = Router::new().route(
+            "/v1/chat/completions",
+            post(move || {
+                let hits = hits_for_route.clone();
+                async move {
+                    hits.fetch_add(1, Ordering::SeqCst);
+                    axum::Json(json!({"source":"peer"}))
+                }
+            }),
+        );
+        let backend_url = start_mock(backend).await;
+        let workload_pools = WorkloadPoolPolicy::new(BTreeMap::from([(
+            "chat_completions".to_string(),
+            vec!["local-llm".to_string()],
+        )]));
+        let fairlead = start_fairlead_with_workload_pools(
+            vec![backend_with_workloads(
+                backend_url,
+                "peer-chat",
+                "peer-llm",
+                vec![WorkloadKind::ChatCompletions],
+            )],
+            workload_pools,
+        )
+        .await;
+
+        let resp = reqwest::Client::new()
+            .post(format!("{}/v1/chat/completions", fairlead))
+            .json(&json!({"model":"m","messages":[]}))
+            .send()
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            resp.text().await.unwrap(),
+            "no backends configured for workload"
+        );
+        assert_eq!(hits.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn missing_workload_pool_policy_remains_permissive() {
+        let selected = Router::new().route(
+            "/v1/embeddings",
+            post(|| async {
+                axum::Json(json!({
+                    "object":"list",
+                    "data":[{"object":"embedding","index":0,"embedding":[0.2]}],
+                    "model":"embedding"
+                }))
+            }),
+        );
+        let selected_url = start_mock(selected).await;
+        let workload_pools = WorkloadPoolPolicy::new(BTreeMap::from([(
+            "chat_completions".to_string(),
+            vec!["local-llm".to_string()],
+        )]));
+        let fairlead = start_fairlead_with_workload_pools(
+            vec![backend_with_workloads(
+                selected_url,
+                "embedding",
+                "embedding",
+                vec![WorkloadKind::Embeddings],
+            )],
+            workload_pools,
+        )
+        .await;
+
+        let resp = reqwest::Client::new()
+            .post(format!("{}/v1/embeddings", fairlead))
+            .json(&json!({"model":"m","input":"hello"}))
+            .send()
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), 200);
+        assert_eq!(
+            resp.json::<serde_json::Value>().await.unwrap()["model"],
+            "embedding"
+        );
     }
 
     #[tokio::test]
@@ -2361,6 +2943,10 @@ mod tests {
                 backend_on_node(node_a_url, "node-a"),
                 backend_on_node(node_b_url, "node-b"),
             ],
+            workload_pools: WorkloadPoolPolicy::new(BTreeMap::from([(
+                "chat_completions".to_string(),
+                vec!["local-llm".to_string()],
+            )])),
             affinity: SessionAffinity::default(),
             metrics: crate::metrics::RoutingMetrics::default(),
             callback_policy: crate::callbacks::CallbackPolicy::default(),
@@ -2403,6 +2989,9 @@ mod tests {
         assert!(metrics.contains(
             "fairlead_fallbacks_total{workload=\"chat_completions\",priority=\"realtime\",backend=\"node-b-vllm\",node=\"node-b\",pool=\"local-llm\",origin_node=\"node-a\",reason=\"resource_unavailable\"} 1"
         ));
+        assert!(metrics.contains(
+            "fairlead_pool_resource_ineligible_backends_total{workload=\"chat_completions\",priority=\"realtime\",pool=\"local-llm\",backend=\"node-b-vllm\",node=\"node-b\",origin_node=\"node-a\",outcome=\"selected\"} 1"
+        ));
     }
 
     #[tokio::test]
@@ -2444,6 +3033,7 @@ mod tests {
                 backend_on_node(node_a_url, "node-a"),
                 backend_on_node(node_b_url, "node-b"),
             ],
+            workload_pools: WorkloadPoolPolicy::default(),
             affinity: SessionAffinity::default(),
             metrics: crate::metrics::RoutingMetrics::default(),
             callback_policy: crate::callbacks::CallbackPolicy::default(),
@@ -2514,6 +3104,7 @@ mod tests {
                 backend_on_node(node_a_url, "node-a"),
                 backend_on_node(node_b_url, "node-b"),
             ],
+            workload_pools: WorkloadPoolPolicy::default(),
             affinity: SessionAffinity::default(),
             metrics: crate::metrics::RoutingMetrics::default(),
             callback_policy: crate::callbacks::CallbackPolicy::default(),
@@ -2566,6 +3157,7 @@ mod tests {
                 backend_on_node("http://node-a:8000/v1".into(), "node-a"),
                 backend_on_node("http://node-b:8000/v1".into(), "node-b"),
             ],
+            workload_pools: WorkloadPoolPolicy::default(),
             affinity: SessionAffinity::default(),
             metrics: crate::metrics::RoutingMetrics::default(),
             callback_policy: crate::callbacks::CallbackPolicy::default(),
@@ -2613,6 +3205,7 @@ mod tests {
         let state = AppState {
             client: reqwest::Client::new(),
             backends: vec![node_a_backend, backend_on_node(node_b_url, "node-b")],
+            workload_pools: WorkloadPoolPolicy::default(),
             affinity: SessionAffinity::default(),
             metrics: crate::metrics::RoutingMetrics::default(),
             callback_policy: crate::callbacks::CallbackPolicy::default(),
@@ -2857,6 +3450,7 @@ mod tests {
         let state = AppState {
             client: reqwest::Client::new(),
             backends: vec![BackendState::new(backend, 10, Duration::from_secs(60))],
+            workload_pools: WorkloadPoolPolicy::default(),
             affinity: affinity.clone(),
             metrics: crate::metrics::RoutingMetrics::default(),
             callback_policy: crate::callbacks::CallbackPolicy::default(),

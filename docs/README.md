@@ -36,7 +36,9 @@ detail.
 
 ## Current Work
 
-- [`current_work/phase_7a_helm.md`](current_work/phase_7a_helm.md) — active
+- [`current_work/phase_7b_trimmer.md`](current_work/phase_7b_trimmer.md) —
+  active Phase 7B synchronous backend pool routing notes.
+- [`current_work/phase_7a_helm.md`](current_work/phase_7a_helm.md) — completed
   Phase 7A pool model and validation notes.
 - [`current_work/phase_6f_stay.md`](current_work/phase_6f_stay.md) — completed
   Phase 6F callback delivery and finalization notes.

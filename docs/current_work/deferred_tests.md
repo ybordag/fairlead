@@ -108,7 +108,7 @@ After Phase 7B and 7C consume the validated policy, add local and DGX Spark e2e
 tests for complete pool placement behavior:
 
 - synchronous workload pool allowlists select only eligible backend pools
-- ordered pool fallback chains, if implemented, behave as documented
+- ordered pool fallback chains behave as documented
 - pool policy interacts correctly with origin locality, affinity, resource
   ranking, circuit state, and same-request retry
 - async workers register with pools and only claim jobs whose workload can use
@@ -121,6 +121,49 @@ tests for complete pool placement behavior:
 **Why deferred:** Phase 7A intentionally stops at config and validation. The
 routing, async placement, and deployment behavior belongs to Phase 7B through
 7D and needs a richer process/deployment harness.
+
+### `phase_7b_sync_pool_routing_process_e2e`
+
+Add an opt-in process-level e2e for synchronous pool routing with local mock
+OpenAI-compatible backends:
+
+- start Fairlead with `POOLS_JSON`, `BACKENDS_JSON`, and `WORKLOAD_POOLS_JSON`
+  describing at least `local-llm` and `peer-llm`
+- verify chat selects the first configured workload pool even when backend order
+  lists the peer pool first
+- verify `X-Fairlead-Origin-Node` only affects selection inside the current pool
+  and does not jump to a later pool while an earlier pool is selectable
+- trip or stop every backend in the first pool and verify selection falls back
+  to the second pool
+- make the first-pool backend return a retryable 5xx and verify same-request
+  retry moves to the next pool only after the first pool is exhausted
+- verify a workload omitted from explicit `WORKLOAD_POOLS_JSON` remains
+  permissive until the Phase 7D strict-policy decision
+- verify `/metrics` includes `fairlead_pool_selections_total`,
+  `fairlead_pool_candidate_backends_total`, and
+  `fairlead_pool_resource_ineligible_backends_total` with expected labels
+
+**Why deferred:** The in-process Rust tests cover the routing and metric logic.
+This e2e should exercise real process startup, environment parsing, port
+allocation, mock process lifecycle, and Prometheus scraping.
+
+### `phase_7b_dgx_sync_pool_routing_smoke_test`
+
+Add an opt-in DGX Spark smoke test for synchronous pool routing:
+
+- configure two DGX Spark nodes connected over InfiniBand with each node running
+  a vLLM backend
+- use pool names that match the documented local/peer deployment shape
+- verify local-pool routing, peer-pool fallback, and pool metrics through real
+  Fairlead HTTP calls
+- report resource pressure for the first pool and verify Fairlead records
+  per-pool resource-ineligible counts while selecting the later pool
+- verify circuit-open recovery returns traffic to the earlier pool after health
+  probes close the circuit
+
+**Why deferred:** This needs real DGX hosts, vLLM startup, network reachability,
+resource-report commands, and controlled backend lifecycle. It should be an
+opt-in deployment smoke test, not part of the default Rust suite.
 
 ### `phase_6c_worker_claims_and_leases`
 

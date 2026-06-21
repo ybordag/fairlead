@@ -17,6 +17,7 @@ struct RoutingMetricsInner {
     requests: HashMap<RequestLabels, RequestAggregate>,
     retries: HashMap<RetryLabels, u64>,
     fallbacks: HashMap<FallbackLabels, u64>,
+    pool_decisions: HashMap<PoolDecisionLabels, PoolDecisionAggregate>,
     callbacks: HashMap<CallbackLabels, u64>,
 }
 
@@ -55,6 +56,17 @@ pub struct FallbackLabels {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct PoolDecisionLabels {
+    pub workload: String,
+    pub priority: String,
+    pub pool: String,
+    pub backend: String,
+    pub node: String,
+    pub origin_node: String,
+    pub outcome: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct CallbackLabels {
     pub kind: String,
     pub status: String,
@@ -66,6 +78,13 @@ pub struct CallbackLabels {
 struct RequestAggregate {
     count: u64,
     latency_sum_seconds: f64,
+}
+
+#[derive(Default)]
+struct PoolDecisionAggregate {
+    decisions: u64,
+    candidate_backends: u64,
+    resource_ineligible_backends: u64,
 }
 
 impl RoutingMetrics {
@@ -84,6 +103,19 @@ impl RoutingMetrics {
     pub fn record_fallback(&self, labels: FallbackLabels) {
         let mut guard = self.inner.lock().expect("routing metrics mutex poisoned");
         *guard.fallbacks.entry(labels).or_default() += 1;
+    }
+
+    pub fn record_pool_decision(
+        &self,
+        labels: PoolDecisionLabels,
+        candidate_backends: usize,
+        resource_ineligible_backends: usize,
+    ) {
+        let mut guard = self.inner.lock().expect("routing metrics mutex poisoned");
+        let aggregate = guard.pool_decisions.entry(labels).or_default();
+        aggregate.decisions += 1;
+        aggregate.candidate_backends += candidate_backends as u64;
+        aggregate.resource_ineligible_backends += resource_ineligible_backends as u64;
     }
 
     pub fn record_callback(&self, labels: CallbackLabels) {
@@ -180,6 +212,51 @@ impl RoutingMetrics {
                 prometheus_escape(&labels.origin_node),
                 prometheus_escape(&labels.reason),
                 count,
+            ));
+        }
+
+        body.push_str(
+            "# HELP fairlead_pool_selections_total Synchronous pool routing decisions by pool and outcome\n\
+             # TYPE fairlead_pool_selections_total counter\n\
+             # HELP fairlead_pool_candidate_backends_total Total candidate backends observed during pool routing decisions\n\
+             # TYPE fairlead_pool_candidate_backends_total counter\n\
+             # HELP fairlead_pool_resource_ineligible_backends_total Total resource-ineligible backends observed during pool routing decisions\n\
+             # TYPE fairlead_pool_resource_ineligible_backends_total counter\n",
+        );
+
+        for (labels, aggregate) in &guard.pool_decisions {
+            body.push_str(&format!(
+                "fairlead_pool_selections_total{{workload=\"{}\",priority=\"{}\",pool=\"{}\",backend=\"{}\",node=\"{}\",origin_node=\"{}\",outcome=\"{}\"}} {}\n",
+                prometheus_escape(&labels.workload),
+                prometheus_escape(&labels.priority),
+                prometheus_escape(&labels.pool),
+                prometheus_escape(&labels.backend),
+                prometheus_escape(&labels.node),
+                prometheus_escape(&labels.origin_node),
+                prometheus_escape(&labels.outcome),
+                aggregate.decisions,
+            ));
+            body.push_str(&format!(
+                "fairlead_pool_candidate_backends_total{{workload=\"{}\",priority=\"{}\",pool=\"{}\",backend=\"{}\",node=\"{}\",origin_node=\"{}\",outcome=\"{}\"}} {}\n",
+                prometheus_escape(&labels.workload),
+                prometheus_escape(&labels.priority),
+                prometheus_escape(&labels.pool),
+                prometheus_escape(&labels.backend),
+                prometheus_escape(&labels.node),
+                prometheus_escape(&labels.origin_node),
+                prometheus_escape(&labels.outcome),
+                aggregate.candidate_backends,
+            ));
+            body.push_str(&format!(
+                "fairlead_pool_resource_ineligible_backends_total{{workload=\"{}\",priority=\"{}\",pool=\"{}\",backend=\"{}\",node=\"{}\",origin_node=\"{}\",outcome=\"{}\"}} {}\n",
+                prometheus_escape(&labels.workload),
+                prometheus_escape(&labels.priority),
+                prometheus_escape(&labels.pool),
+                prometheus_escape(&labels.backend),
+                prometheus_escape(&labels.node),
+                prometheus_escape(&labels.origin_node),
+                prometheus_escape(&labels.outcome),
+                aggregate.resource_ineligible_backends,
             ));
         }
 
@@ -436,6 +513,7 @@ mod tests {
         let state = AppState {
             client: reqwest::Client::new(),
             backends,
+            workload_pools: crate::config::WorkloadPoolPolicy::default(),
             affinity: crate::router::SessionAffinity::default(),
             metrics: RoutingMetrics::default(),
             callback_policy: crate::callbacks::CallbackPolicy::default(),
@@ -667,6 +745,7 @@ mod tests {
         let state = AppState {
             client: reqwest::Client::new(),
             backends: vec![],
+            workload_pools: crate::config::WorkloadPoolPolicy::default(),
             affinity: crate::router::SessionAffinity::default(),
             metrics: RoutingMetrics::default(),
             callback_policy: crate::callbacks::CallbackPolicy::default(),
@@ -712,6 +791,7 @@ mod tests {
         let state = AppState {
             client: reqwest::Client::new(),
             backends: vec![],
+            workload_pools: crate::config::WorkloadPoolPolicy::default(),
             affinity: crate::router::SessionAffinity::default(),
             metrics: RoutingMetrics::default(),
             callback_policy: crate::callbacks::CallbackPolicy::default(),

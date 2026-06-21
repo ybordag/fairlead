@@ -36,6 +36,8 @@ pub struct AppState {
     pub client: reqwest::Client,
     /// Ordered list of configured backends with their circuit breakers.
     pub backends: Vec<BackendState>,
+    /// Workload-to-pool eligibility policy for placement decisions.
+    pub workload_pools: config::WorkloadPoolPolicy,
     /// Thread-ID → backend-index affinity map.
     pub affinity: SessionAffinity,
     /// In-process routing metrics rendered by `/metrics`.
@@ -114,6 +116,7 @@ async fn main() -> anyhow::Result<()> {
     let state = AppState {
         client: client.clone(),
         backends,
+        workload_pools: cfg.workload_pools.clone(),
         affinity: SessionAffinity::default(),
         metrics: metrics.clone(),
         callback_policy,
@@ -208,6 +211,7 @@ mod tests {
         let state = AppState {
             client: reqwest::Client::new(),
             backends: vec![],
+            workload_pools: config::WorkloadPoolPolicy::default(),
             affinity: SessionAffinity::default(),
             metrics: RoutingMetrics::default(),
             callback_policy: callbacks::CallbackPolicy::default(),

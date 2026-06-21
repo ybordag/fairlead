@@ -126,8 +126,9 @@ Fairlead currently provides:
 
 It does not yet provide:
 
-- Complete pool-aware backend configuration, fallback chains, or placement
-  policy across sync backends and async workers.
+- Async worker pool placement or shared sync/async pool demos. Synchronous
+  backend pool configuration and ordered fallback chains are implemented in
+  Phase 7B.
 - CPU resource accounting and richer resource dimensions beyond coarse VRAM/load.
 - Durable starvation/fairness policy beyond current priority queue ordering.
 - Worker deregistration, graceful shutdown, or completed-job pruning.
@@ -175,9 +176,12 @@ system.
   retry policy,
   backend pool name,
   metric labels.
-- [ ] Complete pool-aware backend configuration and routing policy. Deferred to
-  **Phase 7: Pool-Aware Placement** so the design can cover both synchronous
-  backends and async workers.
+- [x] Complete synchronous pool-aware backend configuration and routing policy.
+  Phase 7B applies workload pool policy to chat and embedding routing with
+  ordered pool fallback.
+- [ ] Complete async worker pool placement. Deferred to **Phase 7C:
+  Async Worker Pool Placement** so queued jobs and registered workers use the
+  same pool vocabulary as synchronous backends.
 - [x] Preserve a default backend pool for today's simple `BACKENDS` config.
 - [x] Add provider/header forwarding policy:
   content type,
@@ -799,12 +803,16 @@ async workers.
 
 #### Phase 7B: Synchronous Backend Pool Routing
 
-- Route OpenAI-compatible chat and embedding requests through workload-selected
+- [x] Route OpenAI-compatible chat and embedding requests through workload-selected
   backend pools.
-- Add pool fallback chains, such as local GPU pool -> peer GPU pool.
-- Keep cloud overflow as a future pool target, not an implemented provider path.
-- Add per-pool synchronous metrics for candidate counts, selected pool/backend,
+- [x] Add ordered pool fallback chains, such as local GPU pool -> peer GPU pool.
+  Within each pool, existing locality, affinity, resource ranking, and backend
+  order choose the concrete backend.
+- [x] Keep cloud overflow as a future pool target, not an implemented provider path.
+- [x] Add per-pool synchronous metrics for candidate counts, selected pool/backend,
   fallback reason, and capacity pressure.
+- [x] Keep explicit workload pool policy permissive for omitted workloads until
+  the Phase 7D closeout decision.
 
 #### Phase 7C: Async Worker Pool Placement
 
@@ -820,6 +828,8 @@ async workers.
 - Document local DGX pools, peer-node pools, and shared Fairlead deployments.
 - Add local demo config that shows sync and async workloads using the same pool
   vocabulary.
+- Decide whether explicit `WORKLOAD_POOLS_JSON` should stay a partial override
+  or become strict after both sync and async placement paths are implemented.
 - Update deferred e2e plans for future cloud overflow pools.
 
 ### Phase 8: Scheduler Hardening
