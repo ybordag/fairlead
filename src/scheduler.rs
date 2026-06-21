@@ -48,6 +48,8 @@ pub async fn claim_worker_job_handler(
         return (StatusCode::CONFLICT, "worker is stale").into_response();
     }
 
+    state.jobs.requeue_expired_leases().await;
+
     match state
         .jobs
         .claim_next_for_worker(&worker.id, &worker.job_types, DEFAULT_LEASE_DURATION_MS)
@@ -439,6 +441,58 @@ mod tests {
 
         assert_eq!(first.status(), StatusCode::OK);
         assert_eq!(second.status(), StatusCode::NO_CONTENT);
+    }
+
+    #[tokio::test]
+    async fn worker_claim_endpoint_requeues_expired_leases_before_claiming() {
+        let jobs = JobRegistry::default();
+        let workers = WorkerRegistry::default();
+
+        jobs.submit(SubmitJobRequest {
+            kind: JobKind::VisionAnalysis,
+            priority: Priority::Batch,
+            payload: Value::Null,
+            callback_url: None,
+        })
+        .await
+        .unwrap();
+        jobs.claim_next_for_worker("old-worker", &[JobKind::VisionAnalysis], 0)
+            .await
+            .unwrap();
+        workers
+            .register(RegisterWorkerRequest {
+                id: "vision-worker".into(),
+                endpoint_url: "http://vision-worker:9000".into(),
+                node_id: None,
+                job_types: vec![JobKind::VisionAnalysis],
+                max_concurrent_jobs: None,
+                available_vram_mb: None,
+            })
+            .await
+            .unwrap();
+
+        let app = build_router(test_state(jobs.clone(), workers));
+        let response = app
+            .oneshot(
+                Request::post("/v1/workers/vision-worker/claim")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(value["job"]["id"], "job-1");
+        assert_eq!(value["job"]["attempts"], 2);
+        assert_eq!(value["job"]["lease"]["worker_id"], "vision-worker");
+        assert_eq!(
+            jobs.get("job-1").await.unwrap().status,
+            crate::jobs::JobStatus::Running
+        );
     }
 
     #[tokio::test]

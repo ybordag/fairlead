@@ -238,9 +238,10 @@ request arrives
 Phase 6B implements the HTTP job surface, non-dispatching worker registration,
 queue visibility, and scheduler preview with in-memory state. Phase 6C adds the
 first worker-pull claim path: Fairlead grants a bounded lease, marks the job
-running, and returns it to the worker. Lease expiry/requeue, worker execution,
-persistence, and callback delivery are later Phase 6 work. The design belongs in
-the architecture because it defines Fairlead's boundary: Fairlead should be a
+running, and returns it to the worker. Fairlead also opportunistically requeues
+expired running leases before fresh workers claim more work. Worker execution,
+persistence, and callback delivery are later Phase 6 work. The design belongs
+in the architecture because it defines Fairlead's boundary: Fairlead should be a
 compute control plane, not a general-purpose workflow engine.
 
 ```
@@ -272,9 +273,11 @@ Current Phase 6B/6C behavior:
   worker without changing job state
 - `POST /v1/workers/{id}/claim` validates the worker, grants a lease for a
   compatible queued job, marks it `running`, and removes it from queue metrics
+- worker claims first sweep expired leases: expired jobs reenter their priority
+  queue if attempts remain, otherwise they become `failed`
 - no job is dispatched to a worker yet
 - no callback is delivered yet
-- no durable queue, lease expiry/requeue loop, or scheduler loop exists yet
+- no durable queue or background scheduler loop exists yet
 
 Future Phase 6C+ behavior after lease expiry and execution support:
 
@@ -349,6 +352,34 @@ This choice has useful downstream consequences:
 The internal implementation may still live in scheduler/job modules and must
 mutate job state atomically. The route shape describes the actor; it does not
 weaken Fairlead's central scheduling authority.
+
+### Future gRPC transport
+
+Fairlead currently exposes HTTP/JSON APIs and forwards synchronous LLM requests
+to OpenAI-compatible HTTP backends such as vLLM. That should remain the default
+compatibility surface because it works with existing OpenAI clients, vLLM, demos,
+and simple service-to-service calls.
+
+gRPC can still be useful later as an optional transport layer once the job and
+worker contracts stabilize. The important split is:
+
+- inbound client transport: Rhizome or another caller talks to Fairlead
+- scheduling core: Fairlead validates, queues, leases, retries, and records jobs
+- outbound backend adapter: Fairlead talks to vLLM, a vision worker, or another
+  compute service
+
+Possible later shapes:
+
+```text
+Rhizome --gRPC--> Fairlead --HTTP/OpenAI--> vLLM
+worker  --gRPC--> Fairlead claim/heartbeat/complete APIs
+Fairlead --gRPC--> worker service, if that worker exposes typed RPCs
+```
+
+This is not Phase 6C scope. Adding gRPC well means defining protobuf contracts,
+generating Rust/Python clients, testing HTTP/gRPC parity, deciding streaming
+semantics, and preserving OpenAI-compatible HTTP behavior for LLM endpoints.
+It fits better in Phase 7 adapter work or a later transport/SDK hardening phase.
 
 ### Scheduler boundaries
 

@@ -77,7 +77,8 @@ Implemented generalization work includes:
 - **Non-dispatching scheduler preview** that shows the next queued job and fresh
   compatible worker without leasing, running, or dispatching the job.
 - **Worker-pull claim groundwork** that leases a compatible queued job to a
-  fresh worker and marks it running without calling the worker yet.
+  fresh worker, marks it running, and requeues expired leases when attempts
+  remain.
 
 Future Phase 6 subphases add worker execution, durable job state, callback
 delivery, and async completion metrics. Later phases add complete pool-aware

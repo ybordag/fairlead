@@ -1241,11 +1241,14 @@ lease is created, and Fairlead does not call the worker endpoint.
 1. Fairlead looks up the worker by ID.
 2. If the worker is missing, Fairlead returns `404`.
 3. If the worker is stale, Fairlead returns `409`.
-4. Otherwise, `JobRegistry::claim_next_for_worker()` scans queued jobs in
+4. Otherwise, `JobRegistry::requeue_expired_leases()` sweeps running jobs whose
+   leases have expired. Jobs with attempts left return to their priority queue;
+   jobs with exhausted attempts become `failed`.
+5. `JobRegistry::claim_next_for_worker()` scans queued jobs in
    priority/FIFO order for a job type the worker supports.
-5. If a match exists, the job becomes `running`, `attempts` increments, lease
+6. If a match exists, the job becomes `running`, `attempts` increments, lease
    metadata is attached, and the job is removed from queue-depth accounting.
-6. If no compatible queued job exists, Fairlead returns `204`.
+7. If no compatible queued job exists, Fairlead returns `204`.
 
 The claim endpoint still does not call the worker process. It only grants the
 worker a bounded lease and returns the job payload to run.

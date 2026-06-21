@@ -76,7 +76,7 @@ persistence.
 
 ## Project layout
 
-**What exists now (Phases 1–6C first slice):**
+**What exists now (Phases 1–6C current slices):**
 
 ```
 src/
@@ -148,7 +148,8 @@ POST   /v1/workers/{id}/claim — lease a compatible queued job to a worker
 The Phase 6B slices store job records in memory and track explicit per-priority
 queued job IDs. The first Phase 6C slice lets fresh workers claim compatible
 queued jobs. Claimed jobs become `running`, attempts increment, and lease
-metadata is attached. Worker execution, deregistration, lease expiry requeue,
+metadata is attached. Expired running leases are requeued when attempts remain
+and failed when attempts are exhausted. Worker execution, deregistration,
 callback delivery, worker utilization metrics, and SQLite-backed persistence are
 still planned.
 
@@ -351,7 +352,8 @@ WORKER_HEARTBEAT_SECS        — interval before a worker is considered stale
   claimed-at timestamp.
 - [x] Prevent duplicate claims for the same job.
 - [x] Initial cancellation semantics for queued and running jobs.
-- Lease expiry/requeue behavior remains.
+- [x] Requeue expired leases when attempts remain.
+- [x] Mark expired leases failed when attempts are exhausted.
 
 ### Phase 6D+ — Remaining async compute router work
 
