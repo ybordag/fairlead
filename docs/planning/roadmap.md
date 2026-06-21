@@ -126,8 +126,9 @@ Fairlead currently provides:
 
 It does not yet provide:
 
-- Complete pool-aware backend configuration, fallback chains, or placement
-  policy across sync backends and async workers.
+- Async worker pool placement or shared sync/async pool demos. Synchronous
+  backend pool configuration and ordered fallback chains are implemented in
+  Phase 7B.
 - CPU resource accounting and richer resource dimensions beyond coarse VRAM/load.
 - Durable starvation/fairness policy beyond current priority queue ordering.
 - Worker deregistration, graceful shutdown, or completed-job pruning.
@@ -175,9 +176,12 @@ system.
   retry policy,
   backend pool name,
   metric labels.
-- [ ] Complete pool-aware backend configuration and routing policy. Deferred to
-  **Phase 7: Pool-Aware Placement** so the design can cover both synchronous
-  backends and async workers.
+- [x] Complete synchronous pool-aware backend configuration and routing policy.
+  Phase 7B applies workload pool policy to chat and embedding routing with
+  ordered pool fallback.
+- [ ] Complete async worker pool placement. Deferred to **Phase 7C:
+  Async Worker Pool Placement** so queued jobs and registered workers use the
+  same pool vocabulary as synchronous backends.
 - [x] Preserve a default backend pool for today's simple `BACKENDS` config.
 - [x] Add provider/header forwarding policy:
   content type,

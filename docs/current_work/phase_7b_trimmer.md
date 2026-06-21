@@ -54,6 +54,18 @@ Deferred e2e coverage is listed in
 - local process-level sync pool routing e2e
 - DGX Spark sync pool routing smoke test
 
+## Documentation Audit
+
+- Updated the README pool-policy section to describe Phase 7B synchronous pool
+  routing and the remaining Phase 7C/7D pool work.
+- Updated the architecture notes so current routing includes ordered
+  synchronous backend-pool selection, while async worker pool placement remains
+  future work.
+- Updated the roadmap baseline and moderate task list so completed synchronous
+  backend pool routing is not described as missing.
+- Updated the code walkthrough so "not happening yet" points at async worker
+  pool placement rather than synchronous pool routing.
+
 ## Deferrals
 
 - Async worker pool metadata and worker placement belong to `tactician` /

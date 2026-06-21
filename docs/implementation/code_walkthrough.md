@@ -1450,12 +1450,12 @@ The current code does not:
 - Inspect model-specific request JSON.
 - Estimate token count or memory use.
 - Manage CUDA memory.
-- Enforce complete pool-aware routing and placement policies.
+- Apply pool policy to async worker placement yet.
 - Push-dispatch jobs to workers.
 - Reserve GPU memory for a request; resource reports are cooperative control-plane
   hints, not allocator-level reservations.
 
-Push dispatch, completed-job pruning, complete pool-aware placement, and
+Push dispatch, async worker pool placement, completed-job pruning, and
 process-level restart harnesses are future roadmap phases, not current
-behavior. Durable job state and terminal callbacks are current behavior when the
-relevant job store and callback settings are configured.
+behavior. Synchronous backend pool routing, durable job state, and terminal
+callbacks are current behavior when the relevant configuration is enabled.

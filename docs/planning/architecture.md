@@ -202,15 +202,16 @@ if none eligible:
   return 503 now; future phases may queue or fall back to cloud by workload policy
 ```
 
-Current Fairlead implements locality-aware routing and an opt-in
-resource-aware slice. Backends can carry `node_id` metadata, requests can carry
-`X-Fairlead-Origin-Node`, and workers/backends can report resource state through
-`/v1/resources/report`. When `RESOURCE_AWARE_ROUTING=true`, the router skips
-backends without a fresh report that satisfies the workload's coarse VRAM
-estimate, applies locality and affinity precedence, then ranks remaining
-eligible candidates by lower reported load, higher available VRAM, and
-configured order. It does not yet implement backend-pool selection, durable
-queueing, or cloud fallback.
+Current Fairlead implements locality-aware routing, ordered synchronous
+backend-pool selection, and an opt-in resource-aware slice. Backends can carry
+`node_id` and `pool` metadata, requests can carry `X-Fairlead-Origin-Node`, and
+workers/backends can report resource state through `/v1/resources/report`. When
+`RESOURCE_AWARE_ROUTING=true`, the router skips backends without a fresh report
+that satisfies the workload's coarse VRAM estimate, applies pool policy,
+locality, and affinity precedence, then ranks remaining eligible candidates by
+lower reported load, higher available VRAM, and configured order inside the
+selected pool stage. It does not yet implement async worker pool placement,
+durable starvation policy beyond current queue ordering, or cloud fallback.
 
 ### Pool Policy Model
 
@@ -694,9 +695,10 @@ work.
 
 Phases 1–3 give you a working proxy in a few days. Phases 4–5 give you
 production resilience. Phase 6 completes the core sync/async control-plane
-surfaces. Phase 7 adds complete pool-aware placement. Later phases harden the
-scheduler, add adapters, improve resource policy, evaluate scale/overflow, and
-only then add optional transport or SDK layers.
+surfaces. Phase 7 completes pool-aware placement across synchronous backends and
+async workers. Later phases harden the scheduler, add adapters, improve
+resource policy, evaluate scale/overflow, and only then add optional transport
+or SDK layers.
 
 Temporal is intentionally deferred. Fairlead's scheduler should handle bounded
 compute jobs with leases, retries, cancellation, callbacks, and recoverable job

@@ -100,9 +100,9 @@ Implemented generalization work includes:
 - **Terminal job callbacks** with bounded retry/timeout policy,
   success/failure metrics, and SQLite-backed at-least-once restart recovery.
 
-Future phases add complete pool-aware placement, scheduler hardening, adapter
-boundaries, richer resource policy, external scale/overflow, and transport/SDK
-hardening.
+Remaining Phase 7 work adds async worker pool placement and shared pool demos.
+Future phases add scheduler hardening, adapter boundaries, richer resource
+policy, external scale/overflow, and transport/SDK hardening.
 
 See [`docs/planning/roadmap.md`](docs/planning/roadmap.md) for the
 implementation plan and acceptance criteria.
