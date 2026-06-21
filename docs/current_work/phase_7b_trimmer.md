@@ -32,10 +32,27 @@ Goal: apply the validated Phase 7 pool policy to synchronous backend routing.
   - falling back to a later pool when every backend in an earlier pool is open
   - emitting per-pool selected/unavailable metrics
   - emitting per-pool resource pressure metrics
+  - preserving pool-order precedence over cross-pool origin locality
 
-## Remaining 7B Work
+## Test Audit
 
-- Audit docs and tests before opening the `trimmer` PR.
+Immediate 7B coverage includes:
+
+- workload pool allowlist eligibility
+- ordered pool fallback independent of backend order
+- fallback to a later pool when the earlier pool's backends are circuit-open
+- pool-order precedence over cross-pool origin locality
+- permissive behavior for workloads omitted from explicit partial policy
+- `503` without upstream calls when no backend is pool-eligible
+- per-pool selected/unavailable metrics
+- per-pool candidate count metrics
+- per-pool resource pressure metrics
+
+Deferred e2e coverage is listed in
+[`deferred_tests.md`](deferred_tests.md):
+
+- local process-level sync pool routing e2e
+- DGX Spark sync pool routing smoke test
 
 ## Deferrals
 

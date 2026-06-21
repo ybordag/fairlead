@@ -2205,6 +2205,68 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn workload_pool_order_precedes_origin_locality_across_pools() {
+        let local_pool_backend = Router::new().route(
+            "/v1/chat/completions",
+            post(|| async { axum::Json(json!({"source":"local-pool"})) }),
+        );
+        let origin_pool_backend = Router::new().route(
+            "/v1/chat/completions",
+            post(|| async { axum::Json(json!({"source":"origin-pool"})) }),
+        );
+        let local_pool_url = start_mock(local_pool_backend).await;
+        let origin_pool_url = start_mock(origin_pool_backend).await;
+        let workload_pools = WorkloadPoolPolicy::new(BTreeMap::from([(
+            "chat_completions".to_string(),
+            vec!["local-llm".to_string(), "peer-llm".to_string()],
+        )]));
+        let fairlead = start_fairlead_with_workload_pools(
+            vec![
+                BackendState::from_config(
+                    BackendConfig {
+                        id: "local-pool-chat".into(),
+                        url: local_pool_url,
+                        node_id: Some("node-a".into()),
+                        pool: "local-llm".into(),
+                        workloads: vec![WorkloadKind::ChatCompletions],
+                        health_path: None,
+                    },
+                    10,
+                    Duration::from_secs(60),
+                ),
+                BackendState::from_config(
+                    BackendConfig {
+                        id: "origin-peer-chat".into(),
+                        url: origin_pool_url,
+                        node_id: Some("node-b".into()),
+                        pool: "peer-llm".into(),
+                        workloads: vec![WorkloadKind::ChatCompletions],
+                        health_path: None,
+                    },
+                    10,
+                    Duration::from_secs(60),
+                ),
+            ],
+            workload_pools,
+        )
+        .await;
+
+        let resp = reqwest::Client::new()
+            .post(format!("{}/v1/chat/completions", fairlead))
+            .header("x-fairlead-origin-node", "node-b")
+            .json(&json!({"model":"m","messages":[]}))
+            .send()
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), 200);
+        assert_eq!(
+            resp.json::<serde_json::Value>().await.unwrap()["source"],
+            "local-pool"
+        );
+    }
+
+    #[tokio::test]
     async fn workload_pool_policy_returns_503_when_no_backend_is_allowed() {
         let hits = Arc::new(AtomicUsize::new(0));
         let hits_for_route = hits.clone();
