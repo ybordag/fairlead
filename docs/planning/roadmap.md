@@ -893,6 +893,8 @@ workload protocols.
     callback delivery and callback metrics.
   - [x] Add SQLite-backed process restart coverage for pending callback retry
     recovery.
+  - [x] Add SQLite-backed process restart coverage for expired running-lease
+    requeue and reclaim.
   - Add process-level restart e2e harnesses for jobs, leases, callbacks, and
     metrics.
 - Keep Temporal deferred unless application workflows need durable multi-step

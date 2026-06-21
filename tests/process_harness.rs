@@ -1,5 +1,6 @@
 use axum::{routing::post, Json, Router};
 use reqwest::StatusCode;
+use rusqlite::{params, Connection};
 use serde_json::{json, Value};
 use std::{
     collections::VecDeque,
@@ -318,6 +319,54 @@ async fn wait_for_callback_attempt(
     }
 }
 
+fn expire_sqlite_job_lease(db_path: &str, job_id: &str) {
+    let connection = Connection::open(db_path).expect("open SQLite job store for lease edit");
+    let raw_lease: String = connection
+        .query_row(
+            "SELECT lease_json FROM jobs WHERE id = ?1",
+            params![job_id],
+            |row| row.get(0),
+        )
+        .expect("read persisted lease JSON");
+    let mut lease: Value = serde_json::from_str(&raw_lease).expect("parse persisted lease JSON");
+    let expired_at = current_unix_ms().saturating_sub(1);
+    lease["expires_at_unix_ms"] = json!(expired_at);
+    connection
+        .execute(
+            "UPDATE jobs SET lease_json = ?1, updated_at_unix_ms = ?2 WHERE id = ?3",
+            params![lease.to_string(), expired_at as i64, job_id],
+        )
+        .expect("persist expired lease JSON");
+}
+
+fn current_unix_ms() -> u128 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system time before unix epoch")
+        .as_millis()
+}
+
+async fn wait_for_job_status(
+    fairlead: &FairleadProcess,
+    job_id: &str,
+    expected_status: &str,
+) -> Value {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    loop {
+        let (status, fetched) = fairlead.get_json(&format!("/v1/jobs/{job_id}")).await;
+        assert_eq!(status, StatusCode::OK);
+        if fetched["job"]["status"] == expected_status {
+            return fetched;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            panic!(
+                "job status {expected_status} was not observed for {job_id}; last job: {fetched}"
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+}
+
 #[tokio::test]
 async fn fairlead_process_starts_serves_health_and_shuts_down() {
     let mut fairlead = FairleadProcess::spawn(&[]);
@@ -626,4 +675,92 @@ async fn pending_callback_retries_after_process_restart() {
 
     fairlead.shutdown().await;
     fs::remove_dir_all(db_dir).expect("remove callback SQLite process test temp dir");
+}
+
+#[tokio::test]
+async fn expired_lease_requeues_after_process_restart() {
+    let db_dir = unique_temp_dir("fairlead-process-lease-db");
+    fs::create_dir_all(&db_dir).expect("create lease SQLite process test temp dir");
+    let db_path = db_dir.join("jobs.sqlite3");
+    let db_path = db_path.to_string_lossy().to_string();
+    let mut fairlead = FairleadProcess::spawn(&[
+        ("JOB_STORE", "sqlite"),
+        ("JOB_DB_PATH", &db_path),
+        ("JOB_MAINTENANCE_INTERVAL_SECS", "30"),
+    ]);
+    fairlead.wait_for_health().await;
+
+    let (status, _) = fairlead
+        .register_worker(json!({
+            "id": "lease-worker",
+            "endpoint_url": "http://lease-worker.local",
+            "node_id": "spark-a",
+            "pool": "default",
+            "job_types": ["vision_analysis"],
+            "max_concurrent_jobs": 1,
+            "available_vram_mb": 4096
+        }))
+        .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, submitted) = fairlead
+        .submit_job(json!({
+            "type": "vision_analysis",
+            "priority": "batch",
+            "payload": { "image": "rose.jpg" }
+        }))
+        .await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+    assert_eq!(submitted["job"]["id"], "job-1");
+
+    let (status, claim) = fairlead.claim_worker_job("lease-worker").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(claim["job"]["id"], "job-1");
+    assert_eq!(claim["job"]["status"], "running");
+    assert_eq!(claim["job"]["attempts"], 1);
+    assert_eq!(claim["job"]["lease"]["worker_id"], "lease-worker");
+    assert_eq!(claim["job"]["lease"]["attempt"], 1);
+
+    fairlead.shutdown().await;
+    expire_sqlite_job_lease(&db_path, "job-1");
+
+    fairlead.restart().await;
+    fairlead.wait_for_health().await;
+
+    let recovered = wait_for_job_status(&fairlead, "job-1", "queued").await;
+    assert_eq!(recovered["job"]["attempts"], 1);
+    assert!(recovered["job"]["lease"].is_null());
+    assert_eq!(recovered["job"]["error"]["message"], "attempt timed out");
+    assert_eq!(recovered["job"]["error"]["retryable"], true);
+
+    let (status, workers) = fairlead.get_json("/v1/workers").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(workers["workers"]
+        .as_array()
+        .expect("workers response is an array")
+        .is_empty());
+
+    let (status, _) = fairlead
+        .register_worker(json!({
+            "id": "replacement-worker",
+            "endpoint_url": "http://replacement-worker.local",
+            "node_id": "spark-b",
+            "pool": "default",
+            "job_types": ["vision_analysis"],
+            "max_concurrent_jobs": 1,
+            "available_vram_mb": 4096
+        }))
+        .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, reclaimed) = fairlead.claim_worker_job("replacement-worker").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(reclaimed["job"]["id"], "job-1");
+    assert_eq!(reclaimed["job"]["status"], "running");
+    assert_eq!(reclaimed["job"]["attempts"], 2);
+    assert_eq!(reclaimed["job"]["lease"]["worker_id"], "replacement-worker");
+    assert_eq!(reclaimed["job"]["lease"]["attempt"], 2);
+
+    fairlead.shutdown().await;
+    fs::remove_dir_all(db_dir).expect("remove lease SQLite process test temp dir");
 }

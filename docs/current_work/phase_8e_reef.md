@@ -37,11 +37,14 @@ behavior that in-process Rust tests cannot cover.
   storage and a sequence callback receiver to verify a failed terminal callback
   remains pending across a Fairlead process restart and is redelivered by the
   recovery loop.
+- Added `expired_lease_requeues_after_process_restart`, which uses SQLite
+  storage to verify an expired running lease is recovered on Fairlead restart,
+  requeued with an attempt-timeout error, and claimable by a newly registered
+  replacement worker.
 
 ## Next Slices
 
 - Add helpers for worker renew/fail/drain/reactivate/deregister and prune
   endpoints.
-- Add process-level restart coverage for lease recovery and maintenance-loop
-  behavior.
+- Add process-level coverage for maintenance-loop behavior.
 - Move deferred Phase 8 local-process cases into concrete tests incrementally.
