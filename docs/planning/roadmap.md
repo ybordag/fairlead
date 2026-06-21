@@ -767,8 +767,8 @@ polling forever.
 - [x] Persist callback delivery state and recover pending callbacks after
   ordinary Fairlead restarts.
 - [x] Add final async end-to-end demo and documentation.
-- Document Temporal as deferred unless Rhizome needs durable multi-step workflow
-  orchestration beyond compute dispatch.
+- [x] Document Temporal as deferred unless Rhizome needs durable multi-step
+  workflow orchestration beyond compute dispatch.
 
 ### Phase 7A: Pool-Aware Routing and Placement Policies
 

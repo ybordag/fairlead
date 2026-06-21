@@ -350,7 +350,8 @@ job submitted
 - `GET /metrics` — Prometheus: queue depth/wait, circuit states, VRAM per node,
   worker availability, worker in-flight capacity, job duration, and callback
   delivery outcomes
-- Persistent callback-attempt state and pending callback recovery.
+- Persistent callback-attempt state and pending callback recovery are
+  implemented for SQLite-backed job state.
 - Future completed-job pruning.
 
 ### Worker-pull claim decision

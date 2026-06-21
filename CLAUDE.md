@@ -55,12 +55,13 @@ cargo watch -x run
 
 ## Current status
 
-**Phase 6E complete** (shackle → main). **Phase 6F is in progress on stay**:
-callback delivery and async finalization. Stay currently adds asynchronous
-callbacks for terminal jobs with `callback_url`, bounded retry/timeout policy,
-callback delivery metrics by job type, terminal status, outcome, and HTTP
-status, and SQLite-backed at-least-once callback recovery across ordinary
-Fairlead restarts.
+**Phase 6E complete** (shackle → main). **Phase 6F is implemented on stay**:
+callback delivery and async finalization. Stay adds asynchronous callbacks for
+terminal jobs with `callback_url`, bounded retry/timeout policy, callback
+delivery metrics by job type, terminal status, outcome, and HTTP status,
+SQLite-backed at-least-once callback recovery across ordinary Fairlead restarts,
+focused recovery-loop and in-flight de-duplication tests, and a local GPU-free
+async jobs demo.
 
 | Phase | Branch | Status |
 |---|---|---|
@@ -74,13 +75,13 @@ Fairlead restarts.
 | 6C — Worker-pull claims + leases | cleat → main | ✅ complete |
 | 6D — Worker execution + retries | halyard → main | ✅ complete |
 | 6E — Durable job state + recovery | shackle → main | ✅ complete |
-| 6F — Callback delivery + finalization | stay | in progress |
+| 6F — Callback delivery + finalization | stay | ready for PR |
 | 7A — Pool-aware routing + placement | — | pending |
 | 7 — Advanced compute + full metrics | — | pending |
 
 ## Project layout
 
-**What exists now (Phases 1–6D):**
+**What exists now (Phases 1–6F):**
 
 ```
 src/
@@ -168,8 +169,9 @@ order, claim/lease state, attempts, callback metadata, and terminal state.
 Expired running leases loaded from SQLite are requeued when attempts remain and
 failed when attempts are exhausted. Phase 6F adds asynchronous terminal
 callbacks with bounded retry/timeout policy and durable callback delivery state
-in SQLite. Worker deregistration, completed-job pruning, and process-level
-restart e2e tests are still planned.
+in SQLite. The Stay branch also adds focused callback recovery tests and
+`demo/run_async_jobs_demo.sh`. Worker deregistration, completed-job pruning, and
+process-level restart e2e tests are still planned.
 
 Job request body:
 ```json
@@ -388,17 +390,13 @@ WORKER_HEARTBEAT_SECS        — interval before a worker is considered stale
 - [x] Job manager: per-attempt timeout state and cancellation.
 - [x] Job duration metrics.
 
-### Phase 6E/6F — Remaining async compute router work
+### Remaining async compute router work
 
 - Worker deregistration API and graceful shutdown semantics.
 - Scheduler policy based on richer lease availability, VRAM headroom, and load.
 - Completed-job pruning.
-- Persistence path: SQLite first for local durable state, Postgres later for
-  multiple Fairlead instances. SQLite is currently opt-in through
-  `JOB_STORE=sqlite`.
-- Callback delivery: on completion, POST to `callback_url` with result payload;
-  retry on failure.
-- Callback success/failure metrics.
+- Persistence path beyond single-process SQLite, such as Postgres for multiple
+  Fairlead instances.
 
 Temporal is deferred. Fairlead owns compute job orchestration; Rhizome owns
 domain workflow state. Add Temporal only if Rhizome starts needing durable

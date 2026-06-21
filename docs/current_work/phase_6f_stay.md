@@ -90,4 +90,4 @@ Implemented:
 
 Remaining Stay work:
 
-- Final PR documentation review.
+- None. Phase 6F is ready for final PR checks.

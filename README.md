@@ -7,10 +7,10 @@ health, circuit state, and session affinity.
 
 The name comes from sailing: a fairlead is a fitting that guides lines in exactly the right direction without friction or fouling.
 
-**Status:** Phase 6F is in progress on the `stay` branch. Fairlead currently
-runs as an Axum HTTP service with `/health`, `/metrics`, `/v1/models`,
-`/v1/resources`, `/v1/resources/report`, `/v1/jobs`, `/v1/jobs/{id}`,
-`/v1/workers`, `/v1/workers/{id}/claim`,
+**Status:** Phase 6F is implemented on the `stay` branch and ready for PR.
+Fairlead currently runs as an Axum HTTP service with `/health`, `/metrics`,
+`/v1/models`, `/v1/resources`, `/v1/resources/report`, `/v1/jobs`,
+`/v1/jobs/{id}`, `/v1/workers`, `/v1/workers/{id}/claim`,
 `/v1/workers/{worker_id}/jobs/{job_id}/renew`,
 `/v1/workers/{worker_id}/jobs/{job_id}/complete`,
 `/v1/workers/{worker_id}/jobs/{job_id}/fail`, `/v1/scheduler/preview`,
@@ -43,7 +43,7 @@ The current service provides:
 - **Prometheus-style metrics** for backend circuit state, request outcomes,
   latency, fallback reasons, retry reasons, priority limits/in-flight counts,
   reported resource state, async queue depth/wait, worker utilization, and
-  terminal job duration.
+  terminal job duration, and callback delivery outcomes.
 
 Fairlead does **not** run inference itself. It routes requests to model servers
 such as vLLM. vLLM owns model loading, GPU execution, KV cache management, and
