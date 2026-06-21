@@ -235,21 +235,26 @@ request arrives
 
 The first Phase 6B slice implements the HTTP job surface with in-memory state.
 Scheduler dispatch, worker registration, leases, persistence, callback delivery,
-and queue metrics are still future Phase 6B slices. The design belongs in the
-architecture because it defines Fairlead's boundary: Fairlead should be a
+and queue wait-time metrics are still future Phase 6B slices. The design belongs
+in the architecture because it defines Fairlead's boundary: Fairlead should be a
 compute control plane, not a general-purpose workflow engine.
 
 ```
 POST /v1/jobs        — submit, get job_id immediately
+GET  /v1/jobs        — list in-memory job records
 GET  /v1/jobs/{id}   — poll status
 DELETE /v1/jobs/{id} — cancel queued or running work when supported
 ```
 
-Current first-slice behavior:
+Current early Phase 6B behavior:
 
 - submitted jobs enter `queued`
+- submitted jobs are tracked in in-memory per-priority queues
+- `GET /v1/jobs` lists current in-memory job records
+- `/metrics` exposes `fairlead_job_queue_depth{priority,type}`
 - job state is in memory and is lost on process restart
 - cancellation marks queued jobs `cancelled`
+- cancellation removes queued jobs from queue depth accounting
 - no worker is selected yet
 - no callback is delivered yet
 - no durable queue or scheduler loop exists yet

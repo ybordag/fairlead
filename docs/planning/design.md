@@ -51,6 +51,7 @@ POST /v1/chat/completions
 POST /v1/embeddings
 GET  /v1/models
 POST /v1/jobs
+GET  /v1/jobs
 GET  /v1/jobs/{id}
 DELETE /v1/jobs/{id}
 GET  /health

@@ -651,8 +651,10 @@ It should not introduce queues, workers, or job state.
 ### Phase 6B: Async Compute Router
 
 - [x] Add first-slice in-memory job API: submit, status, and cancellation.
+- [x] Add in-memory priority queue state and job listing.
+- [x] Add queue depth metrics by priority and workload.
 - Add durable priority queues.
-- Add queue depth and queue wait-time metrics by priority and workload.
+- Add queue wait-time metrics by priority and workload.
 - Add worker registration and heartbeat.
 - Add worker availability and utilization metrics.
 - Add bounded job attempts with timeouts, leases, retry limits, and cancellation.

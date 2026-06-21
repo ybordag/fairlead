@@ -622,7 +622,7 @@ Router::new()
     .route("/v1/models", get(models::list_models))
     .route("/v1/resources", get(resources::list_resources))
     .route("/v1/resources/report", post(resources::report_resources))
-    .route("/v1/jobs", post(jobs::submit_job))
+    .route("/v1/jobs", get(jobs::list_jobs).post(jobs::submit_job))
     .route("/v1/jobs/:id", get(jobs::get_job).delete(jobs::cancel_job))
     .route("/v1/chat/completions", post(proxy::chat_completions))
     .route("/v1/embeddings", post(proxy::embeddings))
@@ -637,6 +637,7 @@ This means:
 - `GET /v1/resources` calls `resources::list_resources`.
 - `POST /v1/resources/report` calls `resources::report_resources`.
 - `POST /v1/jobs` calls `jobs::submit_job`.
+- `GET /v1/jobs` calls `jobs::list_jobs`.
 - `GET /v1/jobs/{id}` calls `jobs::get_job`.
 - `DELETE /v1/jobs/{id}` calls `jobs::cancel_job`.
 - `POST /v1/chat/completions` calls `proxy::chat_completions`.

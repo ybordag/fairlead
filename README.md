@@ -68,8 +68,9 @@ Implemented generalization work includes:
   instead of overloading a saturated priority bucket.
 - **Workload-aware observability** for selected backend, fallback reason,
   latency, priority admission, and resource state.
-- **Initial async job API** with in-memory submission, polling, cancellation, job
-  type, priority, payload, and callback metadata.
+- **Initial async job API** with in-memory submission, listing, polling,
+  cancellation, per-priority queue tracking, queue depth metrics, job type,
+  priority, payload, and callback metadata.
 
 Future phases add durable priority queues, worker registration, complete
 pool-aware routing, adapter boundaries, queue wait-time metrics, callback

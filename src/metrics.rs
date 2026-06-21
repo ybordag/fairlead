@@ -200,12 +200,32 @@ pub async fn metrics(State(state): State<AppState>) -> Response<String> {
     body.push_str(&state.metrics.render());
     body.push_str(&render_priority_metrics(&state));
     body.push_str(&render_resource_metrics(&state).await);
+    body.push_str(&render_job_queue_metrics(&state).await);
 
     Response::builder()
         .status(200)
         .header("content-type", "text/plain; version=0.0.4; charset=utf-8")
         .body(body)
         .unwrap()
+}
+
+async fn render_job_queue_metrics(state: &AppState) -> String {
+    let snapshots = state.jobs.queue_snapshots().await;
+    let mut body = String::from(
+        "# HELP fairlead_job_queue_depth Queued async jobs by priority and type\n\
+         # TYPE fairlead_job_queue_depth gauge\n",
+    );
+
+    for snapshot in snapshots {
+        let priority = prometheus_escape(snapshot.priority);
+        let kind = prometheus_escape(snapshot.kind);
+        body.push_str(&format!(
+            "fairlead_job_queue_depth{{priority=\"{priority}\",type=\"{kind}\"}} {}\n",
+            snapshot.depth,
+        ));
+    }
+
+    body
 }
 
 fn render_priority_metrics(state: &AppState) -> String {

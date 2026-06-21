@@ -14,13 +14,15 @@ model before dispatching work to external workers.
 Tackle includes:
 
 - `POST /v1/jobs` for bounded async compute submission.
+- `GET /v1/jobs` for listing in-memory job records.
 - `GET /v1/jobs/{id}` for polling job status.
 - `DELETE /v1/jobs/{id}` for cancellation.
 - Job type, priority, payload, callback URL, attempt, and state metadata.
 - In-memory job state first.
+- Per-priority queue state and queue depth metrics.
 - Durable-enough persistence later, with SQLite as the first likely backend.
-- Priority queues, scheduler loop, worker registration, leases, retries,
-  callbacks, and metrics in later slices.
+- Durable queues, scheduler loop, worker registration, leases, retries,
+  callbacks, queue wait-time metrics, and broader metrics in later slices.
 
 Tackle does not include:
 
@@ -44,7 +46,18 @@ Implemented:
   enum.
 - Store payload and optional callback URL without dispatching to workers yet.
 
+## Second Slice
+
+Implemented:
+
+- Added explicit in-memory per-priority queues for queued job IDs.
+- Enqueue submitted jobs by priority: `realtime`, `batch`, or `background`.
+- Remove cancelled queued jobs from queue depth accounting.
+- Added `GET /v1/jobs` to list in-memory job records in submission order.
+- Added `fairlead_job_queue_depth{priority,type}` Prometheus metrics.
+- Kept worker dispatch, durable queues, leases, and callbacks out of scope.
+
 Next likely slice:
 
-- Add list/queue visibility and queue metrics, or introduce explicit priority
-  queues before worker registration.
+- Add worker registration data structures and endpoints, or add queue wait-time
+  metrics before introducing workers.

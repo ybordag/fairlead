@@ -7,7 +7,7 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{
-    collections::HashMap,
+    collections::{HashMap, VecDeque},
     sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -83,6 +83,19 @@ pub struct JobResponse {
     pub job: JobRecord,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct JobListResponse {
+    pub jobs: Vec<JobRecord>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct JobQueueSnapshot {
+    pub priority: &'static str,
+    #[serde(rename = "type")]
+    pub kind: &'static str,
+    pub depth: usize,
+}
+
 #[derive(Clone, Default)]
 pub struct JobRegistry {
     inner: Arc<RwLock<JobRegistryInner>>,
@@ -92,6 +105,41 @@ pub struct JobRegistry {
 struct JobRegistryInner {
     next_id: u64,
     jobs: HashMap<String, JobRecord>,
+    order: Vec<String>,
+    queues: JobQueues,
+}
+
+#[derive(Default)]
+struct JobQueues {
+    realtime: VecDeque<String>,
+    batch: VecDeque<String>,
+    background: VecDeque<String>,
+}
+
+impl JobQueues {
+    fn for_priority_mut(&mut self, priority: Priority) -> &mut VecDeque<String> {
+        match priority {
+            Priority::Realtime => &mut self.realtime,
+            Priority::Batch => &mut self.batch,
+            Priority::Background => &mut self.background,
+        }
+    }
+
+    fn iter(&self) -> impl Iterator<Item = (Priority, &VecDeque<String>)> {
+        [
+            (Priority::Realtime, &self.realtime),
+            (Priority::Batch, &self.batch),
+            (Priority::Background, &self.background),
+        ]
+        .into_iter()
+    }
+
+    fn remove(&mut self, priority: Priority, id: &str) {
+        let queue = self.for_priority_mut(priority);
+        if let Some(position) = queue.iter().position(|queued_id| queued_id == id) {
+            queue.remove(position);
+        }
+    }
 }
 
 impl JobRegistry {
@@ -113,11 +161,58 @@ impl JobRegistry {
             updated_at_unix_ms: now,
         };
         guard.jobs.insert(job.id.clone(), job.clone());
+        guard.order.push(job.id.clone());
+        guard
+            .queues
+            .for_priority_mut(job.priority)
+            .push_back(job.id.clone());
         Ok(job)
     }
 
     pub async fn get(&self, id: &str) -> Option<JobRecord> {
         self.inner.read().await.jobs.get(id).cloned()
+    }
+
+    pub async fn list(&self) -> Vec<JobRecord> {
+        let guard = self.inner.read().await;
+        guard
+            .order
+            .iter()
+            .filter_map(|id| guard.jobs.get(id).cloned())
+            .collect()
+    }
+
+    pub async fn queue_snapshots(&self) -> Vec<JobQueueSnapshot> {
+        let guard = self.inner.read().await;
+        let mut snapshots: Vec<JobQueueSnapshot> = Vec::new();
+
+        for (priority, queue) in guard.queues.iter() {
+            for id in queue {
+                let Some(job) = guard.jobs.get(id) else {
+                    continue;
+                };
+                if job.status != JobStatus::Queued {
+                    continue;
+                }
+
+                if let Some(snapshot) = snapshots
+                    .iter_mut()
+                    .find(|s| s.priority == priority.as_str() && s.kind == job.kind.as_str())
+                {
+                    snapshot.depth += 1;
+                } else {
+                    snapshots.push(JobQueueSnapshot {
+                        priority: priority.as_str(),
+                        kind: job.kind.as_str(),
+                        depth: 1,
+                    });
+                }
+            }
+        }
+
+        snapshots
+            .sort_by_key(|snapshot| (priority_rank(snapshot.priority), kind_rank(snapshot.kind)));
+        snapshots
     }
 
     pub async fn cancel(&self, id: &str) -> CancelJobResult {
@@ -130,9 +225,12 @@ impl JobRegistry {
             return CancelJobResult::AlreadyTerminal(job.clone());
         }
 
+        let priority = job.priority;
         job.status = JobStatus::Cancelled;
         job.updated_at_unix_ms = unix_ms();
-        CancelJobResult::Cancelled(job.clone())
+        let job = job.clone();
+        guard.queues.remove(priority, id);
+        CancelJobResult::Cancelled(job)
     }
 }
 
@@ -150,6 +248,12 @@ pub async fn submit_job(
         Ok(job) => (StatusCode::ACCEPTED, Json(JobResponse { job })).into_response(),
         Err(message) => (StatusCode::BAD_REQUEST, message).into_response(),
     }
+}
+
+pub async fn list_jobs(State(state): State<AppState>) -> Json<JobListResponse> {
+    Json(JobListResponse {
+        jobs: state.jobs.list().await,
+    })
 }
 
 pub async fn get_job(State(state): State<AppState>, Path(id): Path<String>) -> Response {
@@ -178,6 +282,25 @@ fn normalize_callback_url(callback_url: Option<String>) -> Result<Option<String>
         return Err("callback_url cannot be empty".into());
     }
     Ok(Some(trimmed.to_string()))
+}
+
+fn priority_rank(priority: &str) -> u8 {
+    match priority {
+        "realtime" => 0,
+        "batch" => 1,
+        "background" => 2,
+        _ => 3,
+    }
+}
+
+fn kind_rank(kind: &str) -> u8 {
+    match kind {
+        "vision_analysis" => 0,
+        "embed_batch" => 1,
+        "index_build" => 2,
+        "cluster" => 3,
+        _ => 4,
+    }
 }
 
 fn unix_ms() -> u128 {
@@ -284,6 +407,88 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn list_jobs_returns_jobs_in_submission_order() {
+        let app = build_router(test_state());
+
+        app.clone()
+            .oneshot(
+                Request::post("/v1/jobs")
+                    .header("content-type", "application/json")
+                    .body(Body::from(json!({"type": "vision_analysis"}).to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        app.clone()
+            .oneshot(
+                Request::post("/v1/jobs")
+                    .header("content-type", "application/json")
+                    .body(Body::from(json!({"type": "embed_batch"}).to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        let response = app
+            .oneshot(Request::get("/v1/jobs").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let value = response_json(response).await;
+        assert_eq!(value["jobs"][0]["id"], "job-1");
+        assert_eq!(value["jobs"][0]["type"], "vision_analysis");
+        assert_eq!(value["jobs"][1]["id"], "job-2");
+        assert_eq!(value["jobs"][1]["type"], "embed_batch");
+    }
+
+    #[tokio::test]
+    async fn queue_snapshots_count_queued_jobs_by_priority_and_type() {
+        let jobs = JobRegistry::default();
+
+        jobs.submit(SubmitJobRequest {
+            kind: JobKind::VisionAnalysis,
+            priority: Priority::Realtime,
+            payload: Value::Null,
+            callback_url: None,
+        })
+        .await
+        .unwrap();
+        jobs.submit(SubmitJobRequest {
+            kind: JobKind::VisionAnalysis,
+            priority: Priority::Realtime,
+            payload: Value::Null,
+            callback_url: None,
+        })
+        .await
+        .unwrap();
+        jobs.submit(SubmitJobRequest {
+            kind: JobKind::EmbedBatch,
+            priority: Priority::Batch,
+            payload: Value::Null,
+            callback_url: None,
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(
+            jobs.queue_snapshots().await,
+            vec![
+                JobQueueSnapshot {
+                    priority: "realtime",
+                    kind: "vision_analysis",
+                    depth: 2,
+                },
+                JobQueueSnapshot {
+                    priority: "batch",
+                    kind: "embed_batch",
+                    depth: 1,
+                },
+            ]
+        );
+    }
+
+    #[tokio::test]
     async fn cancel_job_marks_queued_job_cancelled() {
         let app = build_router(test_state());
 
@@ -321,6 +526,100 @@ mod tests {
             .unwrap();
         let value = response_json(response).await;
         assert_eq!(value["job"]["status"], "cancelled");
+    }
+
+    #[tokio::test]
+    async fn cancelling_job_removes_it_from_queue_depth() {
+        let jobs = JobRegistry::default();
+        jobs.submit(SubmitJobRequest {
+            kind: JobKind::IndexBuild,
+            priority: Priority::Background,
+            payload: Value::Null,
+            callback_url: None,
+        })
+        .await
+        .unwrap();
+        jobs.submit(SubmitJobRequest {
+            kind: JobKind::IndexBuild,
+            priority: Priority::Background,
+            payload: Value::Null,
+            callback_url: None,
+        })
+        .await
+        .unwrap();
+
+        jobs.cancel("job-1").await;
+
+        assert_eq!(
+            jobs.queue_snapshots().await,
+            vec![JobQueueSnapshot {
+                priority: "background",
+                kind: "index_build",
+                depth: 1,
+            }]
+        );
+    }
+
+    #[tokio::test]
+    async fn metrics_reports_queue_depth_for_queued_jobs() {
+        let app = build_router(test_state());
+
+        app.clone()
+            .oneshot(
+                Request::post("/v1/jobs")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({"type": "vision_analysis", "priority": "batch"}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        app.clone()
+            .oneshot(
+                Request::post("/v1/jobs")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({"type": "vision_analysis", "priority": "batch"}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        app.clone()
+            .oneshot(
+                Request::post("/v1/jobs")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({"type": "cluster", "priority": "background"}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        app.clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::DELETE)
+                    .uri("/v1/jobs/job-3")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        let response = app
+            .oneshot(Request::get("/metrics").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+
+        let metrics = response_text(response).await;
+        assert!(metrics
+            .contains("fairlead_job_queue_depth{priority=\"batch\",type=\"vision_analysis\"} 2"));
+        assert!(
+            !metrics.contains("fairlead_job_queue_depth{priority=\"background\",type=\"cluster\"}")
+        );
     }
 
     #[tokio::test]
@@ -404,5 +703,12 @@ mod tests {
             .await
             .unwrap();
         serde_json::from_slice(&bytes).unwrap()
+    }
+
+    async fn response_text(response: axum::response::Response) -> String {
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        String::from_utf8(bytes.to_vec()).unwrap()
     }
 }

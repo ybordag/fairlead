@@ -112,7 +112,7 @@ pub(crate) fn build_router(state: AppState) -> Router {
         .route("/v1/resources", get(resources::list_resources))
         .route("/v1/resources/report", post(resources::report_resources))
         .route("/v1/models", get(models::list_models))
-        .route("/v1/jobs", post(jobs::submit_job))
+        .route("/v1/jobs", get(jobs::list_jobs).post(jobs::submit_job))
         .route("/v1/jobs/:id", get(jobs::get_job).delete(jobs::cancel_job))
         .route("/v1/chat/completions", post(proxy::chat_completions))
         .route("/v1/embeddings", post(proxy::embeddings))

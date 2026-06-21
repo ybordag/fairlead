@@ -131,13 +131,15 @@ GET  /v1/models              — list available backends/models
 
 ```
 POST   /v1/jobs              — submit a job, returns queued in-memory job record
+GET    /v1/jobs              — list in-memory job records
 GET    /v1/jobs/{id}         — check status: queued | running | complete | failed
 DELETE /v1/jobs/{id}         — cancel a queued job
 ```
 
-The first Phase 6B slice stores job records in memory only. Worker dispatch,
-durable queues, leases, callback delivery, and SQLite-backed persistence are
-still planned.
+The first Phase 6B slices store job records in memory only and track explicit
+per-priority queued job IDs. Worker dispatch, durable queues, leases, callback
+delivery, queue wait-time metrics, and SQLite-backed persistence are still
+planned.
 
 Job request body:
 ```json
@@ -320,6 +322,8 @@ WORKER_HEARTBEAT_SECS        — interval before a worker is considered stale
 
 - [x] First-slice in-memory job API: `POST /v1/jobs`,
   `GET /v1/jobs/{id}`, `DELETE /v1/jobs/{id}`
+- [x] Queue visibility: `GET /v1/jobs`, per-priority queue state, and queue
+  depth metrics
 - Durable priority queues with queue depth and queue wait-time metrics
 - Worker registration API: `POST /v1/workers/register`, heartbeat, deregister
 - Worker availability and utilization metrics
