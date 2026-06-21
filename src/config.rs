@@ -4,11 +4,18 @@ use std::env::VarError;
 
 pub const DEFAULT_BACKEND_POOL: &str = "default";
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WorkloadKind {
     ChatCompletions,
     Embeddings,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WorkloadRoute {
+    pub kind: WorkloadKind,
+    pub upstream_path: &'static str,
+    pub retry_server_errors: bool,
 }
 
 impl WorkloadKind {
@@ -20,6 +27,21 @@ impl WorkloadKind {
         match self {
             Self::ChatCompletions => "chat_completions",
             Self::Embeddings => "embeddings",
+        }
+    }
+
+    pub fn route(self) -> WorkloadRoute {
+        match self {
+            Self::ChatCompletions => WorkloadRoute {
+                kind: self,
+                upstream_path: "chat/completions",
+                retry_server_errors: true,
+            },
+            Self::Embeddings => WorkloadRoute {
+                kind: self,
+                upstream_path: "embeddings",
+                retry_server_errors: true,
+            },
         }
     }
 }
@@ -337,6 +359,19 @@ mod tests {
     #[test]
     fn priority_parse_rejects_unknown_values() {
         assert_eq!(Priority::parse("urgent"), None);
+    }
+
+    #[test]
+    fn workload_route_metadata_defines_upstream_paths() {
+        let chat = WorkloadKind::ChatCompletions.route();
+        assert_eq!(chat.kind, WorkloadKind::ChatCompletions);
+        assert_eq!(chat.upstream_path, "chat/completions");
+        assert!(chat.retry_server_errors);
+
+        let embeddings = WorkloadKind::Embeddings.route();
+        assert_eq!(embeddings.kind, WorkloadKind::Embeddings);
+        assert_eq!(embeddings.upstream_path, "embeddings");
+        assert!(embeddings.retry_server_errors);
     }
 
     #[test]

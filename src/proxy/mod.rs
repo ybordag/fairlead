@@ -12,7 +12,7 @@ use std::time::Instant;
 use tracing::{info, warn};
 
 use crate::{
-    config::{Priority, WorkloadKind},
+    config::{Priority, WorkloadKind, WorkloadRoute},
     metrics::{FallbackLabels, RequestLabels, RetryLabels},
     priority::PriorityPermit,
     router::{select_backend_excluding_resource, BackendState, ResourceRank},
@@ -26,8 +26,7 @@ pub async fn chat_completions(
 ) -> Response {
     forward(
         &state,
-        WorkloadKind::ChatCompletions,
-        "chat/completions",
+        WorkloadKind::ChatCompletions.route(),
         &headers,
         body,
     )
@@ -39,23 +38,16 @@ pub async fn embeddings(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    forward(
-        &state,
-        WorkloadKind::Embeddings,
-        "embeddings",
-        &headers,
-        body,
-    )
-    .await
+    forward(&state, WorkloadKind::Embeddings.route(), &headers, body).await
 }
 
 async fn forward(
     state: &AppState,
-    workload_kind: WorkloadKind,
-    path: &str,
+    route: WorkloadRoute,
     headers: &HeaderMap,
     body: Bytes,
 ) -> Response {
+    let workload_kind = route.kind;
     let workload = workload_kind.as_str();
     let started = Instant::now();
     let priority = match parse_priority(headers) {
@@ -223,7 +215,11 @@ async fn forward(
                 reason,
             );
         }
-        let url = format!("{}/{}", backend.url.trim_end_matches('/'), path);
+        let url = format!(
+            "{}/{}",
+            backend.url.trim_end_matches('/'),
+            route.upstream_path
+        );
 
         let upstream = match state
             .client
@@ -297,7 +293,7 @@ async fn forward(
 
         let status = upstream.status();
 
-        if status.is_server_error() {
+        if route.retry_server_errors && status.is_server_error() {
             backend.circuit.write().await.record_failure();
             record_retry(
                 state,
