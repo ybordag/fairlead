@@ -126,11 +126,11 @@ Fairlead currently provides:
 
 It does not yet provide:
 
-- Shared sync/async pool demos and the final partial-vs-strict pool policy
-  decision. Synchronous backend pool configuration and ordered fallback chains
-  are implemented in Phase 7B; async worker pool placement and per-pool metrics
-  are implemented in Phase 7C; optional strict worker/workload pool validation
-  is implemented in Phase 7D.
+- Shared sync/async pool demos and finalized pool deployment notes. Synchronous
+  backend pool configuration and ordered fallback chains are implemented in
+  Phase 7B; async worker pool placement and per-pool metrics are implemented in
+  Phase 7C; optional strict worker/workload pool validation is implemented in
+  Phase 7D.
 - CPU resource accounting and richer resource dimensions beyond coarse VRAM/load.
 - Durable starvation/fairness policy beyond current priority queue ordering.
 - Worker deregistration, graceful shutdown, or completed-job pruning.
@@ -813,8 +813,9 @@ async workers.
 - [x] Keep cloud overflow as a future pool target, not an implemented provider path.
 - [x] Add per-pool synchronous metrics for candidate counts, selected pool/backend,
   fallback reason, and capacity pressure.
-- [x] Keep explicit workload pool policy permissive for omitted workloads until
-  the Phase 7D closeout decision.
+- [x] Keep explicit workload pool policy permissive for omitted workloads by
+  default; Phase 7D adds optional strict startup validation for complete
+  workload policy.
 
 #### Phase 7C: Async Worker Pool Placement
 
@@ -838,7 +839,9 @@ async workers.
   `WORKLOAD_POOLS_JSON` remains a partial override;
   `STRICT_WORKLOAD_POOLS=true` requires explicit policy for every known workload
   at startup.
-- Update deferred e2e plans for future cloud overflow pools.
+- [x] Audit strict pool validation test coverage and add immediate edge tests.
+- [x] Update deferred e2e plans for process-level strict pool startup,
+  registration, DGX Spark smoke tests, and future cloud overflow pools.
 
 ### Phase 8: Scheduler Hardening
 

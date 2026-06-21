@@ -104,10 +104,14 @@ Implemented generalization work includes:
 - **Pool-aware async worker placement** so worker registration, scheduler
   preview, and worker-pull claims respect workload pool policy, with per-pool
   async placement metrics.
+- **Optional strict pool validation** for production-like setups:
+  `STRICT_WORKER_POOLS=true` bounds worker registration to configured or derived
+  pools, and `STRICT_WORKLOAD_POOLS=true` requires explicit policy for every
+  known workload.
 
-Remaining Phase 7 work adds shared pool demos and the final partial-vs-strict
-policy decision. Future phases add scheduler hardening, adapter boundaries,
-richer resource policy, external scale/overflow, and transport/SDK hardening.
+Remaining Phase 7D work is focused on shared pool demos and final deployment
+notes. Future phases add scheduler hardening, adapter boundaries, richer
+resource policy, external scale/overflow, and transport/SDK hardening.
 
 See [`docs/planning/roadmap.md`](docs/planning/roadmap.md) for the
 implementation plan and acceptance criteria.

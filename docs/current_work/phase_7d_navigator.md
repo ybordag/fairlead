@@ -5,6 +5,27 @@ Branch: `navigator`
 Goal: close out the shared pool model with demos, deployment notes, and policy
 decisions.
 
+## Completed So Far
+
+- Added optional strict worker pool validation through `STRICT_WORKER_POOLS`.
+- Added optional strict workload pool validation through
+  `STRICT_WORKLOAD_POOLS`.
+- Kept permissive defaults for local development and incremental rollout.
+- Preserved the existing partial `WORKLOAD_POOLS_JSON` behavior unless strict
+  workload validation is enabled.
+- Added unit coverage for strict worker registration, defaulted worker pools,
+  strict workload startup validation, complete workload policy, and derived
+  backend pools.
+- Updated deferred e2e plans for strict workload startup, strict worker
+  registration, DGX Spark smoke tests, and future cloud overflow pools.
+
+## Remaining
+
+- Add local demo config that shows sync and async workloads using the same pool
+  vocabulary.
+- Document local DGX pools, peer-node pools, and shared Fairlead deployment
+  examples using the finalized strictness flags.
+
 ## Decisions
 
 ### Worker Pool Registration Validation
