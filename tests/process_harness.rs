@@ -113,6 +113,15 @@ impl FairleadProcess {
         json_response(response).await
     }
 
+    async fn delete_json(&self, path: &str) -> (StatusCode, Value) {
+        let response = reqwest::Client::new()
+            .delete(format!("{}{}", self.base_url, path))
+            .send()
+            .await
+            .expect("send DELETE request to Fairlead process");
+        json_response(response).await
+    }
+
     async fn get_text(&self, path: &str) -> (StatusCode, String) {
         let response = reqwest::Client::new()
             .get(format!("{}{}", self.base_url, path))
@@ -130,6 +139,20 @@ impl FairleadProcess {
 
     async fn register_worker(&self, body: Value) -> (StatusCode, Value) {
         self.post_json("/v1/workers/register", body).await
+    }
+
+    async fn drain_worker(&self, worker_id: &str) -> (StatusCode, Value) {
+        self.post_json(&format!("/v1/workers/{worker_id}/drain"), json!({}))
+            .await
+    }
+
+    async fn reactivate_worker(&self, worker_id: &str) -> (StatusCode, Value) {
+        self.post_json(&format!("/v1/workers/{worker_id}/reactivate"), json!({}))
+            .await
+    }
+
+    async fn deregister_worker(&self, worker_id: &str) -> (StatusCode, Value) {
+        self.delete_json(&format!("/v1/workers/{worker_id}")).await
     }
 
     async fn claim_worker_job(&self, worker_id: &str) -> (StatusCode, Value) {
@@ -820,6 +843,123 @@ async fn background_maintenance_requeues_expired_lease() {
     assert_eq!(reclaimed["job"]["attempts"], 2);
     assert_eq!(reclaimed["job"]["lease"]["worker_id"], "maintenance-worker");
     assert_eq!(reclaimed["job"]["lease"]["attempt"], 2);
+
+    fairlead.shutdown().await;
+}
+
+#[tokio::test]
+async fn worker_lifecycle_controls_work_over_real_http() {
+    let mut fairlead = FairleadProcess::spawn(&[]);
+    fairlead.wait_for_health().await;
+
+    for worker_id in ["worker-a", "worker-b"] {
+        let (status, worker) = fairlead
+            .register_worker(json!({
+                "id": worker_id,
+                "endpoint_url": format!("http://{worker_id}.local"),
+                "node_id": "spark-a",
+                "pool": "default",
+                "job_types": ["vision_analysis"],
+                "max_concurrent_jobs": 1,
+                "available_vram_mb": 4096
+            }))
+            .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(worker["worker"]["id"], worker_id);
+        assert_eq!(worker["worker"]["draining"], false);
+    }
+
+    let (status, drained) = fairlead.drain_worker("worker-a").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(drained["worker"]["id"], "worker-a");
+    assert_eq!(drained["worker"]["draining"], true);
+    assert_eq!(drained["worker"]["available_job_slots"], 0);
+
+    let (status, submitted) = fairlead
+        .submit_job(json!({
+            "type": "vision_analysis",
+            "priority": "batch",
+            "payload": { "image": "rose-a.jpg" }
+        }))
+        .await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+    assert_eq!(submitted["job"]["id"], "job-1");
+
+    let (status, blocked_claim) = fairlead.claim_worker_job("worker-a").await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(blocked_claim["raw"], "worker is draining");
+
+    let (status, worker_b_claim) = fairlead.claim_worker_job("worker-b").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(worker_b_claim["job"]["id"], "job-1");
+    assert_eq!(worker_b_claim["job"]["lease"]["worker_id"], "worker-b");
+
+    let (status, completed) = fairlead
+        .complete_worker_job(
+            "worker-b",
+            "job-1",
+            json!({
+                "attempt": 1,
+                "result": { "classification": "healthy" }
+            }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(completed["job"]["status"], "complete");
+
+    let (status, reactivated) = fairlead.reactivate_worker("worker-a").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(reactivated["worker"]["draining"], false);
+    assert_eq!(reactivated["worker"]["available_job_slots"], 1);
+
+    let (status, second_job) = fairlead
+        .submit_job(json!({
+            "type": "vision_analysis",
+            "priority": "batch",
+            "payload": { "image": "rose-b.jpg" }
+        }))
+        .await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+    assert_eq!(second_job["job"]["id"], "job-2");
+
+    let (status, worker_a_claim) = fairlead.claim_worker_job("worker-a").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(worker_a_claim["job"]["id"], "job-2");
+    assert_eq!(worker_a_claim["job"]["lease"]["worker_id"], "worker-a");
+
+    let (status, busy_deregister) = fairlead.deregister_worker("worker-a").await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+    assert_eq!(busy_deregister["worker"]["id"], "worker-a");
+    assert_eq!(busy_deregister["worker"]["draining"], true);
+    assert_eq!(busy_deregister["worker"]["in_flight_jobs"], 1);
+
+    let (status, completed) = fairlead
+        .complete_worker_job(
+            "worker-a",
+            "job-2",
+            json!({
+                "attempt": 1,
+                "result": { "classification": "healthy" }
+            }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(completed["job"]["status"], "complete");
+
+    let (status, removed_worker_a) = fairlead.deregister_worker("worker-a").await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    assert_eq!(removed_worker_a["raw"], "");
+
+    let (status, removed_worker_b) = fairlead.deregister_worker("worker-b").await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    assert_eq!(removed_worker_b["raw"], "");
+
+    let (status, workers) = fairlead.get_json("/v1/workers").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(workers["workers"]
+        .as_array()
+        .expect("workers response is an array")
+        .is_empty());
 
     fairlead.shutdown().await;
 }

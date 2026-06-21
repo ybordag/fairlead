@@ -47,9 +47,13 @@ behavior that in-process Rust tests cannot cover.
 - Added `background_maintenance_requeues_expired_lease`, which verifies a live
   Fairlead process requeues an expired lease from the background maintenance
   loop without relying on another worker claim to trigger recovery.
+- Added harness helpers for worker drain, reactivate, deregister, and DELETE
+  requests.
+- Added `worker_lifecycle_controls_work_over_real_http`, which verifies
+  drain/reactivate/deregister behavior through the real process API, including
+  busy deregistration leaving a draining worker able to complete its held job.
 
 ## Next Slices
 
-- Add helpers for worker renew/fail/drain/reactivate/deregister and prune
-  endpoints.
+- Add helpers for worker renew/fail and prune endpoints.
 - Move deferred Phase 8 local-process cases into concrete tests incrementally.

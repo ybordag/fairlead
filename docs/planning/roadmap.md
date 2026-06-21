@@ -899,6 +899,9 @@ workload protocols.
     preserving the 30-second production default.
   - [x] Add process-level background maintenance-loop coverage for expired
     lease requeue and reclaim.
+  - [x] Add process-level worker lifecycle coverage for drain, reactivate,
+    busy deregister, completion while draining, idle deregister, and final
+    worker listing.
   - Add process-level restart e2e harnesses for jobs, leases, callbacks, and
     metrics.
 - Keep Temporal deferred unless application workflows need durable multi-step

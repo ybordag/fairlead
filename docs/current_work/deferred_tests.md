@@ -348,21 +348,16 @@ Remaining harness requirements:
 - start fake async workers and richer callback receivers for retry, timeout, and
   crash-injection cases
 - poll `/health`, `/metrics`, `/v1/jobs`, and `/v1/workers`
-- add typed helpers for worker renew/fail/drain/reactivate/deregister,
-  pruning, and richer metrics assertions
+- add typed helpers for worker renew/fail, pruning, and richer metrics
+  assertions
 - assert captured stdout/stderr or structured logs for startup and
   maintenance-loop behavior
 
 Worker lifecycle cases:
 
-- register two workers for the same job type
-- drain one worker and verify preview/claim uses the other worker
-- reactivate the drained worker and verify it can claim new work again
-- delete an idle worker and verify it disappears from `GET /v1/workers`
-- delete a busy worker, verify `202 Accepted`, then renew/complete/fail the
-  held job while the worker is draining
 - verify retryable failure from a draining worker is reassigned to another
   compatible worker
+- verify renewal from a draining worker is still accepted for a held job
 - verify repeated drain/reactivate/delete calls are safe while fake workers poll
 - verify drained workers that heartbeat or re-register remain draining until
   explicit reactivation
