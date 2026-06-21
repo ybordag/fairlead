@@ -74,6 +74,9 @@ Implemented:
   expired job is not repeatedly recovered on every process start.
 - Added endpoint-level restart coverage by rebuilding an `AppState` from the
   same SQLite file and fetching a previously submitted job through `/v1/jobs`.
+- Added coverage for lease renewal persistence, retryable and terminal worker
+  failure persistence, and claiming a recovered queued job through worker
+  endpoints after an app rebuild.
 - Updated deferred tests so only process-level, deployment-level, and corrupted
   database cases remain outside Shackle.
 

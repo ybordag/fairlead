@@ -1090,6 +1090,180 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn sqlite_registry_persists_lease_renewal_after_restart() {
+        let path = unique_db_path("renew");
+        let jobs =
+            JobRegistry::with_store(crate::storage::SqliteJobStore::open(&path).unwrap()).unwrap();
+        let submitted = jobs
+            .submit(SubmitJobRequest {
+                kind: JobKind::VisionAnalysis,
+                priority: Priority::Batch,
+                payload: Value::Null,
+                callback_url: None,
+            })
+            .await
+            .unwrap();
+        let claimed = jobs
+            .claim_next_for_worker("worker-a", &[submitted.kind], 30_000)
+            .await
+            .unwrap();
+        let original_expires_at = claimed.lease.unwrap().expires_at_unix_ms;
+
+        match jobs.renew_lease(&submitted.id, "worker-a", 120_000).await {
+            RenewJobLeaseResult::Renewed(job) => {
+                assert!(job.lease.unwrap().expires_at_unix_ms > original_expires_at)
+            }
+            _ => panic!("expected lease renewal"),
+        }
+
+        let restored =
+            JobRegistry::with_store(crate::storage::SqliteJobStore::open(&path).unwrap()).unwrap();
+        let job = restored.get(&submitted.id).await.unwrap();
+        assert_eq!(job.status, JobStatus::Running);
+        assert_eq!(job.lease.as_ref().unwrap().worker_id, "worker-a");
+        assert!(job.lease.unwrap().expires_at_unix_ms > original_expires_at);
+    }
+
+    #[tokio::test]
+    async fn sqlite_registry_persists_worker_failures_after_restart() {
+        let path = unique_db_path("failure");
+        let jobs =
+            JobRegistry::with_store(crate::storage::SqliteJobStore::open(&path).unwrap()).unwrap();
+        let retryable = jobs
+            .submit(SubmitJobRequest {
+                kind: JobKind::EmbedBatch,
+                priority: Priority::Batch,
+                payload: Value::Null,
+                callback_url: None,
+            })
+            .await
+            .unwrap();
+        let terminal = jobs
+            .submit(SubmitJobRequest {
+                kind: JobKind::Cluster,
+                priority: Priority::Background,
+                payload: Value::Null,
+                callback_url: None,
+            })
+            .await
+            .unwrap();
+
+        jobs.claim_next_for_worker("worker-a", &[retryable.kind], 30_000)
+            .await
+            .unwrap();
+        jobs.fail_lease(
+            &retryable.id,
+            "worker-a",
+            JobFailure {
+                message: "transient worker error".into(),
+                retryable: true,
+            },
+        )
+        .await;
+        jobs.claim_next_for_worker("worker-b", &[terminal.kind], 30_000)
+            .await
+            .unwrap();
+        jobs.fail_lease(
+            &terminal.id,
+            "worker-b",
+            JobFailure {
+                message: "bad input".into(),
+                retryable: false,
+            },
+        )
+        .await;
+
+        let restored =
+            JobRegistry::with_store(crate::storage::SqliteJobStore::open(&path).unwrap()).unwrap();
+        let retryable = restored.get(&retryable.id).await.unwrap();
+        assert_eq!(retryable.status, JobStatus::Queued);
+        assert_eq!(
+            retryable.error,
+            Some(JobFailure {
+                message: "transient worker error".into(),
+                retryable: true,
+            })
+        );
+        assert_eq!(
+            restored
+                .queued_jobs_by_priority()
+                .await
+                .iter()
+                .map(|job| job.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["job-1"]
+        );
+
+        let terminal = restored.get(&terminal.id).await.unwrap();
+        assert_eq!(terminal.status, JobStatus::Failed);
+        assert_eq!(
+            terminal.error,
+            Some(JobFailure {
+                message: "bad input".into(),
+                retryable: false,
+            })
+        );
+        assert!(terminal.lease.is_none());
+    }
+
+    #[tokio::test]
+    async fn sqlite_backed_endpoints_claim_recovered_queue_after_app_rebuild() {
+        let path = unique_db_path("endpoint-claim");
+        let jobs =
+            JobRegistry::with_store(crate::storage::SqliteJobStore::open(&path).unwrap()).unwrap();
+        let app = build_router(test_state_with_jobs(jobs));
+        let submit = app
+            .oneshot(
+                Request::post("/v1/jobs")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({"type": "vision_analysis", "priority": "batch"}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(submit.status(), StatusCode::ACCEPTED);
+
+        let restored_jobs =
+            JobRegistry::with_store(crate::storage::SqliteJobStore::open(&path).unwrap()).unwrap();
+        let restored_app = build_router(test_state_with_jobs(restored_jobs));
+        let register = restored_app
+            .clone()
+            .oneshot(
+                Request::post("/v1/workers/register")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({
+                            "id": "vision-worker",
+                            "endpoint_url": "http://vision-worker:9000",
+                            "job_types": ["vision_analysis"],
+                            "max_concurrent_jobs": 1
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(register.status(), StatusCode::OK);
+
+        let claim = restored_app
+            .oneshot(
+                Request::post("/v1/workers/vision-worker/claim")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(claim.status(), StatusCode::OK);
+        let value = response_json(claim).await;
+        assert_eq!(value["job"]["id"], "job-1");
+        assert_eq!(value["job"]["status"], "running");
+        assert_eq!(value["job"]["lease"]["worker_id"], "vision-worker");
+    }
+
+    #[tokio::test]
     async fn submitted_job_can_be_fetched() {
         let app = build_router(test_state());
 

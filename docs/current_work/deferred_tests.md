@@ -160,11 +160,25 @@ Phase 6E now has unit-level restart tests for queue recovery, priority/FIFO
 ordering, next ID recovery, running lease preservation, cancelled state,
 completed state, callback metadata, terminal result state, expired running lease
 startup recovery, SQLite bootstrap migration, and endpoint-level AppState
-recovery. Remaining deferred tests:
+recovery. It also covers lease renewal persistence, custom worker failure
+persistence, and claiming a recovered queued job through worker endpoints after
+an app rebuild. Remaining deferred tests:
 
-- process-level e2e restart test with an actual Fairlead process and DB file
-- corrupted or incompatible SQLite file behavior
-- Thor/Loki e2e recovery with jobs submitted before and after Fairlead restart
+- Process-level e2e restart test with an actual Fairlead process and DB file:
+  submit jobs, stop Fairlead, restart with the same `JOB_DB_PATH`, verify list,
+  get, worker claim, complete/fail, and metrics behavior.
+- Process-level expired-lease restart test: claim a job with a short lease,
+  stop Fairlead until the lease expires, restart, and verify requeue/failure
+  behavior through HTTP.
+- Storage write failure tests: read-only DB path, unwritable parent directory,
+  disk-full simulation if feasible, and SQLite busy/locked write behavior.
+- Corrupted or incompatible SQLite file behavior: invalid file contents,
+  malformed JSON columns, unknown enum values, negative numeric fields, and
+  future `user_version` handling.
+- Multi-process safety test if Fairlead ever supports more than one active
+  router against the same SQLite file. SQLite is currently scoped for a single
+  Fairlead process.
+- Thor/Loki e2e recovery with jobs submitted before and after Fairlead restart.
 
 **Why deferred:** The remaining cases need a larger restart harness or real
 deployment environment. The current Shackle tests cover the storage-backed
