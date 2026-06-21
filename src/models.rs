@@ -57,7 +57,10 @@ mod tests {
         router::{BackendState, SessionAffinity},
         AppState,
     };
-    use axum::{body::Body, http::Request};
+    use axum::{
+        body::Body,
+        http::{Method, Request},
+    };
     use serde_json::json;
     use std::time::Duration;
     use tower::ServiceExt;
@@ -71,6 +74,22 @@ mod tests {
             resources: ResourceRegistry::default(),
             resource_policy: ResourceRoutingPolicy::default(),
             priority_limiter: PriorityLimiter::default(),
+        }
+    }
+
+    fn backend_config(
+        id: &str,
+        node_id: Option<&str>,
+        pool: &str,
+        workloads: Vec<WorkloadKind>,
+    ) -> BackendConfig {
+        BackendConfig {
+            id: id.into(),
+            url: format!("http://{id}:8000/v1"),
+            node_id: node_id.map(str::to_owned),
+            pool: pool.into(),
+            workloads,
+            health_path: None,
         }
     }
 
@@ -133,5 +152,69 @@ mod tests {
 
         assert_eq!(value["object"], "list");
         assert_eq!(value["data"], json!([]));
+    }
+
+    #[tokio::test]
+    async fn list_models_preserves_backend_order_and_workload_metadata() {
+        let first = BackendState::from_config(
+            backend_config(
+                "chat-backend",
+                Some("node-a"),
+                "local-llm",
+                vec![WorkloadKind::ChatCompletions],
+            ),
+            3,
+            Duration::from_secs(30),
+        );
+        let second = BackendState::from_config(
+            backend_config(
+                "embedding-backend",
+                None,
+                "embedding",
+                vec![WorkloadKind::Embeddings],
+            ),
+            3,
+            Duration::from_secs(30),
+        );
+        let app = build_router(test_state(vec![first, second]));
+
+        let response = app
+            .oneshot(Request::get("/v1/models").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), 200);
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+
+        assert_eq!(value["data"][0]["id"], "chat-backend");
+        assert_eq!(value["data"][0]["node_id"], "node-a");
+        assert_eq!(value["data"][0]["pool"], "local-llm");
+        assert_eq!(value["data"][0]["workloads"], json!(["chat_completions"]));
+
+        assert_eq!(value["data"][1]["id"], "embedding-backend");
+        assert_eq!(value["data"][1]["node_id"], serde_json::Value::Null);
+        assert_eq!(value["data"][1]["pool"], "embedding");
+        assert_eq!(value["data"][1]["workloads"], json!(["embeddings"]));
+    }
+
+    #[tokio::test]
+    async fn post_to_models_returns_405() {
+        let app = build_router(test_state(vec![]));
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/v1/models")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), 405);
     }
 }

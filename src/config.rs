@@ -618,6 +618,58 @@ mod tests {
     }
 
     #[test]
+    fn empty_backend_id_returns_err() {
+        let result = Config::from_lookup(env(&[(
+            "BACKENDS_JSON",
+            r#"[{"id":"   ","url":"http://node-a:8000/v1"}]"#,
+        )]));
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("backend id cannot be empty"));
+    }
+
+    #[test]
+    fn empty_backend_url_returns_err() {
+        let result = Config::from_lookup(env(&[(
+            "BACKENDS_JSON",
+            r#"[{"id":"node-a-vllm","url":"   "}]"#,
+        )]));
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("url cannot be empty"));
+    }
+
+    #[test]
+    fn empty_backend_pool_returns_err() {
+        let result = Config::from_lookup(env(&[(
+            "BACKENDS_JSON",
+            r#"[{"id":"node-a-vllm","url":"http://node-a:8000/v1","pool":"   "}]"#,
+        )]));
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("pool cannot be empty"));
+    }
+
+    #[test]
+    fn empty_backend_workloads_returns_err() {
+        let result = Config::from_lookup(env(&[(
+            "BACKENDS_JSON",
+            r#"[{"id":"node-a-vllm","url":"http://node-a:8000/v1","workloads":[]}]"#,
+        )]));
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("must support at least one workload"));
+    }
+
+    #[test]
     fn empty_health_path_returns_err() {
         let result = Config::from_lookup(env(&[(
             "BACKENDS_JSON",

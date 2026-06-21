@@ -1003,8 +1003,17 @@ mod tests {
                     "openai_organization": headers
                         .get("openai-organization")
                         .and_then(|v| v.to_str().ok()),
+                    "openai_project": headers
+                        .get("openai-project")
+                        .and_then(|v| v.to_str().ok()),
                     "anthropic_version": headers
                         .get("anthropic-version")
+                        .and_then(|v| v.to_str().ok()),
+                    "anthropic_beta": headers
+                        .get("anthropic-beta")
+                        .and_then(|v| v.to_str().ok()),
+                    "google_api_key": headers
+                        .get("x-goog-api-key")
                         .and_then(|v| v.to_str().ok()),
                     "fairlead_thread": headers
                         .get("x-fairlead-thread-id")
@@ -1026,7 +1035,10 @@ mod tests {
             .header("content-type", "application/json; charset=utf-8")
             .header("authorization", "Bearer upstream-token")
             .header("openai-organization", "org-test")
+            .header("openai-project", "project-test")
             .header("anthropic-version", "2023-06-01")
+            .header("anthropic-beta", "tools-2024-04-04")
+            .header("x-goog-api-key", "google-key")
             .header("x-fairlead-thread-id", "thread-1")
             .header("x-fairlead-origin-node", "node-a")
             .header("x-fairlead-priority", "batch")
@@ -1041,7 +1053,10 @@ mod tests {
         assert_eq!(received["content_type"], "application/json; charset=utf-8");
         assert_eq!(received["authorization"], "Bearer upstream-token");
         assert_eq!(received["openai_organization"], "org-test");
+        assert_eq!(received["openai_project"], "project-test");
         assert_eq!(received["anthropic_version"], "2023-06-01");
+        assert_eq!(received["anthropic_beta"], "tools-2024-04-04");
+        assert_eq!(received["google_api_key"], "google-key");
         assert_eq!(received["fairlead_thread"], serde_json::Value::Null);
         assert_eq!(received["fairlead_origin"], serde_json::Value::Null);
         assert_eq!(received["request_id"], serde_json::Value::Null);
@@ -2221,6 +2236,73 @@ mod tests {
             .unwrap();
         assert!(metrics.contains(
             "fairlead_fallbacks_total{workload=\"chat_completions\",priority=\"realtime\",backend=\"node-b-vllm\",node=\"node-b\",pool=\"local-llm\",origin_node=\"node-a\",reason=\"origin_unavailable\"} 1"
+        ));
+    }
+
+    #[tokio::test]
+    async fn origin_node_falls_back_when_same_node_backend_cannot_serve_workload() {
+        let node_a_hits = Arc::new(AtomicUsize::new(0));
+        let node_a_hits_for_route = node_a_hits.clone();
+        let node_a = Router::new().route(
+            "/v1/chat/completions",
+            post(move || {
+                let hits = node_a_hits_for_route.clone();
+                async move {
+                    hits.fetch_add(1, Ordering::SeqCst);
+                    axum::Json(json!({"source":"wrong-workload"}))
+                }
+            }),
+        );
+        let node_b = Router::new().route(
+            "/v1/chat/completions",
+            post(|| async { axum::Json(json!({"source":"node-b"})) }),
+        );
+        let node_a_url = start_mock(node_a).await;
+        let node_b_url = start_mock(node_b).await;
+
+        let fairlead = start_fairlead_with_backends(vec![
+            BackendState::from_config(
+                BackendConfig {
+                    id: "node-a-embed".into(),
+                    url: node_a_url,
+                    node_id: Some("node-a".into()),
+                    pool: "local-llm".into(),
+                    workloads: vec![WorkloadKind::Embeddings],
+                    health_path: None,
+                },
+                10,
+                Duration::from_secs(60),
+            ),
+            backend_on_node(node_b_url, "node-b"),
+        ])
+        .await;
+
+        let client = reqwest::Client::new();
+        let resp = client
+            .post(format!("{}/v1/chat/completions", fairlead))
+            .header("x-fairlead-origin-node", "node-a")
+            .json(&json!({"model":"m","messages":[]}))
+            .send()
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), 200);
+        assert_eq!(
+            resp.json::<serde_json::Value>().await.unwrap()["source"],
+            "node-b"
+        );
+        assert_eq!(node_a_hits.load(Ordering::SeqCst), 0);
+
+        let metrics = client
+            .get(format!("{}/metrics", fairlead))
+            .send()
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap();
+        assert!(metrics.contains(
+            "fairlead_fallbacks_total{workload=\"chat_completions\",priority=\"realtime\",backend=\"node-b-vllm\",node=\"node-b\",pool=\"local-llm\",origin_node=\"node-a\",reason=\"workload_unavailable\"} 1"
         ));
     }
 
