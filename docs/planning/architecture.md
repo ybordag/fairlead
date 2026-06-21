@@ -340,6 +340,9 @@ GET  /v1/workers                — list registered workers
 Current async scheduler behavior:
 
 - submitted jobs enter `queued`
+- `POST /v1/jobs` accepts an optional `idempotency_key`; a retry with the same
+  key and same request body returns the original job instead of enqueueing a
+  duplicate, while reusing the key for a different request is rejected
 - submitted jobs are tracked in in-memory per-priority queues
 - `GET /v1/jobs` lists current in-memory job records
 - `/metrics` exposes `fairlead_job_queue_depth{priority,type}`
@@ -350,8 +353,8 @@ Current async scheduler behavior:
   `fairlead_job_duration_seconds_sum{priority,type,status}`, and
   `fairlead_job_duration_seconds_max{priority,type,status}`
 - job state is in memory by default; opt-in SQLite state persists jobs, queue
-  order, leases, terminal state, callback metadata, and callback delivery state
-  across ordinary Fairlead restarts
+  order, submit idempotency keys, leases, terminal state, callback metadata, and
+  callback delivery state across ordinary Fairlead restarts
 - cancellation marks queued jobs `cancelled`
 - cancellation removes queued jobs from queue depth and wait-time accounting
 - registered workers are listed with stale and draining status
@@ -394,6 +397,8 @@ Current async scheduler behavior:
   retention age, up to the configured per-call limit
 - pruning skips terminal jobs with pending callbacks so callback delivery can
   continue
+- pruning removes submit idempotency-key mappings for removed jobs, allowing a
+  key to be reused after the retained job record is gone
 - pruning persists to SQLite when `JOB_STORE=sqlite` is enabled
 - `/metrics` exposes `fairlead_job_prunes_total{status}`
 - there is no background scheduler loop yet

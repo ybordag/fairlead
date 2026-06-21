@@ -73,6 +73,8 @@ pub struct SubmitJobRequest {
     pub payload: Value,
     #[serde(default)]
     pub callback_url: Option<String>,
+    #[serde(default)]
+    pub idempotency_key: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -84,6 +86,7 @@ pub struct JobRecord {
     pub status: JobStatus,
     pub payload: Value,
     pub callback_url: Option<String>,
+    pub idempotency_key: Option<String>,
     pub result: Option<Value>,
     pub error: Option<JobFailure>,
     pub callback: Option<JobCallbackState>,
@@ -255,6 +258,7 @@ pub struct JobRegistry {
 pub(crate) struct JobRegistryInner {
     pub(crate) next_id: u64,
     pub(crate) jobs: HashMap<String, JobRecord>,
+    pub(crate) idempotency_keys: HashMap<String, String>,
     pub(crate) order: Vec<String>,
     pub(crate) queues: JobQueues,
 }
@@ -323,7 +327,25 @@ impl JobRegistry {
 
     pub async fn submit(&self, request: SubmitJobRequest) -> Result<JobRecord, String> {
         let callback_url = normalize_callback_url(request.callback_url)?;
+        let idempotency_key = normalize_idempotency_key(request.idempotency_key)?;
         let mut guard = self.inner.write().await;
+
+        if let Some(key) = &idempotency_key {
+            if let Some(existing_id) = guard.idempotency_keys.get(key).cloned() {
+                if let Some(existing) = guard.jobs.get(&existing_id) {
+                    if existing.kind == request.kind
+                        && existing.priority == request.priority
+                        && existing.payload == request.payload
+                        && existing.callback_url == callback_url
+                    {
+                        return Ok(existing.clone());
+                    }
+                    return Err("idempotency_key already used for a different job request".into());
+                }
+                guard.idempotency_keys.remove(key);
+            }
+        }
+
         guard.next_id += 1;
         let now = unix_ms();
         let job = JobRecord {
@@ -333,6 +355,7 @@ impl JobRegistry {
             status: JobStatus::Queued,
             payload: request.payload,
             callback_url,
+            idempotency_key: idempotency_key.clone(),
             result: None,
             error: None,
             callback: None,
@@ -343,6 +366,9 @@ impl JobRegistry {
             updated_at_unix_ms: now,
         };
         guard.jobs.insert(job.id.clone(), job.clone());
+        if let Some(key) = idempotency_key {
+            guard.idempotency_keys.insert(key, job.id.clone());
+        }
         guard.order.push(job.id.clone());
         guard
             .queues
@@ -864,7 +890,11 @@ fn prune_terminal_jobs_locked(
     }
 
     for (id, priority, status) in remove_ids {
-        inner.jobs.remove(&id);
+        if let Some(job) = inner.jobs.remove(&id) {
+            if let Some(key) = job.idempotency_key {
+                inner.idempotency_keys.remove(&key);
+            }
+        }
         inner.queues.remove(priority, &id);
         report.record_removed(status);
     }
@@ -1021,6 +1051,20 @@ fn normalize_callback_url(callback_url: Option<String>) -> Result<Option<String>
     Ok(Some(trimmed.to_string()))
 }
 
+fn normalize_idempotency_key(idempotency_key: Option<String>) -> Result<Option<String>, String> {
+    let Some(idempotency_key) = idempotency_key else {
+        return Ok(None);
+    };
+    let trimmed = idempotency_key.trim();
+    if trimmed.is_empty() {
+        return Err("idempotency_key cannot be empty".into());
+    }
+    if trimmed.len() > 256 {
+        return Err("idempotency_key cannot exceed 256 bytes".into());
+    }
+    Ok(Some(trimmed.to_string()))
+}
+
 fn default_retryable_failure() -> bool {
     true
 }
@@ -1139,6 +1183,89 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn submit_job_reuses_existing_job_for_matching_idempotency_key() {
+        let app = build_router(test_state());
+
+        let body = json!({
+            "type": "vision_analysis",
+            "priority": "batch",
+            "payload": {"image_id": "image-1"},
+            "callback_url": "http://rhizome/jobs/image-1",
+            "idempotency_key": " image-1 "
+        })
+        .to_string();
+
+        let first = app
+            .clone()
+            .oneshot(
+                Request::post("/v1/jobs")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.clone()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(first.status(), StatusCode::ACCEPTED);
+        let first_value = response_json(first).await;
+
+        let second = app
+            .clone()
+            .oneshot(
+                Request::post("/v1/jobs")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(second.status(), StatusCode::ACCEPTED);
+        let second_value = response_json(second).await;
+
+        assert_eq!(first_value["job"]["id"], "job-1");
+        assert_eq!(second_value["job"]["id"], "job-1");
+        assert_eq!(second_value["job"]["idempotency_key"], "image-1");
+
+        let listed = app
+            .oneshot(Request::get("/v1/jobs").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let listed = response_json(listed).await;
+        assert_eq!(listed["jobs"].as_array().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn submit_job_rejects_idempotency_key_reused_for_different_request() {
+        let jobs = JobRegistry::default();
+        let first = jobs
+            .submit(SubmitJobRequest {
+                kind: JobKind::VisionAnalysis,
+                priority: Priority::Batch,
+                payload: json!({"image_id": "image-1"}),
+                callback_url: None,
+                idempotency_key: Some("image-1".into()),
+            })
+            .await
+            .unwrap();
+
+        let duplicate = jobs
+            .submit(SubmitJobRequest {
+                kind: JobKind::VisionAnalysis,
+                priority: Priority::Batch,
+                payload: json!({"image_id": "image-2"}),
+                callback_url: None,
+                idempotency_key: Some("image-1".into()),
+            })
+            .await;
+
+        assert_eq!(first.id, "job-1");
+        assert_eq!(
+            duplicate.unwrap_err(),
+            "idempotency_key already used for a different job request"
+        );
+        assert_eq!(jobs.list().await.len(), 1);
+    }
+
+    #[tokio::test]
     async fn sqlite_registry_recovers_queued_jobs_and_next_id() {
         let path = unique_db_path("queued");
         let jobs =
@@ -1149,6 +1276,7 @@ mod tests {
             priority: Priority::Background,
             payload: json!({"index": "nightly"}),
             callback_url: None,
+            idempotency_key: None,
         })
         .await
         .unwrap();
@@ -1157,6 +1285,7 @@ mod tests {
             priority: Priority::Realtime,
             payload: json!({"texts": ["a"]}),
             callback_url: Some("http://rhizome/jobs/job-2".into()),
+            idempotency_key: None,
         })
         .await
         .unwrap();
@@ -1186,10 +1315,47 @@ mod tests {
                 priority: Priority::Batch,
                 payload: Value::Null,
                 callback_url: None,
+                idempotency_key: None,
             })
             .await
             .unwrap();
         assert_eq!(next.id, "job-3");
+    }
+
+    #[tokio::test]
+    async fn sqlite_registry_recovers_submit_idempotency_keys() {
+        let path = unique_db_path("idempotency");
+        let jobs =
+            JobRegistry::with_store(crate::storage::SqliteJobStore::open(&path).unwrap()).unwrap();
+
+        let submitted = jobs
+            .submit(SubmitJobRequest {
+                kind: JobKind::VisionAnalysis,
+                priority: Priority::Batch,
+                payload: json!({"image": "rose.jpg"}),
+                callback_url: Some("http://rhizome/jobs/rose".into()),
+                idempotency_key: Some("rose-image".into()),
+            })
+            .await
+            .unwrap();
+        assert_eq!(submitted.id, "job-1");
+
+        let restored =
+            JobRegistry::with_store(crate::storage::SqliteJobStore::open(&path).unwrap()).unwrap();
+        let duplicate = restored
+            .submit(SubmitJobRequest {
+                kind: JobKind::VisionAnalysis,
+                priority: Priority::Batch,
+                payload: json!({"image": "rose.jpg"}),
+                callback_url: Some("http://rhizome/jobs/rose".into()),
+                idempotency_key: Some("rose-image".into()),
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(duplicate.id, "job-1");
+        assert_eq!(duplicate.idempotency_key.as_deref(), Some("rose-image"));
+        assert_eq!(restored.list().await.len(), 1);
     }
 
     #[tokio::test]
@@ -1204,6 +1370,7 @@ mod tests {
                 priority: Priority::Batch,
                 payload: json!({"image": "rose.jpg"}),
                 callback_url: None,
+                idempotency_key: None,
             })
             .await
             .unwrap();
@@ -1213,6 +1380,7 @@ mod tests {
                 priority: Priority::Realtime,
                 payload: Value::Null,
                 callback_url: None,
+                idempotency_key: None,
             })
             .await
             .unwrap();
@@ -1222,6 +1390,7 @@ mod tests {
                 priority: Priority::Background,
                 payload: Value::Null,
                 callback_url: None,
+                idempotency_key: None,
             })
             .await
             .unwrap();
@@ -1266,6 +1435,7 @@ mod tests {
                 priority: Priority::Batch,
                 payload: Value::Null,
                 callback_url: None,
+                idempotency_key: None,
             })
             .await
             .unwrap();
@@ -1307,6 +1477,7 @@ mod tests {
                 priority: Priority::Background,
                 payload: Value::Null,
                 callback_url: None,
+                idempotency_key: None,
             })
             .await
             .unwrap();
@@ -1390,6 +1561,7 @@ mod tests {
                 priority: Priority::Batch,
                 payload: Value::Null,
                 callback_url: None,
+                idempotency_key: None,
             })
             .await
             .unwrap();
@@ -1425,6 +1597,7 @@ mod tests {
                 priority: Priority::Batch,
                 payload: Value::Null,
                 callback_url: None,
+                idempotency_key: None,
             })
             .await
             .unwrap();
@@ -1434,6 +1607,7 @@ mod tests {
                 priority: Priority::Background,
                 payload: Value::Null,
                 callback_url: None,
+                idempotency_key: None,
             })
             .await
             .unwrap();
@@ -1629,6 +1803,7 @@ mod tests {
             priority: Priority::Realtime,
             payload: Value::Null,
             callback_url: None,
+            idempotency_key: None,
         })
         .await
         .unwrap();
@@ -1637,6 +1812,7 @@ mod tests {
             priority: Priority::Realtime,
             payload: Value::Null,
             callback_url: None,
+            idempotency_key: None,
         })
         .await
         .unwrap();
@@ -1645,6 +1821,7 @@ mod tests {
             priority: Priority::Batch,
             payload: Value::Null,
             callback_url: None,
+            idempotency_key: None,
         })
         .await
         .unwrap();
@@ -1714,6 +1891,7 @@ mod tests {
             priority: Priority::Background,
             payload: Value::Null,
             callback_url: None,
+            idempotency_key: None,
         })
         .await
         .unwrap();
@@ -1722,6 +1900,7 @@ mod tests {
             priority: Priority::Background,
             payload: Value::Null,
             callback_url: None,
+            idempotency_key: None,
         })
         .await
         .unwrap();
@@ -1746,6 +1925,7 @@ mod tests {
             priority: Priority::Background,
             payload: Value::Null,
             callback_url: None,
+            idempotency_key: None,
         })
         .await
         .unwrap();
@@ -1754,6 +1934,7 @@ mod tests {
             priority: Priority::Realtime,
             payload: Value::Null,
             callback_url: None,
+            idempotency_key: None,
         })
         .await
         .unwrap();
@@ -1762,6 +1943,7 @@ mod tests {
             priority: Priority::Batch,
             payload: Value::Null,
             callback_url: None,
+            idempotency_key: None,
         })
         .await
         .unwrap();
@@ -1783,6 +1965,7 @@ mod tests {
             priority: Priority::Batch,
             payload: Value::Null,
             callback_url: None,
+            idempotency_key: None,
         })
         .await
         .unwrap();
@@ -1811,6 +1994,7 @@ mod tests {
             priority: Priority::Background,
             payload: Value::Null,
             callback_url: None,
+            idempotency_key: None,
         })
         .await
         .unwrap();
@@ -1819,6 +2003,7 @@ mod tests {
             priority: Priority::Batch,
             payload: Value::Null,
             callback_url: None,
+            idempotency_key: None,
         })
         .await
         .unwrap();
@@ -1827,6 +2012,7 @@ mod tests {
             priority: Priority::Batch,
             payload: Value::Null,
             callback_url: None,
+            idempotency_key: None,
         })
         .await
         .unwrap();
@@ -1852,6 +2038,7 @@ mod tests {
             priority: Priority::Realtime,
             payload: Value::Null,
             callback_url: None,
+            idempotency_key: None,
         })
         .await
         .unwrap();
@@ -1875,6 +2062,7 @@ mod tests {
             priority: Priority::Batch,
             payload: Value::Null,
             callback_url: None,
+            idempotency_key: None,
         })
         .await
         .unwrap();
@@ -1900,6 +2088,7 @@ mod tests {
             priority: Priority::Batch,
             payload: Value::Null,
             callback_url: None,
+            idempotency_key: None,
         })
         .await
         .unwrap();
@@ -1951,6 +2140,7 @@ mod tests {
             priority: Priority::Background,
             payload: Value::Null,
             callback_url: None,
+            idempotency_key: None,
         })
         .await
         .unwrap();
@@ -1996,6 +2186,7 @@ mod tests {
             priority: Priority::Realtime,
             payload: Value::Null,
             callback_url: None,
+            idempotency_key: None,
         })
         .await
         .unwrap();
@@ -2004,6 +2195,7 @@ mod tests {
             priority: Priority::Background,
             payload: Value::Null,
             callback_url: None,
+            idempotency_key: None,
         })
         .await
         .unwrap();
@@ -2038,6 +2230,7 @@ mod tests {
             priority: Priority::Background,
             payload: Value::Null,
             callback_url: None,
+            idempotency_key: None,
         })
         .await
         .unwrap();
@@ -2069,6 +2262,7 @@ mod tests {
             priority: Priority::Batch,
             payload: Value::Null,
             callback_url: None,
+            idempotency_key: None,
         })
         .await
         .unwrap();
@@ -2105,6 +2299,7 @@ mod tests {
             priority: Priority::Batch,
             payload: Value::Null,
             callback_url: None,
+            idempotency_key: None,
         })
         .await
         .unwrap();
@@ -2129,6 +2324,7 @@ mod tests {
             priority: Priority::Realtime,
             payload: Value::Null,
             callback_url: None,
+            idempotency_key: None,
         })
         .await
         .unwrap();
@@ -2153,6 +2349,7 @@ mod tests {
             priority: Priority::Background,
             payload: Value::Null,
             callback_url: None,
+            idempotency_key: None,
         })
         .await
         .unwrap();
@@ -2187,6 +2384,7 @@ mod tests {
             priority: Priority::Batch,
             payload: Value::Null,
             callback_url: None,
+            idempotency_key: None,
         })
         .await
         .unwrap();
@@ -2216,6 +2414,7 @@ mod tests {
             priority: Priority::Realtime,
             payload: Value::Null,
             callback_url: None,
+            idempotency_key: None,
         })
         .await
         .unwrap();
@@ -2231,6 +2430,7 @@ mod tests {
             priority: Priority::Batch,
             payload: Value::Null,
             callback_url: None,
+            idempotency_key: None,
         })
         .await
         .unwrap();
@@ -2250,6 +2450,7 @@ mod tests {
             priority: Priority::Background,
             payload: Value::Null,
             callback_url: None,
+            idempotency_key: None,
         })
         .await
         .unwrap();
@@ -2299,6 +2500,7 @@ mod tests {
             priority: Priority::Batch,
             payload: Value::Null,
             callback_url: None,
+            idempotency_key: None,
         })
         .await
         .unwrap();
@@ -2327,6 +2529,7 @@ mod tests {
             priority: Priority::Realtime,
             payload: Value::Null,
             callback_url: None,
+            idempotency_key: None,
         })
         .await
         .unwrap();
@@ -2376,6 +2579,7 @@ mod tests {
             priority: Priority::Batch,
             payload: Value::Null,
             callback_url: None,
+            idempotency_key: None,
         })
         .await
         .unwrap();
@@ -2384,6 +2588,7 @@ mod tests {
             priority: Priority::Batch,
             payload: Value::Null,
             callback_url: None,
+            idempotency_key: None,
         })
         .await
         .unwrap();
@@ -2408,6 +2613,7 @@ mod tests {
             priority: Priority::Batch,
             payload: Value::Null,
             callback_url: None,
+            idempotency_key: None,
         })
         .await
         .unwrap();
@@ -2416,6 +2622,7 @@ mod tests {
             priority: Priority::Realtime,
             payload: Value::Null,
             callback_url: None,
+            idempotency_key: None,
         })
         .await
         .unwrap();
@@ -2424,6 +2631,7 @@ mod tests {
             priority: Priority::Background,
             payload: Value::Null,
             callback_url: None,
+            idempotency_key: None,
         })
         .await
         .unwrap();
@@ -2460,6 +2668,7 @@ mod tests {
             priority: Priority::Background,
             payload: Value::Null,
             callback_url: None,
+            idempotency_key: None,
         })
         .await
         .unwrap();
@@ -2468,6 +2677,7 @@ mod tests {
             priority: Priority::Background,
             payload: Value::Null,
             callback_url: None,
+            idempotency_key: None,
         })
         .await
         .unwrap();
@@ -2568,6 +2778,7 @@ mod tests {
             priority: Priority::Batch,
             payload: Value::Null,
             callback_url: None,
+            idempotency_key: None,
         })
         .await
         .unwrap();
@@ -2576,6 +2787,7 @@ mod tests {
             priority: Priority::Background,
             payload: Value::Null,
             callback_url: None,
+            idempotency_key: None,
         })
         .await
         .unwrap();
@@ -2584,6 +2796,7 @@ mod tests {
             priority: Priority::Realtime,
             payload: Value::Null,
             callback_url: None,
+            idempotency_key: None,
         })
         .await
         .unwrap();
@@ -2651,6 +2864,7 @@ mod tests {
                 priority: Priority::Batch,
                 payload: Value::Null,
                 callback_url: None,
+                idempotency_key: None,
             })
             .await
             .unwrap();
@@ -2660,6 +2874,7 @@ mod tests {
             priority: Priority::Batch,
             payload: Value::Null,
             callback_url: Some("http://rhizome/jobs/job-7".into()),
+            idempotency_key: None,
         })
         .await
         .unwrap();
@@ -2746,6 +2961,7 @@ mod tests {
                 priority: Priority::Batch,
                 payload: Value::Null,
                 callback_url: None,
+                idempotency_key: None,
             })
             .await
             .unwrap();
@@ -2777,6 +2993,7 @@ mod tests {
             priority: Priority::Batch,
             payload: Value::Null,
             callback_url: Some("http://rhizome/jobs/job-1".into()),
+            idempotency_key: None,
         })
         .await
         .unwrap();
@@ -2799,6 +3016,45 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn prune_terminal_jobs_releases_submit_idempotency_key() {
+        let jobs = JobRegistry::new(JobRetentionPolicy {
+            terminal_retention_ms: 0,
+            max_pruned_jobs: 10,
+        });
+
+        jobs.submit(SubmitJobRequest {
+            kind: JobKind::VisionAnalysis,
+            priority: Priority::Batch,
+            payload: json!({"image": "rose.jpg"}),
+            callback_url: None,
+            idempotency_key: Some("rose-image".into()),
+        })
+        .await
+        .unwrap();
+        jobs.claim_next_for_worker("worker-a", &[JobKind::VisionAnalysis], 30_000)
+            .await
+            .unwrap();
+        jobs.complete_lease("job-1", "worker-a", json!({"ok": true}))
+            .await;
+
+        let report = jobs.prune_terminal_jobs().await;
+        assert_eq!(report.removed, 1);
+
+        let new_job = jobs
+            .submit(SubmitJobRequest {
+                kind: JobKind::VisionAnalysis,
+                priority: Priority::Batch,
+                payload: json!({"image": "rose-again.jpg"}),
+                callback_url: None,
+                idempotency_key: Some("rose-image".into()),
+            })
+            .await
+            .unwrap();
+        assert_eq!(new_job.id, "job-2");
+        assert_eq!(jobs.list().await.len(), 1);
+    }
+
+    #[tokio::test]
     async fn prune_terminal_jobs_preserves_queued_and_running_jobs() {
         let jobs = JobRegistry::new(JobRetentionPolicy {
             terminal_retention_ms: 0,
@@ -2815,6 +3071,7 @@ mod tests {
                 priority: Priority::Batch,
                 payload: Value::Null,
                 callback_url: None,
+                idempotency_key: None,
             })
             .await
             .unwrap();
@@ -2860,6 +3117,7 @@ mod tests {
             priority: Priority::Background,
             payload: Value::Null,
             callback_url: None,
+            idempotency_key: None,
         })
         .await
         .unwrap();
@@ -2893,6 +3151,7 @@ mod tests {
                 priority: Priority::Batch,
                 payload: Value::Null,
                 callback_url: None,
+                idempotency_key: None,
             })
             .await
             .unwrap();
@@ -3031,6 +3290,7 @@ mod tests {
             json!({"priority": "batch"}).to_string(),
             json!({"type": "unknown"}).to_string(),
             json!({"type": "vision_analysis", "priority": "urgent"}).to_string(),
+            json!({"type": "vision_analysis", "idempotency_key": "   "}).to_string(),
             "{not-json".to_string(),
         ] {
             let response = app

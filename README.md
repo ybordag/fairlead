@@ -253,17 +253,23 @@ JOB_DB_PATH=fairlead_jobs.sqlite3 \
 cargo run
 ```
 
-With `JOB_STORE=sqlite`, Fairlead persists submitted jobs, queue order, claim and
-lease state, attempts, cancellation, completion, failure, payloads, callback
-metadata, callback delivery state, and result/error state. On startup,
+`POST /v1/jobs` accepts an optional `idempotency_key` for safe caller retries.
+When the same key is reused with the same request, Fairlead returns the existing
+job instead of enqueueing duplicate work; reusing the key for a different
+request is rejected.
+
+With `JOB_STORE=sqlite`, Fairlead persists submitted jobs, queue order, submit
+idempotency keys, claim and lease state, attempts, cancellation, completion,
+failure, payloads, callback metadata, callback delivery state, and result/error
+state. On startup,
 already-expired running leases are requeued when attempts remain and failed when
 attempts are exhausted.
 
 Terminal async jobs can be pruned explicitly with `POST /v1/jobs/prune`.
 Pruning removes only terminal jobs older than `JOB_RETENTION_SECS`, up to
 `JOB_PRUNE_LIMIT` jobs per call. Jobs with pending callbacks are retained so
-callback delivery can continue. Removed jobs are also deleted from SQLite when
-`JOB_STORE=sqlite` is enabled.
+callback delivery can continue. Removed jobs are also deleted from SQLite, and
+their submit idempotency keys are released, when `JOB_STORE=sqlite` is enabled.
 
 ```bash
 JOB_RETENTION_SECS=86400 \

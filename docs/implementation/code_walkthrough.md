@@ -1340,6 +1340,19 @@ and compatible worker count. A no-compatible-job claim records how many queued
 jobs were skipped because the claiming worker supports their job type but its
 pool is not allowed by workload policy.
 
+`POST /v1/jobs` calls `jobs::submit_job`, which deserializes the async job
+request and delegates to `JobRegistry::submit()`:
+
+1. `callback_url` and optional `idempotency_key` are trimmed and validated.
+2. If the idempotency key already maps to a matching existing job, the existing
+   job is returned and no new queue entry is created.
+3. If the key maps to a different request shape, the submit is rejected.
+4. Otherwise, Fairlead allocates the next `job-N` ID, stores the job record,
+   records the idempotency-key mapping when present, and appends the job to its
+   priority queue.
+5. With `JOB_STORE=sqlite`, the full registry snapshot includes the idempotency
+   key so a submit retry after restart still resolves to the original job.
+
 `GET /v1/scheduler/preview` asks the scheduler to inspect the in-memory queues
 and registered workers:
 

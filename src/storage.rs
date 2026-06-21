@@ -9,7 +9,7 @@ use std::{
 use crate::config::JobStoreConfig;
 use crate::jobs::{JobQueues, JobRecord, JobRegistryInner, JobStatus};
 
-const JOB_STORE_SCHEMA_VERSION: i32 = 2;
+const JOB_STORE_SCHEMA_VERSION: i32 = 3;
 
 #[cfg(test)]
 pub fn bootstrap_job_store(config: &JobStoreConfig) -> Result<()> {
@@ -49,7 +49,7 @@ impl SqliteJobStore {
             r#"
             SELECT id, type, priority, status, payload_json, callback_url, result_json,
                    error_json, attempts, max_attempts, lease_json, created_at_unix_ms,
-                   updated_at_unix_ms, queue_position, callback_state_json
+                   updated_at_unix_ms, queue_position, callback_state_json, idempotency_key
             FROM jobs
             ORDER BY order_position ASC, created_at_unix_ms ASC, id ASC
             "#,
@@ -73,6 +73,7 @@ impl SqliteJobStore {
             let updated_at_unix_ms: i64 = row.get(12)?;
             let queue_position: Option<i64> = row.get(13)?;
             let callback_state_json: Option<String> = row.get(14)?;
+            let idempotency_key: Option<String> = row.get(15)?;
 
             let job = JobRecord {
                 id,
@@ -83,6 +84,7 @@ impl SqliteJobStore {
                     .map_err(to_sql_error)?,
                 payload: serde_json::from_str(&payload_json).map_err(to_sql_error)?,
                 callback_url: row.get(5)?,
+                idempotency_key,
                 result: result_json
                     .map(|raw| serde_json::from_str(&raw).map_err(to_sql_error))
                     .transpose()?,
@@ -129,10 +131,19 @@ impl SqliteJobStore {
                 crate::config::Priority::Background => queues.background.push_back(id),
             }
         }
+        let idempotency_keys = jobs
+            .values()
+            .filter_map(|job| {
+                job.idempotency_key
+                    .as_ref()
+                    .map(|key| (key.clone(), job.id.clone()))
+            })
+            .collect();
 
         Ok(JobRegistryInner {
             next_id,
             jobs,
+            idempotency_keys,
             order,
             queues,
         })
@@ -156,9 +167,10 @@ impl SqliteJobStore {
                 INSERT INTO jobs (
                     id, type, priority, status, payload_json, callback_url, result_json,
                     error_json, attempts, max_attempts, lease_json, created_at_unix_ms,
-                    updated_at_unix_ms, queue_position, order_position, callback_state_json
+                    updated_at_unix_ms, queue_position, order_position, callback_state_json,
+                    idempotency_key
                 )
-                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)
+                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)
                 "#,
                 params![
                     job.id,
@@ -177,6 +189,7 @@ impl SqliteJobStore {
                     queue_positions.get(&job.id).copied(),
                     order_position as i64,
                     optional_json(&job.callback)?,
+                    job.idempotency_key,
                 ],
             )?;
         }
@@ -207,7 +220,8 @@ fn bootstrap_schema(connection: &Connection) -> Result<()> {
             updated_at_unix_ms INTEGER NOT NULL,
             queue_position INTEGER,
             order_position INTEGER NOT NULL DEFAULT 0,
-            callback_state_json TEXT
+            callback_state_json TEXT,
+            idempotency_key TEXT
         );
 
         CREATE INDEX IF NOT EXISTS idx_jobs_queue
@@ -228,6 +242,12 @@ fn bootstrap_schema(connection: &Connection) -> Result<()> {
         "jobs",
         "callback_state_json",
         "ALTER TABLE jobs ADD COLUMN callback_state_json TEXT",
+    )?;
+    ensure_column(
+        connection,
+        "jobs",
+        "idempotency_key",
+        "ALTER TABLE jobs ADD COLUMN idempotency_key TEXT",
     )?;
     connection.pragma_update(None, "user_version", JOB_STORE_SCHEMA_VERSION)?;
     Ok(())
@@ -387,6 +407,7 @@ mod tests {
             .collect();
         assert!(columns.contains(&"order_position".into()));
         assert!(columns.contains(&"callback_state_json".into()));
+        assert!(columns.contains(&"idempotency_key".into()));
     }
 
     #[test]

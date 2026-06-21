@@ -553,6 +553,7 @@ mod tests {
             priority: Priority::Background,
             payload: Value::Null,
             callback_url: None,
+            idempotency_key: None,
         })
         .await
         .unwrap();
@@ -561,6 +562,7 @@ mod tests {
             priority: Priority::Realtime,
             payload: Value::Null,
             callback_url: None,
+            idempotency_key: None,
         })
         .await
         .unwrap();
@@ -593,6 +595,7 @@ mod tests {
             priority: Priority::Batch,
             payload: Value::Null,
             callback_url: None,
+            idempotency_key: None,
         })
         .await
         .unwrap();
@@ -601,6 +604,7 @@ mod tests {
             priority: Priority::Batch,
             payload: Value::Null,
             callback_url: None,
+            idempotency_key: None,
         })
         .await
         .unwrap();
@@ -631,6 +635,7 @@ mod tests {
             priority: Priority::Realtime,
             payload: Value::Null,
             callback_url: None,
+            idempotency_key: None,
         })
         .await
         .unwrap();
@@ -639,6 +644,7 @@ mod tests {
             priority: Priority::Batch,
             payload: Value::Null,
             callback_url: None,
+            idempotency_key: None,
         })
         .await
         .unwrap();
@@ -674,6 +680,7 @@ mod tests {
             priority: Priority::Batch,
             payload: Value::Null,
             callback_url: None,
+            idempotency_key: None,
         })
         .await
         .unwrap();
@@ -711,6 +718,7 @@ mod tests {
             priority: Priority::Batch,
             payload: Value::Null,
             callback_url: None,
+            idempotency_key: None,
         })
         .await
         .unwrap();
@@ -746,6 +754,7 @@ mod tests {
             priority: Priority::Batch,
             payload: Value::Null,
             callback_url: None,
+            idempotency_key: None,
         })
         .await
         .unwrap();
@@ -775,6 +784,7 @@ mod tests {
             priority: Priority::Batch,
             payload: Value::Null,
             callback_url: None,
+            idempotency_key: None,
         })
         .await
         .unwrap();
@@ -839,6 +849,7 @@ mod tests {
             priority: Priority::Batch,
             payload: Value::Null,
             callback_url: None,
+            idempotency_key: None,
         })
         .await
         .unwrap();
@@ -911,6 +922,7 @@ mod tests {
             priority: Priority::Batch,
             payload: Value::Null,
             callback_url: None,
+            idempotency_key: None,
         })
         .await
         .unwrap();
@@ -989,6 +1001,7 @@ mod tests {
             priority: Priority::Realtime,
             payload: Value::Null,
             callback_url: None,
+            idempotency_key: None,
         })
         .await
         .unwrap();
@@ -997,6 +1010,7 @@ mod tests {
             priority: Priority::Batch,
             payload: Value::Null,
             callback_url: None,
+            idempotency_key: None,
         })
         .await
         .unwrap();
@@ -1058,6 +1072,7 @@ mod tests {
             priority: Priority::Batch,
             payload: Value::Null,
             callback_url: None,
+            idempotency_key: None,
         })
         .await
         .unwrap();
@@ -1066,6 +1081,7 @@ mod tests {
             priority: Priority::Batch,
             payload: Value::Null,
             callback_url: None,
+            idempotency_key: None,
         })
         .await
         .unwrap();
@@ -1134,6 +1150,7 @@ mod tests {
             priority: Priority::Batch,
             payload: Value::Null,
             callback_url: None,
+            idempotency_key: None,
         })
         .await
         .unwrap();
@@ -1189,6 +1206,7 @@ mod tests {
             priority: Priority::Realtime,
             payload: Value::Null,
             callback_url: None,
+            idempotency_key: None,
         })
         .await
         .unwrap();
@@ -1239,6 +1257,7 @@ mod tests {
                 priority: Priority::Batch,
                 payload: Value::Null,
                 callback_url: None,
+                idempotency_key: None,
             })
             .await
             .unwrap();
@@ -1292,6 +1311,7 @@ mod tests {
             priority: Priority::Batch,
             payload: Value::Null,
             callback_url: None,
+            idempotency_key: None,
         })
         .await
         .unwrap();
@@ -1341,6 +1361,7 @@ mod tests {
             priority: Priority::Batch,
             payload: Value::Null,
             callback_url: None,
+            idempotency_key: None,
         })
         .await
         .unwrap();
@@ -1424,6 +1445,7 @@ mod tests {
             priority: Priority::Batch,
             payload: Value::Null,
             callback_url: None,
+            idempotency_key: None,
         })
         .await
         .unwrap();
@@ -1494,6 +1516,7 @@ mod tests {
             priority: Priority::Batch,
             payload: Value::Null,
             callback_url: None,
+            idempotency_key: None,
         })
         .await
         .unwrap();
@@ -1593,6 +1616,7 @@ mod tests {
             priority: Priority::Batch,
             payload: Value::Null,
             callback_url: None,
+            idempotency_key: None,
         })
         .await
         .unwrap();
@@ -1649,6 +1673,7 @@ mod tests {
                 priority: Priority::Realtime,
                 payload: Value::Null,
                 callback_url: None,
+                idempotency_key: None,
             })
             .await
             .unwrap();
@@ -1728,6 +1753,7 @@ mod tests {
             priority: Priority::Batch,
             payload: json!({"image": "rose.jpg"}),
             callback_url: Some(callback_url),
+            idempotency_key: None,
         })
         .await
         .unwrap();
@@ -1786,6 +1812,7 @@ mod tests {
             priority: Priority::Background,
             payload: Value::Null,
             callback_url: Some(callback_url),
+            idempotency_key: None,
         })
         .await
         .unwrap();
@@ -1847,6 +1874,7 @@ mod tests {
             priority: Priority::Batch,
             payload: Value::Null,
             callback_url: Some(callback_url),
+            idempotency_key: None,
         })
         .await
         .unwrap();
@@ -1921,6 +1949,7 @@ mod tests {
             priority: Priority::Background,
             payload: Value::Null,
             callback_url: Some(callback_url),
+            idempotency_key: None,
         })
         .await
         .unwrap();
@@ -1988,6 +2017,7 @@ mod tests {
                 priority: Priority::Batch,
                 payload: Value::Null,
                 callback_url: Some(callback_url),
+                idempotency_key: None,
             })
             .await
             .unwrap();
@@ -2056,6 +2086,7 @@ mod tests {
                 priority: Priority::Background,
                 payload: Value::Null,
                 callback_url: Some(callback_url),
+                idempotency_key: None,
             })
             .await
             .unwrap();
@@ -2128,6 +2159,7 @@ mod tests {
                 priority: Priority::Batch,
                 payload: Value::Null,
                 callback_url: Some(callback_url),
+                idempotency_key: None,
             })
             .await
             .unwrap();
@@ -2176,6 +2208,7 @@ mod tests {
                 priority: Priority::Background,
                 payload: Value::Null,
                 callback_url: Some(callback_url),
+                idempotency_key: None,
             })
             .await
             .unwrap();
@@ -2235,6 +2268,7 @@ mod tests {
             priority: Priority::Batch,
             payload: Value::Null,
             callback_url: Some(callback_url),
+            idempotency_key: None,
         })
         .await
         .unwrap();
@@ -2282,6 +2316,7 @@ mod tests {
             priority: Priority::Batch,
             payload: Value::Null,
             callback_url: None,
+            idempotency_key: None,
         })
         .await
         .unwrap();
@@ -2340,6 +2375,7 @@ mod tests {
             priority: Priority::Batch,
             payload: Value::Null,
             callback_url: Some(callback_url),
+            idempotency_key: None,
         })
         .await
         .unwrap();
@@ -2380,6 +2416,7 @@ mod tests {
             priority: Priority::Batch,
             payload: Value::Null,
             callback_url: None,
+            idempotency_key: None,
         })
         .await
         .unwrap();
@@ -2388,6 +2425,7 @@ mod tests {
             priority: Priority::Batch,
             payload: Value::Null,
             callback_url: None,
+            idempotency_key: None,
         })
         .await
         .unwrap();
@@ -2445,6 +2483,7 @@ mod tests {
             priority: Priority::Batch,
             payload: Value::Null,
             callback_url: None,
+            idempotency_key: None,
         })
         .await
         .unwrap();
@@ -2503,6 +2542,7 @@ mod tests {
             priority: Priority::Batch,
             payload: Value::Null,
             callback_url: None,
+            idempotency_key: None,
         })
         .await
         .unwrap();
@@ -2560,6 +2600,7 @@ mod tests {
             priority: Priority::Realtime,
             payload: Value::Null,
             callback_url: None,
+            idempotency_key: None,
         })
         .await
         .unwrap();
@@ -2609,6 +2650,7 @@ mod tests {
             priority: Priority::Batch,
             payload: Value::Null,
             callback_url: None,
+            idempotency_key: None,
         })
         .await
         .unwrap();
@@ -2663,6 +2705,7 @@ mod tests {
             priority: Priority::Batch,
             payload: Value::Null,
             callback_url: None,
+            idempotency_key: None,
         })
         .await
         .unwrap();
@@ -2752,6 +2795,7 @@ mod tests {
             priority: Priority::Background,
             payload: Value::Null,
             callback_url: None,
+            idempotency_key: None,
         })
         .await
         .unwrap();
@@ -2813,6 +2857,7 @@ mod tests {
             priority: Priority::Batch,
             payload: Value::Null,
             callback_url: None,
+            idempotency_key: None,
         })
         .await
         .unwrap();
@@ -2898,6 +2943,7 @@ mod tests {
             priority: Priority::Background,
             payload: Value::Null,
             callback_url: None,
+            idempotency_key: None,
         })
         .await
         .unwrap();
@@ -2954,6 +3000,7 @@ mod tests {
             priority: Priority::Realtime,
             payload: Value::Null,
             callback_url: None,
+            idempotency_key: None,
         })
         .await
         .unwrap();
@@ -3007,6 +3054,7 @@ mod tests {
             priority: Priority::Background,
             payload: Value::Null,
             callback_url: None,
+            idempotency_key: None,
         })
         .await
         .unwrap();
@@ -3054,6 +3102,7 @@ mod tests {
             priority: Priority::Batch,
             payload: Value::Null,
             callback_url: None,
+            idempotency_key: None,
         })
         .await
         .unwrap();
@@ -3112,6 +3161,7 @@ mod tests {
             priority: Priority::Batch,
             payload: Value::Null,
             callback_url: None,
+            idempotency_key: None,
         })
         .await
         .unwrap();
@@ -3161,6 +3211,7 @@ mod tests {
             priority: Priority::Background,
             payload: Value::Null,
             callback_url: None,
+            idempotency_key: None,
         })
         .await
         .unwrap();
@@ -3258,6 +3309,7 @@ mod tests {
             priority: Priority::Batch,
             payload: Value::Null,
             callback_url: None,
+            idempotency_key: None,
         })
         .await
         .unwrap();
@@ -3297,6 +3349,7 @@ mod tests {
             priority: Priority::Realtime,
             payload: Value::Null,
             callback_url: None,
+            idempotency_key: None,
         })
         .await
         .unwrap();

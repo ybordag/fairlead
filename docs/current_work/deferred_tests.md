@@ -397,6 +397,36 @@ the endpoint response, and metrics. This e2e needs process lifecycle
 management, port allocation, callback receiver processes, SQLite restart
 assertions, and timing control around retention age.
 
+### `phase_8c_idempotency_process_e2e`
+
+Add an opt-in process-level e2e for async job idempotency:
+
+- start Fairlead with `JOB_STORE=sqlite`
+- submit a job with `idempotency_key`, simulate a client retry with the same
+  body, and verify both responses return the same job ID
+- restart Fairlead and retry the same submission again, verifying the recovered
+  SQLite registry still returns the original job instead of enqueueing a
+  duplicate
+- reuse the same key with a different payload, callback URL, priority, or job
+  type and verify Fairlead rejects the request without mutating queue depth
+- complete, fail, or cancel the original job, then retry the original submit
+  and verify it still returns the retained terminal job while that job has not
+  been pruned
+- prune the retained terminal job after it becomes eligible, then reuse the
+  same idempotency key and verify Fairlead creates a new job
+- run the same sequence while fake workers are concurrently claiming jobs to
+  verify duplicate submits never create duplicate running leases
+- scrape `/metrics` during the flow and verify queue depth, queue wait, terminal
+  duration, and prune metrics remain internally consistent
+- run the submit/retry/restart sequence against the DGX Spark two-node setup
+  with fake async workers so network retries and process restarts are exercised
+  without real model execution
+
+**Why deferred:** In-process tests cover the registry, SQLite recovery, mismatch
+rejection, and pruning behavior. This e2e needs process lifecycle management,
+port allocation, SQLite restart assertions, fake workers, and optional DGX Spark
+access.
+
 ### `phase_8d_background_maintenance_process_e2e`
 
 When Phase 8D adds background maintenance loops, add opt-in process-level e2e

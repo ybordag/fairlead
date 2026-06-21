@@ -515,6 +515,7 @@ Needed concepts:
 - Attempt count and retry limit.
 - Per-job timeout and worker lease expiration.
 - Callback URL and callback delivery state.
+- Optional submit idempotency key for safe caller retries.
 - Resource reservation and release for running attempts.
 - Retry policy.
 - Expiration and cleanup.
@@ -523,7 +524,6 @@ Open questions:
 
 - Does the first implementation use in-memory state only, or SQLite-backed state?
 - Are completed results stored, or only status plus callback outcome?
-- How are duplicate submissions made idempotent?
 - How are cancellations propagated to workers?
 
 Implemented early Phase 6B scope:
@@ -860,8 +860,11 @@ workload protocols.
   - [x] Audit test coverage and deferred process-level pruning tests before PR.
   - [x] Add final 8B docs/readiness pass before PR.
 - **8C Splice: Idempotency**
-  - Add stronger idempotency semantics for submit, complete, fail, cancel, and
-    callback handling where needed.
+  - [x] Add optional `idempotency_key` for async job submission retries.
+  - [x] Persist submit idempotency keys in SQLite-backed job state.
+  - [x] Release submit idempotency keys when terminal jobs are pruned.
+  - Add stronger idempotency semantics for complete, fail, cancel, and callback
+    handling where needed.
 - **8D Clove: Background Maintenance Loops**
   - Add background expiry/recovery loops if claim-time sweeps are not enough.
   - Add optional background pruning loop that invokes the 8B terminal-job
