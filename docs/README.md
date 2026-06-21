@@ -18,7 +18,11 @@ detail.
 
 - [`planning/design.md`](planning/design.md) — design horizon and longer-term
   product shape.
-- [`planning/roadmap.md`](planning/roadmap.md) — completed phases, Phase 6F
+- [`planning/glossary.md`](planning/glossary.md) — shared terminology for
+  backends, providers, workers, workloads, routes, affinity, pools, and leases.
+- [`planning/workloads.md`](planning/workloads.md) — current synchronous and
+  async workload shapes.
+- [`planning/roadmap.md`](planning/roadmap.md) — completed phases, Phase 7
   scope, future phases, acceptance criteria, and deferred work.
 
 ## Implementation And Examples
@@ -32,7 +36,7 @@ detail.
 
 ## Current Work
 
-- [`current_work/phase_6f_stay.md`](current_work/phase_6f_stay.md) — active
+- [`current_work/phase_6f_stay.md`](current_work/phase_6f_stay.md) — completed
   Phase 6F callback delivery and finalization notes.
 - [`current_work/phase_6e_shackle.md`](current_work/phase_6e_shackle.md) —
   completed Phase 6E durable job state and recovery notes.

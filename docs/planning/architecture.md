@@ -21,10 +21,12 @@ vLLM             Python model server — GPU inference on spark-a
 ```
 
 The current synchronous proxy surface routes OpenAI-compatible requests. The
-current async surface supports in-memory worker-pull jobs: workers claim leased
-jobs, renew leases, and report completion or failure. Future phases may add
-durable job state, callback delivery, push dispatch, and cloud-provider
-fallback.
+current async surface supports worker-pull jobs: workers claim leased jobs,
+renew leases, and report completion or failure. SQLite-backed durable job state
+and terminal callbacks are implemented for single-process local deployments.
+Future phases may add pool-aware placement, scheduler lifecycle hardening,
+adapter boundaries, richer resource policy, cloud-provider fallback, and
+transport/SDK hardening.
 
 **Cambium** handles everything external-facing: verifies JWT tokens, decrypts the
 user's stored API key, injects it into the Rhizome request. It knows about users
@@ -121,8 +123,8 @@ reporting, resource-aware backend eligibility, priority admission, and basic
 metrics. The async path implements in-memory job records, worker registration,
 queue metrics, scheduler preview, worker-pull claims, lease renewal, result
 reporting, retryable failure, worker capacity accounting, terminal duration
-metrics, and explicit timeout state for expired attempts. Callbacks and durable
-job recovery remain future phases.
+metrics, explicit timeout state for expired attempts, SQLite-backed job
+recovery, and terminal callback delivery.
 
 ### Rhizome example: spark-a and spark-b
 
@@ -425,7 +427,7 @@ Fairlead --gRPC--> worker service, if that worker exposes typed RPCs
 This is not Phase 6C scope. Adding gRPC well means defining protobuf contracts,
 generating Rust/Python clients, testing HTTP/gRPC parity, deciding streaming
 semantics, and preserving OpenAI-compatible HTTP behavior for LLM endpoints.
-It fits better in Phase 7 adapter work or a later transport/SDK hardening phase.
+It fits better in Phase 9 adapter work or Phase 12 transport/SDK hardening.
 
 ### Scheduler boundaries
 
@@ -609,7 +611,7 @@ work.
 
 ---
 
-## The 7-phase build plan
+## Phased Build Plan
 
 | Phase | What you build | What it unlocks |
 |---|---|---|
@@ -624,13 +626,18 @@ work.
 | 6D | Worker execution, retries, and utilization | Leased jobs can complete/fail with bounded attempts and useful metrics |
 | 6E | Durable job state and recovery | Queued/running async work survives ordinary Fairlead restarts |
 | 6F | Callback delivery and async finalization | Callers can receive terminal job updates without polling forever |
-| 7A | Pool-aware routing and placement policies for sync backends and async workers | Workloads can target named local, peer, or overflow compute pools consistently |
-| 7 | Adapter boundaries, index/cluster job types, FAISS/GPU, cloud fallback, full metrics | Advanced RAG indexing, external overflow, complete observability |
+| 7 | Pool-aware placement | Workloads can target named local, peer, or future overflow pools consistently |
+| 8 | Scheduler hardening | Async workers can drain, deregister, prune completed jobs, and survive process-level restart tests |
+| 9 | Adapter boundaries and new workloads | Non-OpenAI-compatible workloads can plug into Fairlead without polluting router core |
+| 10 | Rich resource policy | Scheduling can account for CPU slots, GPU slots, model residency, and custom capacity |
+| 11 | External scale and overflow | Multiple Fairlead instances and optional cloud overflow can be evaluated with explicit policy |
+| 12 | Transport and SDK hardening | Stable clients and optional gRPC can be added after HTTP contracts settle |
 
 Phases 1–3 give you a working proxy in a few days. Phases 4–5 give you
 production resilience. Phase 6 completes the core sync/async control-plane
-surfaces. Phase 7A adds complete pool-aware placement. Phase 7 completes the
-advanced compute platform.
+surfaces. Phase 7 adds complete pool-aware placement. Later phases harden the
+scheduler, add adapters, improve resource policy, evaluate scale/overflow, and
+only then add optional transport or SDK layers.
 
 Temporal is intentionally deferred. Fairlead's scheduler should handle bounded
 compute jobs with leases, retries, cancellation, callbacks, and recoverable job

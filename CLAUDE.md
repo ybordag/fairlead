@@ -7,12 +7,12 @@ routes synchronous OpenAI-compatible inference requests across local GPU nodes,
 manages circuit breaking and session failover, and tracks cooperative VRAM/load
 reports from model servers and other GPU consumers.
 
-It exposes an OpenAI-compatible inference API and an in-memory generic async
-job API. The inference path is synchronous (request → response). The job path is
-currently submit → job_id → poll/cancel plus worker registration, scheduler
-preview, worker-pull claims, lease renewal, worker result reporting, retryable
-failure, timeout state, and worker capacity accounting. Durable state and
-callbacks are Phase 6E/6F work.
+It exposes an OpenAI-compatible inference API and a generic async job API. The
+inference path is synchronous (request → response). The job path is currently
+submit → job_id → poll/cancel plus worker registration, scheduler preview,
+worker-pull claims, lease renewal, worker result reporting, retryable failure,
+timeout state, worker capacity accounting, SQLite-backed durable state, and
+terminal callbacks.
 
 See `docs/planning/design.md` for the design horizon and
 `docs/planning/architecture.md` for the current architecture.
@@ -55,13 +55,11 @@ cargo watch -x run
 
 ## Current status
 
-**Phase 6E complete** (shackle → main). **Phase 6F is implemented on stay**:
-callback delivery and async finalization. Stay adds asynchronous callbacks for
-terminal jobs with `callback_url`, bounded retry/timeout policy, callback
-delivery metrics by job type, terminal status, outcome, and HTTP status,
-SQLite-backed at-least-once callback recovery across ordinary Fairlead restarts,
-focused recovery-loop and in-flight de-duplication tests, and a local GPU-free
-async jobs demo.
+**Phase 6 is complete on main.** Phase 7 is next and should focus on
+pool-aware placement: first-class backend/worker pools, workload-to-pool
+validation, sync backend pool routing, async worker pool placement, and shared
+pool demos/docs. Later phases are scheduler hardening, adapter boundaries,
+richer resource policy, external scale/overflow, and transport/SDK hardening.
 
 | Phase | Branch | Status |
 |---|---|---|
@@ -75,9 +73,13 @@ async jobs demo.
 | 6C — Worker-pull claims + leases | cleat → main | ✅ complete |
 | 6D — Worker execution + retries | halyard → main | ✅ complete |
 | 6E — Durable job state + recovery | shackle → main | ✅ complete |
-| 6F — Callback delivery + finalization | stay | ready for PR |
-| 7A — Pool-aware routing + placement | — | pending |
-| 7 — Advanced compute + full metrics | — | pending |
+| 6F — Callback delivery + finalization | stay → main | ✅ complete |
+| 7 — Pool-aware placement | — | pending |
+| 8 — Scheduler hardening | — | pending |
+| 9 — Adapter boundaries + new workloads | — | pending |
+| 10 — Rich resource policy | — | pending |
+| 11 — External scale + overflow | — | pending |
+| 12 — Transport + SDK hardening | — | pending |
 
 ## Project layout
 
@@ -351,7 +353,7 @@ WORKER_HEARTBEAT_SECS        — interval before a worker is considered stale
   organization/project headers, and provider-specific opt-in headers.
 - [x] Add `GET /v1/models` backed by configured workloads and backend metadata.
 - Full pool-aware backend configuration, pool fallback chains, and placement
-  policies are deferred to Phase 7A so the design can cover both synchronous
+  policies are deferred to Phase 7 so the design can cover both synchronous
   backends and async workers.
 - Keep cloud-provider fallback and provider credentials deferred unless a demo or
   deployment path needs external overflow capacity.
@@ -402,20 +404,25 @@ Temporal is deferred. Fairlead owns compute job orchestration; Rhizome owns
 domain workflow state. Add Temporal only if Rhizome starts needing durable
 multi-step workflows with long waits, fanout/fanin, or compensation logic.
 
-### Phase 7 — Advanced compute jobs and full metrics
+### Phase 7 — Pool-aware placement
 
-- `index_build` job type: pgvector (CPU) and FAISS (GPU) backends
-- `cluster` job type: k-means and HDBSCAN via registered compute worker
-- Adapter boundaries for non-OpenAI-compatible synchronous and async endpoints,
-  such as rerank, image generation, and vision analysis
-- GPU-aware job scheduling: prefer GPU worker for index/cluster; fall back to CPU worker
-- Richer resource dimensions beyond coarse VRAM/load when needed: CPU slots, GPU
-  slots, model residency, disk bandwidth, or custom worker capacity
-- Cloud-provider fallback and credential policy if local/edge deployment needs
-  external overflow capacity
-- Full Prometheus `/metrics`: requests_total, queue_depth per priority, job_duration,
-  worker_utilization, vram_used per node, circuit_state per backend
-- Test: index_build job completes and callback fires; metrics reflect job throughput
+- First-class backend and worker pools.
+- Workload-to-pool validation.
+- Synchronous backend pool routing and fallback chains.
+- Async worker pool placement.
+- Pool-level metrics for selected pool, selected backend/worker, candidate
+  counts, fallback reason, and no-compatible-pool cases.
+- Local DGX/shared Fairlead pool demo and docs.
+
+### Later phases
+
+- Phase 8: worker deregistration, graceful drain, completed-job pruning,
+  process-level restart harnesses, and stronger idempotency/cancellation.
+- Phase 9: adapter boundaries and concrete non-OpenAI-compatible workloads.
+- Phase 10: richer resource dimensions and per-workload resource policy.
+- Phase 11: multi-instance coordination, cloud overflow, provider credentials,
+  and cost/priority policy.
+- Phase 12: optional gRPC, generated clients, and HTTP/gRPC parity tests.
 
 ## Invariants — never violate
 

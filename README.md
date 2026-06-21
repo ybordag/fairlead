@@ -7,7 +7,7 @@ health, circuit state, and session affinity.
 
 The name comes from sailing: a fairlead is a fitting that guides lines in exactly the right direction without friction or fouling.
 
-**Status:** Phase 6F is implemented on the `stay` branch and ready for PR.
+**Status:** Phase 6 is complete on `main`; Phase 7 pool-aware placement is next.
 Fairlead currently runs as an Axum HTTP service with `/health`, `/metrics`,
 `/v1/models`, `/v1/resources`, `/v1/resources/report`, `/v1/jobs`,
 `/v1/jobs/{id}`, `/v1/workers`, `/v1/workers/{id}/claim`,
@@ -98,8 +98,9 @@ Implemented generalization work includes:
 - **Terminal job callbacks** with bounded retry/timeout policy,
   success/failure metrics, and SQLite-backed at-least-once restart recovery.
 
-Future phases add process-level e2e coverage, complete pool-aware routing,
-adapter boundaries, and cloud fallback.
+Future phases add complete pool-aware placement, scheduler hardening, adapter
+boundaries, richer resource policy, external scale/overflow, and transport/SDK
+hardening.
 
 See [`docs/planning/roadmap.md`](docs/planning/roadmap.md) for the
 implementation plan and acceptance criteria.
@@ -346,6 +347,11 @@ Start with [`docs/README.md`](docs/README.md) for the full documentation map.
 - [`docs/planning/architecture.md`](docs/planning/architecture.md) — system
   architecture, vLLM/Fairlead responsibilities, and the spark-a/spark-b routing
   example.
+- [`docs/planning/glossary.md`](docs/planning/glossary.md) — shared terminology
+  for backends, providers, workers, workloads, routes, affinity, pools, and
+  leases.
+- [`docs/planning/workloads.md`](docs/planning/workloads.md) — current
+  synchronous and async workload shapes.
 - [`docs/implementation/code_walkthrough.md`](docs/implementation/code_walkthrough.md)
   — Rust code walkthrough from process startup to proxied response.
 - [`docs/planning/design.md`](docs/planning/design.md) — design horizon and
@@ -356,7 +362,7 @@ Start with [`docs/README.md`](docs/README.md) for the full documentation map.
   — manual deployment notes for two DGX Spark nodes connected over InfiniBand.
 - [`docs/implementation/fixture_examples.md`](docs/implementation/fixture_examples.md)
   — conventions for sanitized test fixtures and ignored local deployment config.
-- [`demo/README.md`](demo/README.md) — GPU-free routing demo.
+- [`demo/README.md`](demo/README.md) — GPU-free routing and async jobs demos.
 - [`docs/current_work/deferred_tests.md`](docs/current_work/deferred_tests.md) —
   known test gaps.
 

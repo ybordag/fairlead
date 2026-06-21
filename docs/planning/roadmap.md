@@ -87,8 +87,9 @@ Those items are explicitly assigned to future phases below.
 
 Fairlead currently provides:
 
-- Axum HTTP service with `/health`, `/metrics`, `/v1/chat/completions`, and
-  `/v1/embeddings`.
+- Axum HTTP service with `/health`, `/metrics`, `/v1/models`,
+  `/v1/chat/completions`, `/v1/embeddings`, resource endpoints, async job
+  endpoints, worker endpoints, and scheduler preview.
 - Resource reporting and resource snapshots through `/v1/resources/report` and
   `/v1/resources`.
 - Ordered backend selection from `BACKENDS`.
@@ -104,8 +105,8 @@ Fairlead currently provides:
 - `WorkloadKind` metadata for chat completions and embeddings.
 - Resource-aware routing when enabled.
 - Per-priority synchronous admission limits.
-- In-memory async job API for submission, listing, polling, and cancellation.
-- In-memory per-priority async queue state.
+- Async job API for submission, listing, polling, and cancellation.
+- Per-priority async queue state with SQLite-backed recovery when enabled.
 - Queue depth and queue wait-time metrics.
 - Worker registration, heartbeat, stale status, and availability metrics.
 - Non-dispatching scheduler preview endpoint that matches queued jobs to fresh,
@@ -113,6 +114,13 @@ Fairlead currently provides:
 - Worker-pull claims, lease renewal, completion, failure, retryable requeue, and
   worker in-flight capacity accounting.
 - Terminal job duration metrics and explicit timeout state for expired attempts.
+- Opt-in SQLite job persistence for queue order, attempts, lease state,
+  terminal state, result/error state, callback metadata, and callback delivery
+  state.
+- Terminal async job callbacks with bounded retry, timeout, success/failure
+  metrics, and at-least-once restart recovery when SQLite persistence is
+  enabled.
+- Local GPU-free demos for synchronous routing and async job callbacks.
 - Documentation for a manual two-node DGX Spark deployment.
 - Sanitized fixture conventions and ignore rules for private local config.
 
@@ -121,9 +129,11 @@ It does not yet provide:
 - Complete pool-aware backend configuration, fallback chains, or placement
   policy across sync backends and async workers.
 - CPU resource accounting and richer resource dimensions beyond coarse VRAM/load.
-- Durable priority queues or durable job persistence.
-- Callback delivery or durable async worker execution state.
-- Worker deregistration, graceful shutdown, or callback success/failure metrics.
+- Durable starvation/fairness policy beyond current priority queue ordering.
+- Worker deregistration, graceful shutdown, or completed-job pruning.
+- Adapter boundaries for non-OpenAI-compatible protocols.
+- Cloud-provider overflow pools and provider credential policy.
+- Multi-instance job coordination beyond single-process SQLite.
 
 ## Easy Tasks
 
@@ -131,9 +141,9 @@ These should be achievable without changing the core architecture.
 
 - [x] Update `README.md` so it reflects the current runnable service and
   generalization direction.
-- [ ] Add a short glossary for `backend`, `provider`, `worker`, `workload`,
+- [x] Add a short glossary for `backend`, `provider`, `worker`, `workload`,
   `route`, and `affinity` so future docs use the terms consistently.
-- [ ] Document the current supported workload shape: HTTP request in, selected
+- [x] Document the current supported workload shape: HTTP request in, selected
   backend URL out, streamed or buffered HTTP response back.
 - [x] Add example configuration for multiple OpenAI-compatible local backends.
 - [x] Document how any OpenAI-compatible client can point at Fairlead without
@@ -166,8 +176,8 @@ system.
   backend pool name,
   metric labels.
 - [ ] Complete pool-aware backend configuration and routing policy. Deferred to
-  **Phase 7A: Pool-Aware Routing and Placement Policies** so the design can
-  cover both synchronous backends and async workers.
+  **Phase 7: Pool-Aware Placement** so the design can cover both synchronous
+  backends and async workers.
 - [x] Preserve a default backend pool for today's simple `BACKENDS` config.
 - [x] Add provider/header forwarding policy:
   content type,
@@ -178,7 +188,7 @@ system.
   workloads and backend metadata.
 - [ ] Add an adapter boundary for non-OpenAI-compatible synchronous endpoints,
   such as `/v1/rerank` or `/v1/images/generations`. Deferred to
-  **Phase 7: Advanced Workloads**.
+  **Phase 9: Adapter Boundaries and New Workloads**.
 - [x] Add metrics labels for workload kind and selected backend.
 - [x] Decide whether session affinity should be keyed globally, per workload, or
   per backend pool.
@@ -645,7 +655,7 @@ Docker, or the provider accounts themselves.
 - [x] Add a repeatable local mock demo.
 - [x] Move route-specific behavior into workload metadata.
 - [ ] Add complete backend pools. Deferred to
-  **Phase 7A: Pool-Aware Routing and Placement Policies**.
+  **Phase 7: Pool-Aware Placement**.
 - [x] Add provider/header policy.
 - [x] Add `/v1/models`.
 
@@ -672,7 +682,7 @@ It should not introduce queues, workers, or job state.
   organization/project headers, and provider-specific opt-in headers.
 - [x] Add `GET /v1/models` backed by configured workloads and backend metadata.
 - Full pool-aware backend configuration, pool fallback chains, and placement
-  policies are deferred to **Phase 7A** so they can cover both synchronous
+  policies are deferred to **Phase 7** so they can cover both synchronous
   backends and async workers.
 - Keep cloud-provider fallback and provider credentials deferred unless a clear
   demo need appears.
@@ -770,38 +780,99 @@ polling forever.
 - [x] Document Temporal as deferred unless Rhizome needs durable multi-step
   workflow orchestration beyond compute dispatch.
 
-### Phase 7A: Pool-Aware Routing and Placement Policies
+### Phase 7: Pool-Aware Placement
 
-- Add named backend and worker pools as first-class routing boundaries.
-- Let workloads target one or more pools, with explicit validation for missing
-  or empty pools.
-- Add pool fallback chains, such as local GPU pool -> peer local pool -> cloud
-  overflow pool.
-- Add per-pool metrics for candidate counts, selected backend or worker, fallback
-  reason, and capacity pressure.
-- Apply the same pool model to synchronous OpenAI-compatible backends and async
-  registered workers.
-- Document local DGX pools, shared Fairlead deployments, and future cloud
-  overflow pools.
+Goal: make named pools the shared placement model for synchronous backends and
+async workers.
 
-### Phase 7: Advanced Workloads
+#### Phase 7A: Pool Model and Validation
 
-- Add adapter boundaries for non-OpenAI-compatible synchronous and async
-  endpoints, such as `/v1/rerank`, image generation, and vision analysis.
-- Evaluate optional gRPC transport for stable Fairlead client and worker APIs
-  while preserving HTTP/OpenAI compatibility for LLM endpoints.
-- Add concrete adapters for rerank, image, vision, batch embeddings, index
-  builds, and clustering.
-- Add cancellation and idempotency.
-- Add richer retry policies.
-- Add richer resource dimensions beyond coarse VRAM/load where workloads need
-  CPU slots, GPU slots, model residency, disk bandwidth, or custom worker
-  capacity.
-- Add cloud-provider fallback and provider credential policy if local/edge
-  deployment needs external overflow capacity.
+- Add named backend and worker pools as first-class placement boundaries.
+- Preserve the default pool behavior for simple `BACKENDS` configuration.
+- Let workloads target one or more pools.
+- Validate missing, empty, misspelled, or unsupported pool references at startup
+  or request/job submission boundaries.
+
+#### Phase 7B: Synchronous Backend Pool Routing
+
+- Route OpenAI-compatible chat and embedding requests through workload-selected
+  backend pools.
+- Add pool fallback chains, such as local GPU pool -> peer GPU pool.
+- Keep cloud overflow as a future pool target, not an implemented provider path.
+- Add per-pool synchronous metrics for candidate counts, selected pool/backend,
+  fallback reason, and capacity pressure.
+
+#### Phase 7C: Async Worker Pool Placement
+
+- Add pool metadata to registered workers.
+- Route async jobs to eligible worker pools before choosing a specific worker.
+- Apply priority/FIFO ordering only after the workload's eligible worker pools
+  are known.
+- Add per-pool async metrics for candidate workers, selected worker, and
+  no-compatible-pool cases.
+
+#### Phase 7D: Shared Pool Demo and Docs
+
+- Document local DGX pools, peer-node pools, and shared Fairlead deployments.
+- Add local demo config that shows sync and async workloads using the same pool
+  vocabulary.
+- Update deferred e2e plans for future cloud overflow pools.
+
+### Phase 8: Scheduler Hardening
+
+Goal: make the async job manager more operationally complete without adding new
+workload protocols.
+
+- Add worker deregistration API and graceful drain semantics.
+- Add completed-job pruning policy.
+- Add stronger idempotency semantics for submit, complete, fail, cancel, and
+  callback handling where needed.
+- Add background expiry/recovery loops if claim-time sweeps are not enough.
+- Add process-level restart e2e harnesses for jobs, leases, callbacks, and
+  metrics.
+- Keep Temporal deferred unless application workflows need durable multi-step
+  orchestration beyond bounded compute jobs.
+
+### Phase 9: Adapter Boundaries and New Workloads
+
+Goal: make Fairlead support useful non-OpenAI-compatible workloads without
+polluting the router core with protocol-specific logic.
+
+- Define adapter boundaries for synchronous and async workloads.
+- Add one simple synchronous adapter first, such as rerank.
+- Add one concrete async adapter next, such as vision analysis.
+- Define adapter payload/result conventions and validation boundaries.
+- Add adapter-specific tests and demos.
+- Keep HTTP as the first transport unless the adapter contract proves it needs
+  typed RPC.
+
+### Phase 10: Rich Resource Policy
+
+Goal: schedule with resource dimensions that real workloads need once pools and
+adapters exist.
+
+- Add CPU slots, GPU slots, model residency, disk bandwidth, or worker-specific
+  custom capacity where workloads justify them.
+- Add per-workload resource estimates and timeout policy.
+- Add richer retry and fallback policies that account for resource pressure.
+- Add metrics that explain resource rejection and fallback by dimension.
+
+### Phase 11: External Scale and Overflow
+
+Goal: support larger deployments and optional provider overflow after local/edge
+placement is stable.
+
+- Add a shared job store or coordinator, such as Postgres, if multiple Fairlead
+  instances need to coordinate jobs.
+- Add cloud-provider pools if local/edge deployments need external overflow.
+- Add provider credential/header policy.
+- Add cost, priority, and admission policy for cloud overflow.
 - Add deployment documentation for multiple applications sharing Fairlead.
 
-### Future Phase 8: Transport and SDK Hardening
+### Phase 12: Transport and SDK Hardening
+
+Goal: stabilize client and worker ergonomics after the HTTP contracts have
+settled.
 
 - Add optional gRPC service definitions for stable job, worker, and callback
   contracts if HTTP/JSON starts limiting typed client development.

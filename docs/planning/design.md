@@ -12,9 +12,9 @@
 Fairlead is a resource router for AI agent systems. It sits between an agent
 application and its compute backends, routing inference requests to the right
 hardware, tracking cooperative capacity reports, and handling failover when
-nodes become unavailable. Future phases add async job scheduling for registered
-compute workers, but Fairlead should not supervise or restart those worker
-processes itself.
+nodes become unavailable. It also provides bounded async worker-pull jobs with
+leases, retries, durable local state, and terminal callbacks. Fairlead should not
+supervise or restart worker processes itself.
 
 The name comes from sailing: a fairlead is a fitting that guides lines in exactly the right direction without friction or fouling. It does not generate power or hold cargo — it ensures that what needs to flow, flows correctly.
 
@@ -125,18 +125,16 @@ Per-node circuit breakers prevent cascading failures:
 
 The circuit opens after N consecutive failures or a response timeout threshold. It half-opens after a configurable cooldown.
 
-### 4. Future worker registry
-
-Future Fairlead phases may manage a registry of compute workers:
+### 4. Worker registry
 
 - Tracks registered worker processes and their capabilities
 - Marks workers stale when heartbeats expire
-- Dispatches jobs to available workers based on workload support, resource
-  reports, and priority policy
+- Lets workers claim eligible jobs based on workload support, resource reports,
+  lease state, capacity, and priority policy
 - Exposes worker health through the `/health` and `/metrics` endpoints
 
 This is separate from process supervision. k3s, Docker, or systemd should restart
-crashed worker processes. Fairlead should track worker capabilities and dispatch
+crashed worker processes. Fairlead should track worker capabilities and lease
 jobs, not own application domain logic.
 
 ### 5. VRAM accounting
