@@ -133,6 +133,14 @@ pub(crate) fn build_router(state: AppState) -> Router {
             "/v1/workers/:worker_id/jobs/:job_id/renew",
             post(scheduler::renew_worker_job_lease_handler),
         )
+        .route(
+            "/v1/workers/:worker_id/jobs/:job_id/complete",
+            post(scheduler::complete_worker_job_handler),
+        )
+        .route(
+            "/v1/workers/:worker_id/jobs/:job_id/fail",
+            post(scheduler::fail_worker_job_handler),
+        )
         .route("/v1/workers/:id/heartbeat", post(workers::heartbeat_worker))
         .route("/v1/chat/completions", post(proxy::chat_completions))
         .route("/v1/embeddings", post(proxy::embeddings))

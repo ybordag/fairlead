@@ -640,6 +640,14 @@ Router::new()
         "/v1/workers/:worker_id/jobs/:job_id/renew",
         post(scheduler::renew_worker_job_lease_handler),
     )
+    .route(
+        "/v1/workers/:worker_id/jobs/:job_id/complete",
+        post(scheduler::complete_worker_job_handler),
+    )
+    .route(
+        "/v1/workers/:worker_id/jobs/:job_id/fail",
+        post(scheduler::fail_worker_job_handler),
+    )
     .route("/v1/workers/:id/heartbeat", post(workers::heartbeat_worker))
     .route("/v1/chat/completions", post(proxy::chat_completions))
     .route("/v1/embeddings", post(proxy::embeddings))
@@ -664,6 +672,10 @@ This means:
 - `POST /v1/workers/{id}/claim` calls `scheduler::claim_worker_job_handler`.
 - `POST /v1/workers/{worker_id}/jobs/{job_id}/renew` calls
   `scheduler::renew_worker_job_lease_handler`.
+- `POST /v1/workers/{worker_id}/jobs/{job_id}/complete` calls
+  `scheduler::complete_worker_job_handler`.
+- `POST /v1/workers/{worker_id}/jobs/{job_id}/fail` calls
+  `scheduler::fail_worker_job_handler`.
 - `POST /v1/workers/{id}/heartbeat` calls `workers::heartbeat_worker`.
 - `POST /v1/chat/completions` calls `proxy::chat_completions`.
 - `POST /v1/embeddings` calls `proxy::embeddings`.
@@ -1272,6 +1284,29 @@ worker a bounded lease and returns the job payload to run.
    returns the job.
 6. If the job is missing, Fairlead returns `404`. If it is not running or is
    leased to another worker, Fairlead returns `409`.
+
+`POST /v1/workers/{worker_id}/jobs/{job_id}/complete` closes a running attempt:
+
+1. Fairlead validates that the worker exists and is fresh.
+2. Fairlead sweeps expired leases before completion, so late completion cannot
+   resurrect an expired attempt.
+3. `JobRegistry::complete_lease()` checks that the job exists, is still
+   `running`, and is leased to that worker.
+4. If those checks pass, the job becomes `complete`, the result payload is
+   stored, error state is cleared, and lease metadata is removed.
+5. Missing jobs return `404`; stale workers, wrong workers, expired leases, and
+   non-running jobs return `409`.
+
+`POST /v1/workers/{worker_id}/jobs/{job_id}/fail` reports an attempt failure:
+
+1. Fairlead validates the worker and rejects empty error messages.
+2. Fairlead sweeps expired leases before applying the failure.
+3. `JobRegistry::fail_lease()` checks that the job is running and leased to that
+   worker.
+4. The failure message and retryable flag are stored on the job.
+5. Retryable failures return the job to its priority queue when attempts remain.
+6. Non-retryable failures, or retryable failures after max attempts, mark the
+   job `failed`.
 
 The proxy logs structured fields for the same decision: request ID, workload,
 origin node, affinity key, selected backend, retry count, fallback reason,

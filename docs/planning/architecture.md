@@ -254,10 +254,12 @@ POST /v1/workers/register       — register or update worker capabilities
 POST /v1/workers/{id}/heartbeat — refresh worker liveness
 POST /v1/workers/{id}/claim     — lease a compatible queued job to a worker
 POST /v1/workers/{worker_id}/jobs/{job_id}/renew — renew a held lease
+POST /v1/workers/{worker_id}/jobs/{job_id}/complete — complete a held job
+POST /v1/workers/{worker_id}/jobs/{job_id}/fail — fail or requeue a held job
 GET  /v1/workers                — list registered workers
 ```
 
-Current Phase 6B/6C behavior:
+Current Phase 6B/6C/6D behavior:
 
 - submitted jobs enter `queued`
 - submitted jobs are tracked in in-memory per-priority queues
@@ -279,6 +281,11 @@ Current Phase 6B/6C behavior:
 - `POST /v1/workers/{worker_id}/jobs/{job_id}/renew` validates the worker,
   sweeps expired leases, and extends the lease only if that worker still holds
   the running job
+- `POST /v1/workers/{worker_id}/jobs/{job_id}/complete` validates the worker
+  and lease, then marks the job `complete` with a result payload
+- `POST /v1/workers/{worker_id}/jobs/{job_id}/fail` validates the worker and
+  lease, records an error, then requeues retryable failures when attempts remain
+  or marks the job `failed`
 - no job is dispatched to a worker yet
 - no callback is delivered yet
 - no durable queue or background scheduler loop exists yet
@@ -308,6 +315,8 @@ job submitted
 - `GET /v1/workers` — current in-memory worker registry
 - `POST /v1/workers/{id}/claim` — Phase 6C worker-pull claim endpoint
 - `POST /v1/workers/{worker_id}/jobs/{job_id}/renew` — Phase 6C lease renewal
+- `POST /v1/workers/{worker_id}/jobs/{job_id}/complete` — Phase 6D completion
+- `POST /v1/workers/{worker_id}/jobs/{job_id}/fail` — Phase 6D failure/retry
 - `POST /v1/resources/report` — GPU consumers and workers report capacity
 - `GET /v1/resources` — current resource control-plane state
 - `GET /metrics` — Prometheus: queue depth/wait, circuit states, VRAM per node

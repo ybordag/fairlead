@@ -54,9 +54,9 @@ cargo watch -x run
 
 ## Current status
 
-**Phase 6B complete** (tackle → main). **Phase 6C is in progress on cleat**:
-worker-pull claims and bounded leases before worker execution, callbacks, and
-persistence.
+**Phase 6C complete** (cleat → main). **Phase 6D is in progress on halyard**:
+worker completion/failure reporting, retries, utilization, and job duration
+metrics before durable state and callbacks.
 
 | Phase | Branch | Status |
 |---|---|---|
@@ -67,8 +67,8 @@ persistence.
 | 5 — VRAM accounting + priority admission | trim → main | ✅ complete |
 | 6A — Synchronous surface cleanup | clew → main | ✅ complete |
 | 6B — Async API + scheduler preview | tackle → main | ✅ complete |
-| 6C — Worker-pull claims + leases | cleat | in progress |
-| 6D — Worker execution + retries | — | pending |
+| 6C — Worker-pull claims + leases | cleat → main | ✅ complete |
+| 6D — Worker execution + retries | halyard | in progress |
 | 6E — Durable job state + recovery | — | pending |
 | 6F — Callback delivery + finalization | — | pending |
 | 7A — Pool-aware routing + placement | — | pending |
@@ -76,7 +76,7 @@ persistence.
 
 ## Project layout
 
-**What exists now (Phases 1–6C current slices):**
+**What exists now (Phases 1–6D current slices):**
 
 ```
 src/
@@ -144,6 +144,8 @@ DELETE /v1/jobs/{id}         — cancel a queued job
 GET    /v1/scheduler/preview — preview next job/worker match without mutation
 POST   /v1/workers/{id}/claim — lease a compatible queued job to a worker
 POST   /v1/workers/{worker_id}/jobs/{job_id}/renew — renew a held lease
+POST   /v1/workers/{worker_id}/jobs/{job_id}/complete — complete a held job
+POST   /v1/workers/{worker_id}/jobs/{job_id}/fail — fail or requeue a held job
 ```
 
 The Phase 6B slices store job records in memory and track explicit per-priority
@@ -151,8 +153,11 @@ queued job IDs. The first Phase 6C slice lets fresh workers claim compatible
 queued jobs. Claimed jobs become `running`, attempts increment, and lease
 metadata is attached. Expired running leases are requeued when attempts remain
 and failed when attempts are exhausted. Workers holding a lease can renew it
-before expiry. Worker execution, deregistration, callback delivery, worker
-utilization metrics, and SQLite-backed persistence are still planned.
+before expiry. Phase 6D adds result reporting: the lease holder can complete a
+job with a result payload or fail it. Retryable failures requeue while attempts
+remain; non-retryable or exhausted failures become terminal. Worker
+deregistration, callback delivery, worker utilization metrics, and
+SQLite-backed persistence are still planned.
 
 Job request body:
 ```json
@@ -171,6 +176,8 @@ POST   /v1/workers/register        — worker announces: job types, endpoint, no
 POST   /v1/workers/{id}/heartbeat  — refresh worker liveness
 POST   /v1/workers/{id}/claim      — claim a compatible queued job
 POST   /v1/workers/{worker_id}/jobs/{job_id}/renew — renew a held lease
+POST   /v1/workers/{worker_id}/jobs/{job_id}/complete — complete a held job
+POST   /v1/workers/{worker_id}/jobs/{job_id}/fail — fail or requeue a held job
 GET    /v1/workers                 — list registered workers and their status
 ```
 
@@ -363,8 +370,7 @@ WORKER_HEARTBEAT_SECS        — interval before a worker is considered stale
 - Worker deregistration API and graceful shutdown semantics.
 - Worker utilization metrics.
 - Scheduler policy based on lease availability, VRAM headroom, and load.
-- Job manager: bounded attempts, leases, timeouts, retry limits, cancellation,
-  and completed-job pruning.
+- Job manager: per-attempt timeouts, cancellation, and completed-job pruning.
 - Persistence path: SQLite first for local durable state, Postgres later for
   multiple Fairlead instances.
 - Callback delivery: on completion, POST to `callback_url` with result payload;

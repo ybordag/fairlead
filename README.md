@@ -7,11 +7,13 @@ health, circuit state, and session affinity.
 
 The name comes from sailing: a fairlead is a fitting that guides lines in exactly the right direction without friction or fouling.
 
-**Status:** Phase 6C is in progress on the `cleat` branch. Fairlead currently
+**Status:** Phase 6D is in progress on the `halyard` branch. Fairlead currently
 runs as an Axum HTTP service with `/health`, `/metrics`, `/v1/models`,
 `/v1/resources`, `/v1/resources/report`, `/v1/jobs`, `/v1/jobs/{id}`,
 `/v1/workers`, `/v1/workers/{id}/claim`,
-`/v1/workers/{worker_id}/jobs/{job_id}/renew`, `/v1/scheduler/preview`,
+`/v1/workers/{worker_id}/jobs/{job_id}/renew`,
+`/v1/workers/{worker_id}/jobs/{job_id}/complete`,
+`/v1/workers/{worker_id}/jobs/{job_id}/fail`, `/v1/scheduler/preview`,
 `/v1/chat/completions`, and `/v1/embeddings`.
 
 ---
@@ -80,10 +82,13 @@ Implemented generalization work includes:
 - **Worker-pull claim groundwork** that leases a compatible queued job to a
   fresh worker, marks it running, renews held leases, and requeues expired
   leases when attempts remain.
+- **Initial worker result reporting** so the lease holder can complete a job
+  with a result or report failure, with retryable failures requeued while
+  attempts remain.
 
-Future Phase 6 subphases add worker execution, durable job state, callback
-delivery, and async completion metrics. Later phases add complete pool-aware
-routing, adapter boundaries, and cloud fallback.
+Future Phase 6 subphases add worker utilization metrics, durable job state,
+callback delivery, and async completion metrics. Later phases add complete
+pool-aware routing, adapter boundaries, and cloud fallback.
 
 See [`docs/planning/roadmap.md`](docs/planning/roadmap.md) for the
 implementation plan and acceptance criteria.

@@ -719,14 +719,15 @@ execution simple and bounded.
 Scope: let workers complete or fail leased jobs and make execution behavior
 observable.
 
-- Define the worker result contract.
-- Add completion and failure endpoints.
-- Enforce bounded attempts, retry limits, and per-attempt timeouts.
+- [x] Define the worker result contract.
+- [x] Add completion and failure endpoints.
+- [x] Enforce bounded attempts and retry limits for reported worker failures.
+- Enforce per-attempt timeouts.
 - Track worker in-flight counts and capacity usage.
 - Add worker utilization metrics.
 - Add job duration metrics.
-- Add tests for success, retryable failure, retry exhaustion, timeout, and
-  utilization accounting.
+- Add tests for timeout and utilization accounting.
+- [x] Add tests for success, retryable failure, and retry exhaustion.
 
 ### Phase 6E: Durable Job State and Recovery
 

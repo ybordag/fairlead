@@ -72,11 +72,19 @@ pub struct JobRecord {
     pub status: JobStatus,
     pub payload: Value,
     pub callback_url: Option<String>,
+    pub result: Option<Value>,
+    pub error: Option<JobFailure>,
     pub attempts: u32,
     pub max_attempts: u32,
     pub lease: Option<JobLease>,
     pub created_at_unix_ms: u128,
     pub updated_at_unix_ms: u128,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct JobFailure {
+    pub message: String,
+    pub retryable: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -90,6 +98,19 @@ pub struct JobLease {
 #[derive(Debug, Clone, Serialize)]
 pub struct JobResponse {
     pub job: JobRecord,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct CompleteJobRequest {
+    #[serde(default)]
+    pub result: Value,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct FailJobRequest {
+    pub error: String,
+    #[serde(default = "default_retryable_failure")]
+    pub retryable: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -180,6 +201,8 @@ impl JobRegistry {
             status: JobStatus::Queued,
             payload: request.payload,
             callback_url,
+            result: None,
+            error: None,
             attempts: 0,
             max_attempts: 3,
             lease: None,
@@ -318,6 +341,7 @@ impl JobRegistry {
         let now = unix_ms();
         job.status = JobStatus::Running;
         job.attempts += 1;
+        job.result = None;
         job.lease = Some(JobLease {
             worker_id: worker_id.to_string(),
             attempt: job.attempts,
@@ -409,6 +433,88 @@ impl JobRegistry {
         RenewJobLeaseResult::Renewed(job.clone())
     }
 
+    pub async fn complete_lease(
+        &self,
+        id: &str,
+        worker_id: &str,
+        result: Value,
+    ) -> FinishJobResult {
+        let mut guard = self.inner.write().await;
+        let Some(job) = guard.jobs.get_mut(id) else {
+            return FinishJobResult::NotFound;
+        };
+
+        if job.status != JobStatus::Running {
+            return FinishJobResult::NotRunning(job.clone());
+        }
+
+        let Some(lease) = &job.lease else {
+            return FinishJobResult::NotRunning(job.clone());
+        };
+
+        if lease.worker_id != worker_id {
+            return FinishJobResult::LeaseNotHeld(job.clone());
+        }
+
+        let now = unix_ms();
+        if lease.expires_at_unix_ms <= now {
+            return FinishJobResult::Expired(job.clone());
+        }
+
+        job.status = JobStatus::Complete;
+        job.result = Some(result);
+        job.error = None;
+        job.lease = None;
+        job.updated_at_unix_ms = now;
+        FinishJobResult::Completed(job.clone())
+    }
+
+    pub async fn fail_lease(
+        &self,
+        id: &str,
+        worker_id: &str,
+        failure: JobFailure,
+    ) -> FinishJobResult {
+        let mut guard = self.inner.write().await;
+        let Some(job) = guard.jobs.get_mut(id) else {
+            return FinishJobResult::NotFound;
+        };
+
+        if job.status != JobStatus::Running {
+            return FinishJobResult::NotRunning(job.clone());
+        }
+
+        let Some(lease) = &job.lease else {
+            return FinishJobResult::NotRunning(job.clone());
+        };
+
+        if lease.worker_id != worker_id {
+            return FinishJobResult::LeaseNotHeld(job.clone());
+        }
+
+        let now = unix_ms();
+        if lease.expires_at_unix_ms <= now {
+            return FinishJobResult::Expired(job.clone());
+        }
+
+        job.result = None;
+        job.error = Some(failure.clone());
+        job.lease = None;
+        job.updated_at_unix_ms = now;
+
+        if failure.retryable && job.attempts < job.max_attempts {
+            job.status = JobStatus::Queued;
+            let priority = job.priority;
+            let id = job.id.clone();
+            let job = job.clone();
+            guard.queues.for_priority_mut(priority).push_back(id);
+            FinishJobResult::Requeued(job)
+        } else {
+            job.status = JobStatus::Failed;
+            FinishJobResult::Failed(job.clone())
+        }
+    }
+
     pub async fn cancel(&self, id: &str) -> CancelJobResult {
         let mut guard = self.inner.write().await;
         let Some(job) = guard.jobs.get_mut(id) else {
@@ -436,6 +542,16 @@ pub enum CancelJobResult {
 
 pub enum RenewJobLeaseResult {
     Renewed(JobRecord),
+    NotRunning(JobRecord),
+    LeaseNotHeld(JobRecord),
+    Expired(JobRecord),
+    NotFound,
+}
+
+pub enum FinishJobResult {
+    Completed(JobRecord),
+    Requeued(JobRecord),
+    Failed(JobRecord),
     NotRunning(JobRecord),
     LeaseNotHeld(JobRecord),
     Expired(JobRecord),
@@ -484,6 +600,10 @@ fn normalize_callback_url(callback_url: Option<String>) -> Result<Option<String>
         return Err("callback_url cannot be empty".into());
     }
     Ok(Some(trimmed.to_string()))
+}
+
+fn default_retryable_failure() -> bool {
+    true
 }
 
 fn priority_rank(priority: &str) -> u8 {
@@ -1190,6 +1310,194 @@ mod tests {
 
         let result = jobs.renew_lease("missing", "worker-a", 30_000).await;
         assert!(matches!(result, RenewJobLeaseResult::NotFound));
+    }
+
+    #[tokio::test]
+    async fn complete_lease_marks_held_running_job_complete() {
+        let jobs = JobRegistry::default();
+        jobs.submit(SubmitJobRequest {
+            kind: JobKind::VisionAnalysis,
+            priority: Priority::Batch,
+            payload: Value::Null,
+            callback_url: None,
+        })
+        .await
+        .unwrap();
+        jobs.claim_next_for_worker("worker-a", &[JobKind::VisionAnalysis], 30_000)
+            .await
+            .unwrap();
+
+        let result = jobs
+            .complete_lease("job-1", "worker-a", json!({"ok": true}))
+            .await;
+        let FinishJobResult::Completed(job) = result else {
+            panic!("expected completion");
+        };
+
+        assert_eq!(job.status, JobStatus::Complete);
+        assert_eq!(job.result, Some(json!({"ok": true})));
+        assert!(job.error.is_none());
+        assert!(job.lease.is_none());
+        assert!(jobs.queue_snapshots().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn complete_lease_rejects_wrong_worker_and_expired_lease() {
+        let jobs = JobRegistry::default();
+        jobs.submit(SubmitJobRequest {
+            kind: JobKind::EmbedBatch,
+            priority: Priority::Realtime,
+            payload: Value::Null,
+            callback_url: None,
+        })
+        .await
+        .unwrap();
+        jobs.claim_next_for_worker("worker-a", &[JobKind::EmbedBatch], 30_000)
+            .await
+            .unwrap();
+
+        let wrong_worker = jobs.complete_lease("job-1", "worker-b", Value::Null).await;
+        assert!(matches!(wrong_worker, FinishJobResult::LeaseNotHeld(_)));
+
+        jobs.submit(SubmitJobRequest {
+            kind: JobKind::Cluster,
+            priority: Priority::Batch,
+            payload: Value::Null,
+            callback_url: None,
+        })
+        .await
+        .unwrap();
+        jobs.claim_next_for_worker("worker-a", &[JobKind::Cluster], 0)
+            .await
+            .unwrap();
+
+        let expired = jobs.complete_lease("job-2", "worker-a", Value::Null).await;
+        assert!(matches!(expired, FinishJobResult::Expired(_)));
+    }
+
+    #[tokio::test]
+    async fn fail_lease_requeues_retryable_failure_when_attempts_remain() {
+        let jobs = JobRegistry::default();
+        jobs.submit(SubmitJobRequest {
+            kind: JobKind::IndexBuild,
+            priority: Priority::Background,
+            payload: Value::Null,
+            callback_url: None,
+        })
+        .await
+        .unwrap();
+        jobs.claim_next_for_worker("worker-a", &[JobKind::IndexBuild], 30_000)
+            .await
+            .unwrap();
+
+        let result = jobs
+            .fail_lease(
+                "job-1",
+                "worker-a",
+                JobFailure {
+                    message: "transient oom".into(),
+                    retryable: true,
+                },
+            )
+            .await;
+        let FinishJobResult::Requeued(job) = result else {
+            panic!("expected retryable failure to requeue");
+        };
+
+        assert_eq!(job.status, JobStatus::Queued);
+        assert_eq!(job.attempts, 1);
+        assert!(job.lease.is_none());
+        assert_eq!(
+            job.error,
+            Some(JobFailure {
+                message: "transient oom".into(),
+                retryable: true,
+            })
+        );
+        assert_eq!(
+            jobs.queued_jobs_by_priority()
+                .await
+                .iter()
+                .map(|job| job.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["job-1"]
+        );
+    }
+
+    #[tokio::test]
+    async fn fail_lease_marks_non_retryable_or_exhausted_failure_failed() {
+        let jobs = JobRegistry::default();
+        jobs.submit(SubmitJobRequest {
+            kind: JobKind::Cluster,
+            priority: Priority::Batch,
+            payload: Value::Null,
+            callback_url: None,
+        })
+        .await
+        .unwrap();
+        jobs.claim_next_for_worker("worker-a", &[JobKind::Cluster], 30_000)
+            .await
+            .unwrap();
+
+        let non_retryable = jobs
+            .fail_lease(
+                "job-1",
+                "worker-a",
+                JobFailure {
+                    message: "bad input".into(),
+                    retryable: false,
+                },
+            )
+            .await;
+        let FinishJobResult::Failed(job) = non_retryable else {
+            panic!("expected non-retryable failure");
+        };
+        assert_eq!(job.status, JobStatus::Failed);
+        assert!(job.lease.is_none());
+
+        jobs.submit(SubmitJobRequest {
+            kind: JobKind::EmbedBatch,
+            priority: Priority::Realtime,
+            payload: Value::Null,
+            callback_url: None,
+        })
+        .await
+        .unwrap();
+        for _ in 0..2 {
+            jobs.claim_next_for_worker("worker-a", &[JobKind::EmbedBatch], 30_000)
+                .await
+                .unwrap();
+            let result = jobs
+                .fail_lease(
+                    "job-2",
+                    "worker-a",
+                    JobFailure {
+                        message: "temporary failure".into(),
+                        retryable: true,
+                    },
+                )
+                .await;
+            assert!(matches!(result, FinishJobResult::Requeued(_)));
+        }
+        jobs.claim_next_for_worker("worker-a", &[JobKind::EmbedBatch], 30_000)
+            .await
+            .unwrap();
+        let exhausted = jobs
+            .fail_lease(
+                "job-2",
+                "worker-a",
+                JobFailure {
+                    message: "temporary failure".into(),
+                    retryable: true,
+                },
+            )
+            .await;
+        let FinishJobResult::Failed(job) = exhausted else {
+            panic!("expected retry exhaustion");
+        };
+        assert_eq!(job.status, JobStatus::Failed);
+        assert_eq!(job.attempts, job.max_attempts);
+        assert!(jobs.queued_jobs_by_priority().await.is_empty());
     }
 
     #[tokio::test]

@@ -7,7 +7,10 @@ use axum::{
 use serde::Serialize;
 
 use crate::{
-    jobs::{JobRecord, JobRegistry, RenewJobLeaseResult},
+    jobs::{
+        CompleteJobRequest, FailJobRequest, FinishJobResult, JobFailure, JobRecord, JobRegistry,
+        RenewJobLeaseResult,
+    },
     workers::{WorkerRegistry, WorkerSnapshot},
     AppState,
 };
@@ -27,6 +30,11 @@ pub struct SchedulerPreviewResponse {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct JobClaimResponse {
+    pub job: JobRecord,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct JobResultResponse {
     pub job: JobRecord,
 }
 
@@ -92,6 +100,74 @@ pub async fn renew_worker_job_lease_handler(
     }
 }
 
+pub async fn complete_worker_job_handler(
+    State(state): State<AppState>,
+    Path((worker_id, job_id)): Path<(String, String)>,
+    Json(request): Json<CompleteJobRequest>,
+) -> Response {
+    let Some(worker) = state.workers.get(&worker_id).await else {
+        return (StatusCode::NOT_FOUND, "worker not found").into_response();
+    };
+    if worker.stale {
+        return (StatusCode::CONFLICT, "worker is stale").into_response();
+    }
+
+    state.jobs.requeue_expired_leases().await;
+
+    match state
+        .jobs
+        .complete_lease(&job_id, &worker.id, request.result)
+        .await
+    {
+        FinishJobResult::Completed(job) => Json(JobResultResponse { job }).into_response(),
+        FinishJobResult::NotRunning(job)
+        | FinishJobResult::LeaseNotHeld(job)
+        | FinishJobResult::Expired(job) => {
+            (StatusCode::CONFLICT, Json(JobResultResponse { job })).into_response()
+        }
+        FinishJobResult::NotFound => (StatusCode::NOT_FOUND, "job not found").into_response(),
+        FinishJobResult::Requeued(_) | FinishJobResult::Failed(_) => {
+            unreachable!("completion cannot requeue or fail a job")
+        }
+    }
+}
+
+pub async fn fail_worker_job_handler(
+    State(state): State<AppState>,
+    Path((worker_id, job_id)): Path<(String, String)>,
+    Json(request): Json<FailJobRequest>,
+) -> Response {
+    let Some(worker) = state.workers.get(&worker_id).await else {
+        return (StatusCode::NOT_FOUND, "worker not found").into_response();
+    };
+    if worker.stale {
+        return (StatusCode::CONFLICT, "worker is stale").into_response();
+    }
+    let error = request.error.trim();
+    if error.is_empty() {
+        return (StatusCode::BAD_REQUEST, "error cannot be empty").into_response();
+    }
+
+    state.jobs.requeue_expired_leases().await;
+
+    let failure = JobFailure {
+        message: error.to_string(),
+        retryable: request.retryable,
+    };
+    match state.jobs.fail_lease(&job_id, &worker.id, failure).await {
+        FinishJobResult::Requeued(job) | FinishJobResult::Failed(job) => {
+            Json(JobResultResponse { job }).into_response()
+        }
+        FinishJobResult::NotRunning(job)
+        | FinishJobResult::LeaseNotHeld(job)
+        | FinishJobResult::Expired(job) => {
+            (StatusCode::CONFLICT, Json(JobResultResponse { job })).into_response()
+        }
+        FinishJobResult::NotFound => (StatusCode::NOT_FOUND, "job not found").into_response(),
+        FinishJobResult::Completed(_) => unreachable!("failure cannot complete a job"),
+    }
+}
+
 pub async fn preview_next_assignment(
     jobs: &JobRegistry,
     workers: &WorkerRegistry,
@@ -133,7 +209,7 @@ mod tests {
         AppState,
     };
     use axum::{body::Body, http::Request};
-    use serde_json::Value;
+    use serde_json::{json, Value};
     use std::time::Duration;
     use tower::ServiceExt;
 
@@ -582,6 +658,253 @@ mod tests {
                 .unwrap() as u128
                 > original_expires_at
         );
+    }
+
+    #[tokio::test]
+    async fn worker_complete_endpoint_marks_held_job_complete() {
+        let jobs = JobRegistry::default();
+        let workers = WorkerRegistry::default();
+
+        jobs.submit(SubmitJobRequest {
+            kind: JobKind::VisionAnalysis,
+            priority: Priority::Batch,
+            payload: Value::Null,
+            callback_url: None,
+        })
+        .await
+        .unwrap();
+        jobs.claim_next_for_worker("vision-worker", &[JobKind::VisionAnalysis], 30_000)
+            .await
+            .unwrap();
+        workers
+            .register(RegisterWorkerRequest {
+                id: "vision-worker".into(),
+                endpoint_url: "http://vision-worker:9000".into(),
+                node_id: None,
+                job_types: vec![JobKind::VisionAnalysis],
+                max_concurrent_jobs: None,
+                available_vram_mb: None,
+            })
+            .await
+            .unwrap();
+
+        let app = build_router(test_state(jobs.clone(), workers));
+        let response = app
+            .oneshot(
+                Request::post("/v1/workers/vision-worker/jobs/job-1/complete")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({"result": {"label": "healthy"}}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(value["job"]["status"], "complete");
+        assert_eq!(value["job"]["result"], json!({"label": "healthy"}));
+        assert!(value["job"]["error"].is_null());
+        assert!(value["job"]["lease"].is_null());
+        assert_eq!(
+            jobs.get("job-1").await.unwrap().status,
+            crate::jobs::JobStatus::Complete
+        );
+    }
+
+    #[tokio::test]
+    async fn worker_complete_endpoint_rejects_worker_that_does_not_hold_lease() {
+        let jobs = JobRegistry::default();
+        let workers = WorkerRegistry::default();
+
+        jobs.submit(SubmitJobRequest {
+            kind: JobKind::EmbedBatch,
+            priority: Priority::Realtime,
+            payload: Value::Null,
+            callback_url: None,
+        })
+        .await
+        .unwrap();
+        jobs.claim_next_for_worker("worker-a", &[JobKind::EmbedBatch], 30_000)
+            .await
+            .unwrap();
+        workers
+            .register(RegisterWorkerRequest {
+                id: "worker-b".into(),
+                endpoint_url: "http://worker-b:9000".into(),
+                node_id: None,
+                job_types: vec![JobKind::EmbedBatch],
+                max_concurrent_jobs: None,
+                available_vram_mb: None,
+            })
+            .await
+            .unwrap();
+
+        let app = build_router(test_state(jobs, workers));
+        let response = app
+            .oneshot(
+                Request::post("/v1/workers/worker-b/jobs/job-1/complete")
+                    .header("content-type", "application/json")
+                    .body(Body::from(json!({"result": null}).to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(value["job"]["status"], "running");
+        assert_eq!(value["job"]["lease"]["worker_id"], "worker-a");
+    }
+
+    #[tokio::test]
+    async fn worker_fail_endpoint_requeues_retryable_failure() {
+        let jobs = JobRegistry::default();
+        let workers = WorkerRegistry::default();
+
+        jobs.submit(SubmitJobRequest {
+            kind: JobKind::IndexBuild,
+            priority: Priority::Background,
+            payload: Value::Null,
+            callback_url: None,
+        })
+        .await
+        .unwrap();
+        jobs.claim_next_for_worker("index-worker", &[JobKind::IndexBuild], 30_000)
+            .await
+            .unwrap();
+        workers
+            .register(RegisterWorkerRequest {
+                id: "index-worker".into(),
+                endpoint_url: "http://index-worker:9000".into(),
+                node_id: None,
+                job_types: vec![JobKind::IndexBuild],
+                max_concurrent_jobs: None,
+                available_vram_mb: None,
+            })
+            .await
+            .unwrap();
+
+        let app = build_router(test_state(jobs.clone(), workers));
+        let response = app
+            .oneshot(
+                Request::post("/v1/workers/index-worker/jobs/job-1/fail")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({"error": "temporary worker failure", "retryable": true}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(value["job"]["status"], "queued");
+        assert_eq!(value["job"]["error"]["message"], "temporary worker failure");
+        assert_eq!(value["job"]["error"]["retryable"], true);
+        assert!(value["job"]["lease"].is_null());
+        assert_eq!(
+            jobs.queued_jobs_by_priority()
+                .await
+                .iter()
+                .map(|job| job.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["job-1"]
+        );
+    }
+
+    #[tokio::test]
+    async fn worker_fail_endpoint_marks_non_retryable_failure_failed() {
+        let jobs = JobRegistry::default();
+        let workers = WorkerRegistry::default();
+
+        jobs.submit(SubmitJobRequest {
+            kind: JobKind::Cluster,
+            priority: Priority::Batch,
+            payload: Value::Null,
+            callback_url: None,
+        })
+        .await
+        .unwrap();
+        jobs.claim_next_for_worker("cluster-worker", &[JobKind::Cluster], 30_000)
+            .await
+            .unwrap();
+        workers
+            .register(RegisterWorkerRequest {
+                id: "cluster-worker".into(),
+                endpoint_url: "http://cluster-worker:9000".into(),
+                node_id: None,
+                job_types: vec![JobKind::Cluster],
+                max_concurrent_jobs: None,
+                available_vram_mb: None,
+            })
+            .await
+            .unwrap();
+
+        let app = build_router(test_state(jobs, workers));
+        let response = app
+            .oneshot(
+                Request::post("/v1/workers/cluster-worker/jobs/job-1/fail")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({"error": "invalid request", "retryable": false}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(value["job"]["status"], "failed");
+        assert_eq!(value["job"]["error"]["message"], "invalid request");
+        assert_eq!(value["job"]["error"]["retryable"], false);
+        assert!(value["job"]["lease"].is_null());
+    }
+
+    #[tokio::test]
+    async fn worker_fail_endpoint_rejects_empty_error() {
+        let jobs = JobRegistry::default();
+        let workers = WorkerRegistry::default();
+
+        workers
+            .register(RegisterWorkerRequest {
+                id: "worker-a".into(),
+                endpoint_url: "http://worker-a:9000".into(),
+                node_id: None,
+                job_types: vec![JobKind::Cluster],
+                max_concurrent_jobs: None,
+                available_vram_mb: None,
+            })
+            .await
+            .unwrap();
+
+        let app = build_router(test_state(jobs, workers));
+        let response = app
+            .oneshot(
+                Request::post("/v1/workers/worker-a/jobs/job-1/fail")
+                    .header("content-type", "application/json")
+                    .body(Body::from(json!({"error": "   "}).to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]

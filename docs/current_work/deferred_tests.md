@@ -102,8 +102,9 @@ synchronous and async compute.
 When later phases build on Phase 6C worker-pull claims and leases, add tests
 for:
 
-- cancellation races between cancel and future complete/fail endpoints
-- lease ownership checks for future complete/fail endpoints
+- concurrent cancellation versus complete/fail requests against the same leased
+  job
+- complete/fail idempotency for duplicate worker reports after a terminal state
 - background lease sweep behavior, if Fairlead adds a scheduler loop instead of
   claim-time opportunistic sweeps only
 - opt-in local multi-process e2e: start Fairlead, register two fake workers,
@@ -115,28 +116,27 @@ for:
 
 **Why deferred:** Phase 6B now has the in-memory job API, worker registry, queue
 metrics, and non-mutating scheduler preview. These tests require mutating claims,
-lease metadata, running-job state, and later worker execution endpoints. Cleat
-now covers the claim endpoint, duplicate-claim prevention, stale worker
-exclusion, unsupported job types, priority ordering, FIFO ordering,
-queued/running cancellation basics, claim-time expired lease requeue/failure,
-lease renewal, renewal ownership checks, and cancellation ordering around
-running leases and requeued jobs. The remaining race tests need future
-complete/fail endpoints or a heavier multi-process/deployment harness.
+lease metadata, running-job state, and worker execution endpoints. Cleat covers
+the claim endpoint, duplicate-claim prevention, stale worker exclusion,
+unsupported job types, priority ordering, FIFO ordering, queued/running
+cancellation basics, claim-time expired lease requeue/failure, lease renewal,
+renewal ownership checks, and cancellation ordering around running leases and
+requeued jobs. Halyard adds complete/fail endpoints. The remaining race and e2e
+tests need a heavier multi-process/deployment harness.
 
 ### `phase_6d_worker_execution_and_utilization`
 
-When Phase 6D implements worker completion/failure reporting, add tests for:
+As Phase 6D continues, add tests for:
 
-- successful completion of a leased job
-- retryable worker failure requeueing a job when attempts remain
-- retry exhaustion marking a job permanently failed
 - per-attempt timeout handling
 - worker in-flight and capacity accounting
 - worker utilization metrics
 - job duration metrics
 
-**Why deferred:** These need worker execution endpoints, bounded attempts,
-timeout policy, and utilization counters, which are deliberately outside 6B.
+**Why deferred:** Halyard's first slice covers completion, retryable failure
+requeue, non-retryable failure, retry exhaustion, and endpoint ownership checks.
+The remaining tests need timeout policy, in-flight accounting, and utilization
+or duration metrics.
 
 ### `phase_6e_job_persistence_and_recovery`
 
