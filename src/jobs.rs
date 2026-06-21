@@ -265,6 +265,24 @@ impl JobRegistry {
         snapshots
     }
 
+    pub async fn queued_jobs_by_priority(&self) -> Vec<JobRecord> {
+        let guard = self.inner.read().await;
+        let mut jobs = Vec::new();
+
+        for (_priority, queue) in guard.queues.iter() {
+            for id in queue {
+                let Some(job) = guard.jobs.get(id) else {
+                    continue;
+                };
+                if job.status == JobStatus::Queued {
+                    jobs.push(job.clone());
+                }
+            }
+        }
+
+        jobs
+    }
+
     pub async fn cancel(&self, id: &str) -> CancelJobResult {
         let mut guard = self.inner.write().await;
         let Some(job) = guard.jobs.get_mut(id) else {
@@ -608,6 +626,43 @@ mod tests {
                 kind: "index_build",
                 depth: 1,
             }]
+        );
+    }
+
+    #[tokio::test]
+    async fn queued_jobs_by_priority_returns_priority_order_and_skips_cancelled_jobs() {
+        let jobs = JobRegistry::default();
+        jobs.submit(SubmitJobRequest {
+            kind: JobKind::IndexBuild,
+            priority: Priority::Background,
+            payload: Value::Null,
+            callback_url: None,
+        })
+        .await
+        .unwrap();
+        jobs.submit(SubmitJobRequest {
+            kind: JobKind::EmbedBatch,
+            priority: Priority::Realtime,
+            payload: Value::Null,
+            callback_url: None,
+        })
+        .await
+        .unwrap();
+        jobs.submit(SubmitJobRequest {
+            kind: JobKind::VisionAnalysis,
+            priority: Priority::Batch,
+            payload: Value::Null,
+            callback_url: None,
+        })
+        .await
+        .unwrap();
+
+        jobs.cancel("job-2").await;
+
+        let queued = jobs.queued_jobs_by_priority().await;
+        assert_eq!(
+            queued.iter().map(|job| job.id.as_str()).collect::<Vec<_>>(),
+            vec!["job-3", "job-1"]
         );
     }
 

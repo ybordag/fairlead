@@ -116,8 +116,9 @@ The current code implements the synchronous gateway path: backend selection,
 circuit breaking, health probing, soft affinity, streaming proxying, resource
 reporting, resource-aware backend eligibility, priority admission, and basic
 metrics. The early async path implements in-memory job records and
-non-dispatching worker registration. Durable priority queues, worker dispatch,
-leases, callbacks, and durable job recovery are planned later phases.
+non-dispatching worker registration, queue metrics, and scheduler preview.
+Worker-pull claims, worker execution, leases, callbacks, and durable job
+recovery are planned for Phase 6C+.
 
 ### Rhizome example: spark-a and spark-b
 
@@ -234,18 +235,19 @@ request arrives
 
 ### Surface 2: Async job dispatch
 
-The first Phase 6B slices implement the HTTP job surface and non-dispatching
-worker registration with in-memory state. Scheduler dispatch, leases,
-persistence, and callback delivery are still future Phase 6B slices. The
-design belongs in the architecture because it defines Fairlead's boundary:
-Fairlead should be a compute control plane, not a general-purpose workflow
-engine.
+Phase 6B implements the HTTP job surface, non-dispatching worker registration,
+queue visibility, and scheduler preview with in-memory state. Worker-pull
+claims, leases, execution, persistence, and callback delivery are Phase 6C+
+work. The design belongs in the architecture because it defines Fairlead's
+boundary: Fairlead should be a compute control plane, not a general-purpose
+workflow engine.
 
 ```
 POST /v1/jobs        — submit, get job_id immediately
 GET  /v1/jobs        — list in-memory job records
 GET  /v1/jobs/{id}   — poll status
 DELETE /v1/jobs/{id} — cancel queued or running work when supported
+GET  /v1/scheduler/preview    — preview next job/worker match without mutation
 POST /v1/workers/register       — register or update worker capabilities
 POST /v1/workers/{id}/heartbeat — refresh worker liveness
 GET  /v1/workers                — list registered workers
@@ -264,10 +266,11 @@ Current early Phase 6B behavior:
 - cancellation removes queued jobs from queue depth and wait-time accounting
 - registered workers are listed with stale status
 - `/metrics` exposes `fairlead_workers{type,status}`
-- no worker is selected yet
+- `GET /v1/scheduler/preview` selects the next queued job and fresh compatible
+  worker without changing job state
 - no job is dispatched to a worker yet
 - no callback is delivered yet
-- no durable queue or scheduler loop exists yet
+- no durable queue, lease, or scheduler loop exists yet
 
 ```
 job submitted
@@ -477,7 +480,11 @@ starvation policy and async job scheduling remain future scheduler work.
 | 4 | Fallback chain, session affinity, same-request retry | Local resilience across configured backends |
 | 5 | Resource registry, VRAM accounting, priority admission | Synchronous inference avoids oversubscribed local GPUs and fails fast by priority |
 | 6A | Synchronous surface cleanup: workload metadata, pool metadata, header policy, `/v1/models` | More synchronous workloads can share the proxy cleanly |
-| 6B | Async job API, durable priority queues, worker registration, leases, callbacks | Vision and embedding jobs go through Fairlead |
+| 6B | Async job API, queue visibility, worker registration, scheduler preview | Fairlead can describe async work and select a compatible worker without dispatching |
+| 6C | Worker-pull claims and leases | Workers can safely claim bounded jobs without duplicate execution |
+| 6D | Worker execution, retries, and utilization | Leased jobs can complete/fail with bounded attempts and useful metrics |
+| 6E | Durable job state and recovery | Queued/running async work survives ordinary Fairlead restarts |
+| 6F | Callback delivery and async finalization | Callers can receive terminal job updates without polling forever |
 | 7A | Pool-aware routing and placement policies for sync backends and async workers | Workloads can target named local, peer, or overflow compute pools consistently |
 | 7 | Adapter boundaries, index/cluster job types, FAISS/GPU, cloud fallback, full metrics | Advanced RAG indexing, external overflow, complete observability |
 

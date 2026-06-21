@@ -9,8 +9,9 @@ reports from model servers and other GPU consumers.
 
 It exposes an OpenAI-compatible inference API and a first-slice generic async
 job API. The inference path is synchronous (request → response). The job path is
-currently submit → job_id → poll/cancel; worker dispatch, leases, durable queues,
-and callbacks are still planned Phase 6B work.
+currently submit → job_id → poll/cancel, with non-dispatching worker
+registration and scheduler preview. Worker-pull claims, leases, execution,
+durable state, and callbacks are Phase 6C+ work.
 
 See `docs/planning/design.md` for the design horizon and
 `docs/planning/architecture.md` for the current architecture.
@@ -54,8 +55,8 @@ cargo watch -x run
 ## Current status
 
 **Phase 6A complete** (clew → main). **Phase 6B is in progress on tackle**:
-async compute routing, starting with an in-memory job API before durable queues,
-workers, leases, callbacks, and persistence.
+async job API, queue visibility, worker registration, and non-dispatching
+scheduler preview before claims, leases, execution, callbacks, and persistence.
 
 | Phase | Branch | Status |
 |---|---|---|
@@ -65,13 +66,17 @@ workers, leases, callbacks, and persistence.
 | 4 — Fallback chain + session affinity | spinnaker → main | ✅ complete |
 | 5 — VRAM accounting + priority admission | trim → main | ✅ complete |
 | 6A — Synchronous surface cleanup | clew → main | ✅ complete |
-| 6B — Async job dispatch | tackle | in progress |
+| 6B — Async API + scheduler preview | tackle | in progress |
+| 6C — Worker-pull claims + leases | — | pending |
+| 6D — Worker execution + retries | — | pending |
+| 6E — Durable job state + recovery | — | pending |
+| 6F — Callback delivery + finalization | — | pending |
 | 7A — Pool-aware routing + placement | — | pending |
 | 7 — Advanced compute + full metrics | — | pending |
 
 ## Project layout
 
-**What exists now (Phases 1–6B first slice):**
+**What exists now (Phases 1–6B):**
 
 ```
 src/
@@ -79,11 +84,13 @@ src/
   config.rs         — Config from env, backend metadata, workload route metadata
   error.rs          — FairleadError enum with IntoResponse impl
   health.rs         — GET /health → {"status":"ok"}
-  jobs.rs           — in-memory async job API: submit, get, cancel
+  jobs.rs           — in-memory async job API: submit, list, get, cancel, queue snapshots
   metrics.rs        — GET /metrics → Prometheus circuit_state gauge per backend
   models.rs         — GET /v1/models → configured backend/model metadata
   priority.rs       — per-priority synchronous admission limiter
   resources.rs      — POST/GET resource reports for VRAM/load control-plane state
+  scheduler.rs      — non-dispatching scheduler preview: queued job → fresh capable worker
+  workers.rs        — non-dispatching worker registration, heartbeat, stale status
   router/
     mod.rs          — module entry point
     circuit.rs      — CircuitBreaker: Closed/Open/HalfOpen state machine
@@ -134,12 +141,14 @@ POST   /v1/jobs              — submit a job, returns queued in-memory job reco
 GET    /v1/jobs              — list in-memory job records
 GET    /v1/jobs/{id}         — check status: queued | running | complete | failed
 DELETE /v1/jobs/{id}         — cancel a queued job
+GET    /v1/scheduler/preview — preview next job/worker match without mutation
 ```
 
 The first Phase 6B slices store job records in memory only and track explicit
-per-priority queued job IDs. Worker registration is non-dispatching for now.
-Worker dispatch, deregistration, durable queues, leases, callback delivery,
-worker utilization metrics, and SQLite-backed persistence are still planned.
+per-priority queued job IDs. Worker registration and scheduler preview are
+non-dispatching for now. Worker-pull claims, deregistration, leases, callback
+delivery, worker utilization metrics, and SQLite-backed persistence are planned
+for Phase 6C and later.
 
 Job request body:
 ```json
@@ -318,7 +327,7 @@ WORKER_HEARTBEAT_SECS        — interval before a worker is considered stale
 - Keep cloud-provider fallback and provider credentials deferred unless a demo or
   deployment path needs external overflow capacity.
 
-### Phase 6B — Async job dispatch
+### Phase 6B — Async API, queue visibility, and scheduler preview
 
 - [x] First-slice in-memory job API: `POST /v1/jobs`,
   `GET /v1/jobs/{id}`, `DELETE /v1/jobs/{id}`
@@ -326,19 +335,26 @@ WORKER_HEARTBEAT_SECS        — interval before a worker is considered stale
   depth/wait-time metrics
 - [x] Non-dispatching worker registration, heartbeat, stale status, and
   availability metrics
-- Durable priority queues
-- Worker deregistration API and graceful shutdown semantics
-- Worker utilization metrics
-- Workers declare: job types they handle, VRAM cost per job, endpoint URL
-- Scheduler: match job type → registered workers; pick based on VRAM headroom and load
+- [x] Non-dispatching scheduler preview: next queued job by priority/FIFO order
+  matched to a fresh worker with the required job type
+- [x] Keep preview non-mutating: no lease, no `running` transition, no worker
+  call, and no callback
+
+### Phase 6C+ — Remaining async compute router work
+
+- Worker-pull claims and leases.
+- Worker deregistration API and graceful shutdown semantics.
+- Worker utilization metrics.
+- Scheduler policy based on lease availability, VRAM headroom, and load.
 - Job manager: bounded attempts, leases, timeouts, retry limits, cancellation,
-  and completed-job pruning
-- Persistence path: in-memory for focused tests, SQLite first for local durable
-  state, Postgres later for multiple Fairlead instances
-- Callback delivery: on completion, POST to `callback_url` with result payload; retry on failure
-- Job duration and callback success/failure metrics
-- Built-in job types: `vision_analysis`, `embed_batch`
-- Test: submit vision job → dispatched to registered worker → callback fires with result
+  and completed-job pruning.
+- Persistence path: SQLite first for local durable state, Postgres later for
+  multiple Fairlead instances.
+- Callback delivery: on completion, POST to `callback_url` with result payload;
+  retry on failure.
+- Job duration and callback success/failure metrics.
+- Test: submit vision job → claimed by registered worker → completed → callback
+  fires with result.
 
 Temporal is deferred. Fairlead owns compute job orchestration; Rhizome owns
 domain workflow state. Add Temporal only if Rhizome starts needing durable

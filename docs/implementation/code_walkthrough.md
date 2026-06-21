@@ -107,6 +107,7 @@ mod priority;
 mod proxy;
 mod resources;
 mod router;
+mod scheduler;
 mod workers;
 ```
 
@@ -119,6 +120,7 @@ names:
 - `mod proxy;` loads `src/proxy/mod.rs`.
 - `mod resources;` loads `src/resources.rs`.
 - `mod router;` loads `src/router/mod.rs`.
+- `mod scheduler;` loads `src/scheduler.rs`.
 - `mod workers;` loads `src/workers.rs`.
 
 This is closer to declaring compilation units than to copying source text into
@@ -389,6 +391,7 @@ mod priority;
 mod proxy;
 mod resources;
 mod router;
+mod scheduler;
 mod workers;
 ```
 
@@ -629,6 +632,7 @@ Router::new()
     .route("/v1/resources/report", post(resources::report_resources))
     .route("/v1/jobs", get(jobs::list_jobs).post(jobs::submit_job))
     .route("/v1/jobs/:id", get(jobs::get_job).delete(jobs::cancel_job))
+    .route("/v1/scheduler/preview", get(scheduler::preview_next_assignment_handler))
     .route("/v1/workers", get(workers::list_workers))
     .route("/v1/workers/register", post(workers::register_worker))
     .route("/v1/workers/:id/heartbeat", post(workers::heartbeat_worker))
@@ -648,6 +652,8 @@ This means:
 - `GET /v1/jobs` calls `jobs::list_jobs`.
 - `GET /v1/jobs/{id}` calls `jobs::get_job`.
 - `DELETE /v1/jobs/{id}` calls `jobs::cancel_job`.
+- `GET /v1/scheduler/preview` calls
+  `scheduler::preview_next_assignment_handler`.
 - `GET /v1/workers` calls `workers::list_workers`.
 - `POST /v1/workers/register` calls `workers::register_worker`.
 - `POST /v1/workers/{id}/heartbeat` calls `workers::heartbeat_worker`.
@@ -1213,6 +1219,20 @@ Worker registration exposes current non-dispatching worker availability:
 fairlead_workers{type="vision_analysis",status="available"} 1
 fairlead_workers{type="embed_batch",status="stale"} 1
 ```
+
+`GET /v1/scheduler/preview` asks the scheduler to inspect the in-memory queues
+and registered workers:
+
+1. `JobRegistry::queued_jobs_by_priority()` returns queued jobs in
+   `realtime`, `batch`, then `background` order, preserving FIFO order inside
+   each priority.
+2. `WorkerRegistry::list()` returns registered workers with their fresh/stale
+   status.
+3. `scheduler::preview_next_assignment()` scans jobs in priority order and picks
+   the first non-stale worker that supports the job type.
+
+The preview response is deliberately non-mutating. The job remains `queued`, no
+lease is created, and Fairlead does not call the worker endpoint.
 
 The proxy logs structured fields for the same decision: request ID, workload,
 origin node, affinity key, selected backend, retry count, fallback reason,

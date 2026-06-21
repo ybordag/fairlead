@@ -10,7 +10,8 @@ The name comes from sailing: a fairlead is a fitting that guides lines in exactl
 **Status:** Phase 6B is in progress on the `tackle` branch. Fairlead currently
 runs as an Axum HTTP service with `/health`, `/metrics`, `/v1/models`,
 `/v1/resources`, `/v1/resources/report`, `/v1/jobs`, `/v1/jobs/{id}`,
-`/v1/chat/completions`, and `/v1/embeddings`.
+`/v1/workers`, `/v1/scheduler/preview`, `/v1/chat/completions`, and
+`/v1/embeddings`.
 
 ---
 
@@ -73,9 +74,12 @@ Implemented generalization work includes:
   job type, priority, payload, and callback metadata.
 - **Non-dispatching worker registration** with heartbeat, stale detection,
   capability metadata, and worker availability metrics.
+- **Non-dispatching scheduler preview** that shows the next queued job and fresh
+  compatible worker without leasing, running, or dispatching the job.
 
-Future phases add durable priority queues, worker dispatch, complete pool-aware
-routing, adapter boundaries, callback delivery, and cloud fallback.
+Future Phase 6 subphases add worker-pull leases, worker execution, durable job
+state, callback delivery, and async completion metrics. Later phases add
+complete pool-aware routing, adapter boundaries, and cloud fallback.
 
 See [`docs/planning/roadmap.md`](docs/planning/roadmap.md) for the
 implementation plan and acceptance criteria.

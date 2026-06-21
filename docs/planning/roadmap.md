@@ -104,6 +104,13 @@ Fairlead currently provides:
 - `WorkloadKind` metadata for chat completions and embeddings.
 - Resource-aware routing when enabled.
 - Per-priority synchronous admission limits.
+- In-memory async job API for submission, listing, polling, and cancellation.
+- In-memory per-priority async queue state.
+- Queue depth and queue wait-time metrics.
+- Non-dispatching worker registration, heartbeat, stale status, and
+  availability metrics.
+- Non-dispatching scheduler preview endpoint that matches queued jobs to fresh,
+  capable workers without leasing or dispatching.
 - Documentation for a manual two-node DGX Spark deployment.
 - Sanitized fixture conventions and ignore rules for private local config.
 
@@ -112,9 +119,10 @@ It does not yet provide:
 - Complete pool-aware backend configuration, fallback chains, or placement
   policy across sync backends and async workers.
 - CPU resource accounting and richer resource dimensions beyond coarse VRAM/load.
-- Durable priority queues.
-- Worker registration, leases, callback delivery, durable job persistence, and
-  async scheduler dispatch.
+- Durable priority queues or durable job persistence.
+- Worker leases, worker-pull claims, callback delivery, or async worker
+  execution.
+- Worker deregistration, graceful shutdown, or utilization metrics.
 
 ## Easy Tasks
 
@@ -467,7 +475,8 @@ Hard parts:
   priority.
 - Decide whether any synchronous HTTP requests should queue instead of failing
   fast.
-- Make queue depth and wait time observable.
+- Use queue depth and wait time to drive scheduling policy without adding
+  unbounded waiting to synchronous requests.
 - Keep strict priority without accidentally blocking the Tokio runtime.
 
 ### Async Job API
@@ -504,7 +513,15 @@ Open questions:
 - How are duplicate submissions made idempotent?
 - How are cancellations propagated to workers?
 
-Early implementation scope:
+Implemented early Phase 6B scope:
+
+- In-memory job records and per-priority queue state.
+- Submit, list, poll, and cancel endpoints.
+- Queue depth and wait-time metrics.
+- Non-dispatching scheduler preview endpoint for matching queued jobs to fresh
+  workers.
+
+Future Phase 6C+ scope:
 
 - Start with bounded compute jobs, not arbitrary long-running workflows.
 - Treat a multi-minute image-processing attempt as timed out unless the workload
@@ -541,6 +558,14 @@ Worker metadata:
 - Health state.
 - Heartbeat timestamp.
 - Current load.
+
+Implemented Phase 6B scope:
+
+- Worker register/upsert.
+- Worker heartbeat.
+- Worker stale status.
+- Worker listing.
+- Worker availability metrics by job type and status.
 
 Hard parts:
 
@@ -649,7 +674,12 @@ It should not introduce queues, workers, or job state.
 - Keep cloud-provider fallback and provider credentials deferred unless a clear
   demo need appears.
 
-### Phase 6B: Async Compute Router
+### Phase 6B: Async API and Scheduler Preview
+
+Scope: establish the bounded async job surface, queue visibility, worker
+registration, and non-dispatching selection logic. This phase proves that
+Fairlead can decide which worker should receive which job, but it does not lease
+or execute work yet.
 
 - [x] Add first-slice in-memory job API: submit, status, and cancellation.
 - [x] Add in-memory priority queue state and job listing.
@@ -657,15 +687,63 @@ It should not introduce queues, workers, or job state.
 - [x] Add queue wait-time metrics by priority and workload.
 - [x] Add non-dispatching worker registration and heartbeat.
 - [x] Add worker availability metrics.
-- Add durable priority queues.
-- Add worker deregistration and graceful shutdown semantics.
+- [x] Add non-dispatching scheduler preview endpoint:
+  queued job by priority/FIFO order -> fresh worker with matching job type.
+- [x] Keep the preview non-mutating: no lease, no `running` transition, no
+  worker call, and no callback.
+
+### Phase 6C: Worker-Pull Claims and Leases
+
+Scope: turn preview selection into atomic worker-pull claims while keeping worker
+execution simple and bounded.
+
+- Add worker-pull claim endpoint.
+- Mark selected jobs `running` only when a lease is granted.
+- Store lease metadata: worker ID, lease expiry, attempt number, and claimed-at
+  timestamp.
+- Prevent duplicate claims for the same job.
+- Requeue expired leases when attempts remain.
+- Define cancellation semantics for queued, claimed, and running jobs.
+- Add tests for priority ordering, stale worker exclusion, unsupported job types,
+  duplicate-claim prevention, lease expiry, and cancellation races.
+
+### Phase 6D: Worker Execution, Retries, and Utilization
+
+Scope: let workers complete or fail leased jobs and make execution behavior
+observable.
+
+- Define the worker result contract.
+- Add completion and failure endpoints.
+- Enforce bounded attempts, retry limits, and per-attempt timeouts.
+- Track worker in-flight counts and capacity usage.
 - Add worker utilization metrics.
-- Add bounded job attempts with timeouts, leases, retry limits, and cancellation.
-- Add durable-enough job state, starting with in-memory state for tests and
-  SQLite as the first persistent backend.
-- Add callback delivery.
-- Add job duration and callback success/failure metrics.
-- Add async workload metrics.
+- Add job duration metrics.
+- Add tests for success, retryable failure, retry exhaustion, timeout, and
+  utilization accounting.
+
+### Phase 6E: Durable Job State and Recovery
+
+Scope: make async job state survive ordinary Fairlead restarts without making
+Fairlead the application source of truth.
+
+- Add durable-enough job state, with SQLite as the first persistent backend.
+- Persist jobs, queue position, status, attempts, lease metadata, timestamps,
+  callback metadata, and terminal state.
+- Recover queued jobs after restart.
+- Resolve stale running leases after restart.
+- Keep Rhizome or other callers as the source of truth for domain objects.
+- Add restart/recovery tests.
+
+### Phase 6F: Callback Delivery and Async Finalization
+
+Scope: close the async loop for callers that want status pushed back instead of
+polling forever.
+
+- Deliver callbacks for terminal job states when `callback_url` is present.
+- Track callback success/failure separately from compute job status.
+- Add callback retry and timeout policy.
+- Add callback success/failure metrics.
+- Add final async end-to-end demo and documentation.
 - Document Temporal as deferred unless Rhizome needs durable multi-step workflow
   orchestration beyond compute dispatch.
 

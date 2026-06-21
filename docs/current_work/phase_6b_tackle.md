@@ -4,10 +4,10 @@
 
 Add Fairlead's async compute-router surface without turning it into a workflow
 engine. Phase 6B introduces job submission, job state, queueing, worker
-registration, leases, retries, callbacks, and metrics in slices.
+registration, scheduler preview, and queue/worker metrics.
 
-The first slices should stay deliberately small: establish the API and state
-model before dispatching work to external workers.
+Tackle stays deliberately small: establish the API and state model, then prove
+the scheduler can select a compatible worker without dispatching work.
 
 ## Scope
 
@@ -21,9 +21,7 @@ Tackle includes:
 - In-memory job state first.
 - Per-priority queue state plus queue depth and wait-time metrics.
 - Worker registration, heartbeat, stale detection, and availability metrics.
-- Durable-enough persistence later, with SQLite as the first likely backend.
-- Durable queues, scheduler loop, worker deregistration, leases, retries,
-  callbacks, and broader metrics in later slices.
+- `GET /v1/scheduler/preview` for a non-mutating next job/worker match.
 
 Tackle does not include:
 
@@ -31,6 +29,8 @@ Tackle does not include:
 - Temporal or general workflow orchestration.
 - Complete pool-aware placement. That is deferred to Phase 7A.
 - Worker process supervision or restart policy.
+- Worker-pull claims, leases, execution, retries, callback delivery, or durable
+  persistence. Those are Phase 6C+ work.
 
 ## First Slice
 
@@ -86,8 +86,17 @@ Implemented:
 - Keep cancelled jobs out of wait-time accounting, matching queue depth.
 - Kept worker dispatch, durable queues, leases, and callbacks out of scope.
 
-Next likely slice:
+## Fifth Slice
 
-- Add a non-dispatching scheduler claim primitive that selects queued jobs
-  without calling workers yet, or stop Tackle here and defer scheduler behavior
-  to a later Phase 6B branch.
+Implemented:
+
+- Added `JobRegistry::queued_jobs_by_priority()` for a read-only priority/FIFO
+  view of queued jobs.
+- Added scheduler preview logic that scans queued jobs and matches the first job
+  to a fresh worker that supports the job type.
+- Added `GET /v1/scheduler/preview`.
+- Kept preview non-mutating: no lease, no `running` transition, no worker call,
+  and no callback.
+
+After this slice, Tackle should be ready for a final review and PR if tests,
+docs, and the roadmap are clean.

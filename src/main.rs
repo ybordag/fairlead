@@ -8,6 +8,7 @@ mod priority;
 mod proxy;
 mod resources;
 mod router;
+mod scheduler;
 mod workers;
 
 use axum::{
@@ -118,6 +119,10 @@ pub(crate) fn build_router(state: AppState) -> Router {
         .route("/v1/models", get(models::list_models))
         .route("/v1/jobs", get(jobs::list_jobs).post(jobs::submit_job))
         .route("/v1/jobs/:id", get(jobs::get_job).delete(jobs::cancel_job))
+        .route(
+            "/v1/scheduler/preview",
+            get(scheduler::preview_next_assignment_handler),
+        )
         .route("/v1/workers", get(workers::list_workers))
         .route("/v1/workers/register", post(workers::register_worker))
         .route("/v1/workers/:id/heartbeat", post(workers::heartbeat_worker))
