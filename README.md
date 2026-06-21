@@ -47,10 +47,10 @@ those model servers.
 
 ---
 
-## Bluewater Direction
+## Roadmap Direction
 
-Bluewater is the effort to make Fairlead a general-purpose local/edge compute
-router rather than a Rhizome-specific proxy.
+Fairlead is intended to become a general-purpose local/edge compute router rather
+than a Rhizome-specific proxy.
 
 Implemented generalization work includes:
 
@@ -73,8 +73,8 @@ Future phases add durable priority queues, async jobs, worker registration,
 backend pools, `/v1/models`, adapter boundaries, queue wait-time metrics, and
 cloud fallback.
 
-See [`docs/bluewater_generalization.md`](docs/bluewater_generalization.md) for
-the implementation plan and acceptance criteria.
+See [`docs/roadmap.md`](docs/roadmap.md) for the implementation plan and
+acceptance criteria.
 
 ---
 
@@ -92,7 +92,7 @@ Fairlead
     └── vLLM on spark-b
 ```
 
-Intended Bluewater topology:
+Intended future topology:
 
 ```
 Applications / agents
@@ -151,9 +151,9 @@ BACKENDS_JSON='[
 ]' PORT=7000 cargo run
 ```
 
-`BACKENDS` remains the simplest local setup path. `BACKENDS_JSON` is the
-Bluewater configuration path for stable backend IDs, node identity, backend
-pools, and workload support. By default, health probes append `models` to the
+`BACKENDS` remains the simplest local setup path. `BACKENDS_JSON` is the richer
+configuration path for stable backend IDs, node identity, backend pools, and
+workload support. By default, health probes append `models` to the
 backend API base URL, so `http://spark-a:8000/v1` is probed at
 `http://spark-a:8000/v1/models`. Backends that expose health elsewhere can set
 `health_path`, for example `"/health"`.
@@ -220,13 +220,13 @@ curl http://localhost:7000/v1/chat/completions \
   -d '{"model":"local-model","messages":[{"role":"user","content":"hello"}]}'
 ```
 
-## Bluewater Demo
+## Routing Demo
 
 Run the GPU-free local demo to see locality, fallback, same-request retry,
 recovery, metrics, and structured traces:
 
 ```bash
-./demo/run_bluewater_demo.sh
+./demo/run_routing_demo.sh
 ```
 
 The demo starts two mock OpenAI-compatible backends named `spark-a` and
@@ -275,15 +275,15 @@ what the model result means.
   vLLM/Fairlead responsibilities, and the spark-a/spark-b routing example.
 - [`docs/code_walkthrough.md`](docs/code_walkthrough.md) — Rust code walkthrough
   from process startup to proxied response.
-- [`docs/bluewater_generalization.md`](docs/bluewater_generalization.md) —
-  generalization plan, feature epics, and acceptance criteria.
+- [`docs/roadmap.md`](docs/roadmap.md) — generalization plan, feature epics, and
+  acceptance criteria.
 - [`docs/dgx_spark_deployment.md`](docs/dgx_spark_deployment.md) — manual
   deployment notes for two DGX Spark nodes connected over InfiniBand.
 - [`docs/fixture_examples.md`](docs/fixture_examples.md) — conventions for
   sanitized test fixtures and ignored local deployment config.
 - [`docs/job_scheduler_and_temporal.md`](docs/job_scheduler_and_temporal.md) —
   Fairlead's async compute scheduler boundary and why Temporal is deferred.
-- [`demo/README.md`](demo/README.md) — GPU-free Bluewater routing demo.
+- [`demo/README.md`](demo/README.md) — GPU-free routing demo.
 - [`docs/deferred_tests.md`](docs/deferred_tests.md) — known test gaps.
 
 ---

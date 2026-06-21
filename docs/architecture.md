@@ -30,9 +30,11 @@ and sessions. It does not know about gardens.
 weather → triage → LLM → tools → loop. It knows about plants, projects, tasks,
 incidents. It does not know which GPU served its last LLM call.
 
-**Fairlead** is a compute infrastructure layer. It receives OpenAI-compatible
-requests and async job submissions. It knows about nodes, VRAM, circuit states,
-and job queues. It does not know what a garden is.
+**Fairlead** is a compute infrastructure layer. Today it receives
+OpenAI-compatible synchronous requests. Its planned async surface will also
+receive job submissions. It knows about nodes, reported VRAM/load, circuit
+states, priority admission, and future job queues. It does not know what a
+garden is.
 
 **vLLM** serves the model. It knows about GPU memory, batching, and
 PagedAttention. It knows nothing above itself.
@@ -77,9 +79,9 @@ client or agent
 ### GPU resource management
 
 Fairlead does not manage GPU memory at the CUDA allocator level. vLLM and other
-GPU workers manage their own memory internally. Fairlead's future role is
-admission control: decide where work is allowed to go based on reported capacity,
-health, priority, and current load.
+GPU workers manage their own memory internally. Fairlead's role is admission
+control: decide where work is allowed to go based on reported capacity, health,
+priority, and current load.
 
 There are three separate layers:
 
@@ -89,9 +91,9 @@ There are three separate layers:
 | Process placement | k3s / Docker / systemd | Start, stop, restart, and place containers |
 | Request admission | Fairlead | Pick backend, skip unhealthy nodes, avoid oversubscribed resources |
 
-The planned VRAM accounting model is cooperative. GPU consumers register their
-resource use with Fairlead, and Fairlead uses that control-plane view to avoid
-sending new work to nodes without enough reported headroom.
+The current VRAM/load accounting model is cooperative. GPU consumers report
+their resource use to Fairlead, and Fairlead uses that control-plane view to
+avoid sending new work to nodes without enough reported headroom.
 
 Example:
 
@@ -139,7 +141,7 @@ flowchart LR
     vllm_a --> gpu_a["spark-a GPU"]
     vllm_b --> gpu_b["spark-b GPU"]
 
-    fairlead -. planned .-> registry["Resource registry health + VRAM + load + locality"]
+    fairlead --> registry["Resource registry health + VRAM + load + locality"]
     registry -. informs .-> fairlead
 ```
 
@@ -150,8 +152,8 @@ Rhizome request starts on spark-a
   -> prefer vLLM on spark-a, because same-node traffic should have lower latency
   -> if spark-a vLLM is unhealthy, overloaded, or lacks reported GPU headroom,
      route to spark-b vLLM
-  -> if both local GPU backends are unavailable or full, either queue by priority
-     or fall back to a cloud provider, depending on policy
+  -> if both local GPU backends are unavailable or full, return 503 today
+     (future phases may queue or use cloud fallback)
 ```
 
 The same applies in reverse for a Rhizome request that starts on spark-b:
@@ -160,11 +162,12 @@ The same applies in reverse for a Rhizome request that starts on spark-b:
 Rhizome request starts on spark-b
   -> prefer vLLM on spark-b
   -> if spark-b is unavailable or full, route to spark-a
-  -> if both are unavailable or full, queue or cloud fallback
+  -> if both are unavailable or full, return 503 today
+     (future phases may queue or use cloud fallback)
 ```
 
-To make this work, Fairlead needs more metadata than the current Phase 4 code
-has:
+To make this work, Fairlead uses metadata that was added across the generalized
+proxy and Trim work:
 
 - **Backend node identity:** each backend must know whether it lives on `spark-a`,
   `spark-b`, or another node.
@@ -174,8 +177,8 @@ has:
   reserved VRAM, current load, or an equivalent schedulable signal.
 - **Workload metadata:** chat completions, embeddings, vision jobs, and batch
   jobs may have different resource estimates and priority rules.
-- **Queue policy:** realtime inference may fail fast or wait briefly; background
-  jobs can queue longer and yield to realtime work.
+- **Queue policy:** current synchronous requests fail fast by priority-admission
+  limit; future background jobs can queue longer and yield to realtime work.
 
 With those inputs, the router can make a decision like:
 
@@ -187,7 +190,7 @@ prefer backend on request origin node
 then prefer existing session affinity
 then prefer lower load / higher free capacity
 if none eligible:
-  queue, return 503, or fall back to cloud according to workload policy
+  return 503 now; future phases may queue or fall back to cloud by workload policy
 ```
 
 Current Fairlead implements locality-aware routing and an opt-in
@@ -197,8 +200,8 @@ resource-aware slice. Backends can carry `node_id` metadata, requests can carry
 backends without a fresh report that satisfies the workload's coarse VRAM
 estimate, applies locality and affinity precedence, then ranks remaining
 eligible candidates by lower reported load, higher available VRAM, and
-configured order. It does not yet implement backend-pool selection, queueing, or
-cloud fallback.
+configured order. It does not yet implement backend-pool selection, durable
+queueing, or cloud fallback.
 
 ---
 
@@ -211,7 +214,12 @@ Two distinct surfaces.
 ```
 POST /v1/chat/completions   — receive, select backend, proxy, stream back
 POST /v1/embeddings         — same pattern for embedding requests
-GET  /v1/models             — list available backends
+```
+
+Planned synchronous surface:
+
+```text
+GET /v1/models              — list configured backend/model metadata
 ```
 
 Every inference request goes through a decision pipeline:
@@ -224,7 +232,7 @@ request arrives
   → check session affinity (prefer same node for KV cache)
   → proxy to selected backend, stream response back
   → if backend fails: try next in fallback chain
-  → if all local fail: try cloud providers
+  → if all eligible backends fail: return 502/503
 ```
 
 ### Surface 2: Async job dispatch
@@ -259,7 +267,7 @@ job submitted
 
 ---
 
-## The priority queue model
+## Priority Admission Now, Priority Queues Later
 
 The core scheduling guarantee:
 
@@ -269,8 +277,9 @@ The core scheduling guarantee:
 | `batch` | Vision jobs, async embeddings | User submitted and moved on. Schedule when no realtime demand. |
 | `background` | Index builds, clustering, KB ingestion | No user waiting. Only run when the GPU has nothing more important to do. |
 
-A background index rebuild that started at midnight will not slow down a user's
-chat response at 9am. This is enforced structurally, not by policy.
+The long-term goal is that a background index rebuild that started at midnight
+will not slow down a user's chat response at 9am. That will be enforced
+structurally by the future scheduler, not by application policy.
 
 Current Fairlead parses `X-Fairlead-Priority` on synchronous requests, defaults
 missing priority to `realtime`, rejects unknown values with `400`, enforces
@@ -354,7 +363,7 @@ This forces a clear architecture split.
 ```rust
 async fn handle_chat_completions(/* ... */) -> Response {
     let backend = router
-        .select_backend_excluding(&attempted)
+        .select_backend_excluding_resource(&attempted, &resource_state)
         .await;                                    // async: checks circuit state
     let response = client.post(&backend.url)
         .send().await?;                            // async: network I/O
@@ -398,10 +407,10 @@ you'd accidentally skip in a string-based approach.
 The same applies to job status, backend health, and priority levels. Everything
 with a finite set of states becomes an enum. Exhaustiveness is enforced.
 
-### 4. Channels replace shared queues
+### 4. Future queues use channels instead of shared queue locks
 
-The idiomatic Rust approach to the priority queue is Tokio channels — one per
-priority level — rather than a shared data structure with a lock:
+The future async job scheduler should use Tokio channels — one per priority
+level — rather than a shared queue data structure with a lock:
 
 ```rust
 let (realtime_tx, mut realtime_rx) = mpsc::channel::<Job>(256);

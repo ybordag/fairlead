@@ -2,23 +2,24 @@
 
 ## What this project is
 
-Fairlead is a priority-aware compute task router written in Rust. It routes LLM
-inference requests and async compute jobs across local GPU nodes and cloud providers,
-manages circuit breaking and session failover, and tracks VRAM consumption across
-all GPU consumers on the cluster.
+Fairlead is a priority-aware compute task router written in Rust. It currently
+routes synchronous OpenAI-compatible inference requests across local GPU nodes,
+manages circuit breaking and session failover, and tracks cooperative VRAM/load
+reports from model servers and other GPU consumers.
 
-It exposes an OpenAI-compatible inference API and a generic async job API. The
-inference path is synchronous (request → response). The job path is async
-(submit → job_id → callback on completion).
+It exposes an OpenAI-compatible inference API. A generic async job API is planned
+for a later phase. The inference path is synchronous (request → response). The
+future job path is async (submit → job_id → callback on completion).
 
 See `design.md` for the full architecture.
 
 ## Related repos
 
 - **Rhizome** (Python) — the agent. Points its model client at Fairlead `/v1`.
-  Submits async compute jobs (vision, embeddings, indexing) to Fairlead `/v1/jobs`.
+  Will submit async compute jobs to Fairlead once the Phase 6B job API exists.
 - **Cambium** (Go) — the API gateway. Calls Rhizome; Rhizome calls Fairlead.
-- **Fairlead** (this repo, Rust) — routes to vLLM on spark-a/spark-b or cloud fallback.
+- **Fairlead** (this repo, Rust) — routes to vLLM on spark-a/spark-b; cloud
+  fallback is a future phase.
 
 ## Tech stack
 
@@ -124,7 +125,7 @@ Planned for Phase 6A:
 GET  /v1/models              — list available backends/models
 ```
 
-### Async jobs
+### Planned async jobs
 
 ```
 POST   /v1/jobs              — submit a job, returns job_id immediately
@@ -142,7 +143,7 @@ Job request body:
 }
 ```
 
-### Worker registration
+### Planned worker registration
 
 ```
 POST   /v1/workers/register     — worker announces: job types, VRAM cost, endpoint
@@ -157,7 +158,7 @@ POST   /v1/resources/report     — consumer reports node/backend VRAM and load
 GET    /v1/resources            — current resource state per node/backend
 ```
 
-## Priority queue model
+## Priority model
 
 Every request — inference or job — carries one of three priority levels:
 
@@ -210,24 +211,35 @@ Priority: `background`. CPU or GPU (cuML) depending on available worker.
 
 ## Environment variables
 
+Current implementation:
+
 ```
 PORT                         — listen port (default: 7000)
 BACKENDS                     — comma-separated backend URLs in priority order
                                e.g. http://node-a:8000/v1,http://node-b:8000/v1
-CLOUD_PROVIDERS              — JSON array of cloud provider configs (url, api_key_env)
+BACKENDS_JSON                — structured backend config with id, url, node_id,
+                               pool, workloads, and health_path
+LOG_LEVEL                    — tracing level: error, warn, info, debug, trace (default: info)
+LOG_FORMAT                   — "json" for structured JSON logs
 CIRCUIT_FAILURE_THRESHOLD    — consecutive failures to open circuit (default: 3)
 CIRCUIT_COOLDOWN_SECS        — seconds before half-open probe (default: 30)
+HEALTH_PROBE_INTERVAL_SECS   — seconds between background health probes (default: 10)
 RESOURCE_REPORT_TTL_SECS     — seconds before a resource report is stale (default: 30)
 RESOURCE_AWARE_ROUTING       — enable resource-aware eligibility (default: false)
 CHAT_COMPLETIONS_REQUIRED_VRAM_MB — coarse chat request estimate (default: 1024)
 EMBEDDINGS_REQUIRED_VRAM_MB  — coarse embedding request estimate (default: 512)
-SESSION_AFFINITY             — "thread" | "user" (default: "thread")
 PRIORITY_REALTIME_LIMIT      — max concurrent realtime requests (default: 8)
-PRIORITY_BATCH_LIMIT         — max concurrent batch jobs (default: 4)
-PRIORITY_BACKGROUND_LIMIT    — max concurrent background jobs (default: 2)
-JOB_CALLBACK_TIMEOUT_SECS   — time to attempt callback delivery (default: 30)
-WORKER_HEARTBEAT_SECS        — interval workers must heartbeat or be deregistered (default: 30)
-LOG_LEVEL                    — tracing level: error, warn, info, debug, trace (default: info)
+PRIORITY_BATCH_LIMIT         — max concurrent batch-priority sync requests (default: 4)
+PRIORITY_BACKGROUND_LIMIT    — max concurrent background-priority sync requests (default: 2)
+```
+
+Planned later phases may add:
+
+```text
+CLOUD_PROVIDERS              — JSON array of cloud provider configs
+SESSION_AFFINITY             — configurable affinity key policy
+JOB_CALLBACK_TIMEOUT_SECS    — time to attempt callback delivery
+WORKER_HEARTBEAT_SECS        — interval before a worker is considered stale
 ```
 
 ## Build phases
@@ -261,7 +273,7 @@ LOG_LEVEL                    — tracing level: error, warn, info, debug, trace 
 - Multiple backends in priority order; try next on circuit-open or retryable error
 - `SessionAffinity`: `thread_id → preferred_backend` (`Arc<RwLock<HashMap>>`)
 - Soft affinity: prefer known backend, fall back if unavailable or overloaded
-- Cloud provider support (OpenAI, Gemini, Anthropic — same OpenAI-compatible interface)
+- Same-request retry for retryable upstream failures before bytes are streamed
 - Test: primary down → secondary; same thread_id routes to same node while available
 
 ### Phase 5 — VRAM accounting and priority admission
@@ -347,22 +359,23 @@ multi-step workflows with long waits, fanout/fanin, or compensation logic.
 - **Circuit breaker state is the routing source of truth.** Always check circuit
   state before selecting a backend. Never route to an open circuit.
 
-- **Priority is always respected.** The scheduler must never dispatch a `background`
-  job while a `realtime` request is waiting. This is the central guarantee Fairlead
-  makes to its callers.
+- **Priority is always respected.** Current synchronous requests use separate
+  in-flight caps per priority. The future queued scheduler must never dispatch a
+  `background` job while a `realtime` request is waiting.
 
 - **VRAM accounting is cooperative.** Fairlead cannot read GPU memory directly.
-  Fail safe: treat unregistered consumers as using zero VRAM (invisible to
-  accounting). This can cause OOM — document it clearly and encourage registration.
-  Never assume VRAM is available if it has not been reported.
+  When resource-aware routing is enabled, backends without fresh reports are
+  ineligible. Unreported external consumers are still invisible to accounting,
+  so document that limitation and encourage registration.
 
 - **Fairlead is application-agnostic.** Job payloads are opaque to Fairlead's
   routing logic. It does not know what `vision_analysis` means, what a plant is,
   or what a `thread_id` represents. It routes jobs to workers. Keep it that way.
 
-- **Jobs do not store results.** Fairlead holds job status (`queued`, `running`,
-  `complete`, `failed`) and fires the callback. It does not persist results —
-  the caller's callback handler is responsible for storing them.
+- **Future jobs do not store domain results.** Fairlead should hold job status
+  (`queued`, `running`, `complete`, `failed`) and fire the callback. It should
+  not persist application results; the caller's callback handler is responsible
+  for storing them.
 
 - **Streaming responses must be proxied without buffering.** Use reqwest's
   streaming body and Axum's `StreamBody`. Collecting the full response body

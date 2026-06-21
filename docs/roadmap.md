@@ -1,8 +1,8 @@
-# Bluewater Generalization Plan
+# Fairlead Roadmap
 
 ## Purpose
 
-Bluewater is the effort to make Fairlead a general compute router, not a
+This document tracks the effort to make Fairlead a general compute router, not a
 Rhizome-specific inference proxy.
 
 The intended shape is:
@@ -20,13 +20,13 @@ request or job
 OpenAI-compatible chat and embeddings are the first implemented workload types.
 They should remain first-class, but they should not define the whole system.
 
-## Completed Bluewater Scope Boundary
+## Completed Generalized Proxy Scope Boundary
 
-Bluewater finished the generalized synchronous inference proxy. It made today's
-request path resilient, explainable, and demonstrable without starting the future
-scheduler or async job system.
+The completed generalized proxy work made today's request path resilient,
+explainable, and demonstrable without starting the future scheduler or async job
+system.
 
-Bluewater includes:
+Completed generalized proxy scope includes:
 
 - OpenAI-compatible synchronous proxying for chat completions and embeddings.
 - Node-aware backend metadata.
@@ -38,7 +38,7 @@ Bluewater includes:
 - A repeatable small-cluster or mock demo.
 - Documentation for local/edge deployment and sanitized fixtures.
 
-Bluewater does not include:
+The completed generalized proxy scope does not include:
 
 - Resource registry or VRAM-aware scheduling.
 - Resource-aware backend selection.
@@ -47,8 +47,8 @@ Bluewater does not include:
 - Cloud-provider fallback and provider credential policy.
 - Full adapter implementations for non-OpenAI-compatible protocols.
 
-Those deferred items belong to later branches/phases so this branch stays a
-coherent synchronous-router milestone.
+Those deferred items belong to later branches/phases so each branch stays a
+coherent milestone.
 
 ## Trim Scope Boundary
 
@@ -119,8 +119,8 @@ It does not yet provide:
 
 These should be achievable without changing the core architecture.
 
-- [x] Update `README.md` so it reflects the current runnable Phase 4 service and
-  the Bluewater generalization direction.
+- [x] Update `README.md` so it reflects the current runnable service and
+  generalization direction.
 - [ ] Add a short glossary for `backend`, `provider`, `worker`, `workload`,
   `route`, and `affinity` so future docs use the terms consistently.
 - [ ] Document the current supported workload shape: HTTP request in, selected
@@ -176,8 +176,8 @@ system.
 
 ## Implementation Epics
 
-These are the first implementation-ready Bluewater epics. They turn the broad
-plan above into features with concrete acceptance criteria.
+These are the first implementation-ready epics. They turn the broad plan above
+into features with concrete acceptance criteria.
 
 ### 1. Node-Aware Backend Model
 
@@ -318,10 +318,11 @@ Acceptance criteria:
 - The same policy can later be pointed at real vLLM servers on spark-a and
   spark-b.
 
-## Deferred Future Epics
+## Detailed Epic Notes
 
-These epics are intentionally out of scope for Bluewater. They are listed here
-to preserve the plan without pulling future-branch work into the current branch.
+These notes preserve the implementation details behind completed and future
+phases. Completed Trim items remain checked here; unchecked items belong to the
+future phase named in the milestone proposal.
 
 ### Resource Registry v1
 
@@ -600,7 +601,7 @@ Docker, or the provider accounts themselves.
 
 ## Milestone Proposal
 
-### Bluewater 1: Generalized Synchronous Proxy
+### Phase 4/Completed: Generalized Synchronous Proxy
 
 - [x] Complete the easy tasks that support the synchronous proxy.
 - [x] Introduce `WorkloadKind`.
@@ -615,7 +616,7 @@ Docker, or the provider accounts themselves.
   Cleanup**.
 - [ ] Add `/v1/models`. Deferred to **Phase 6A: Synchronous Surface Cleanup**.
 
-### Bluewater 2: Resource-Aware Routing
+### Phase 5/Trim: Resource-Aware Routing and Priority Admission
 
 - [x] Add resource registry.
 - [x] Add resource-aware backend eligibility.
@@ -642,7 +643,7 @@ It should not introduce queues, workers, or job state.
 - Keep cloud-provider fallback and provider credentials deferred unless a clear
   demo need appears.
 
-### Bluewater 3: Async Compute Router
+### Phase 6B: Async Compute Router
 
 - Add job API: submit, status, and cancellation.
 - Add durable priority queues.
@@ -658,7 +659,7 @@ It should not introduce queues, workers, or job state.
 - Document Temporal as deferred unless Rhizome needs durable multi-step workflow
   orchestration beyond compute dispatch.
 
-### Bluewater 4: Advanced Workloads
+### Phase 7: Advanced Workloads
 
 - Add adapter boundaries for non-OpenAI-compatible synchronous and async
   endpoints, such as `/v1/rerank`, image generation, and vision analysis.
