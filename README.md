@@ -205,6 +205,7 @@ Phase 7 adds explicit pool and workload placement policy:
 
 ```bash
 POOLS_JSON='["local-llm", "peer-llm", {"id": "vision"}]' \
+STRICT_WORKLOAD_POOLS=true \
 STRICT_WORKER_POOLS=true \
 WORKLOAD_POOLS_JSON='{
   "chat_completions": ["local-llm", "peer-llm"],
@@ -220,10 +221,14 @@ metadata and always includes the backward-compatible `default` pool. When
 all configured pools. Phase 7B applies this policy to synchronous chat and
 embedding backend eligibility and treats each workload's pool list as an ordered
 fallback chain. Phase 7C applies the same vocabulary to async worker
-registration, scheduler preview, and worker-pull claims. If a workload is
-omitted from an explicit partial policy, it remains permissive for now. Phase 7D
-will decide whether explicit workload pool policy should become strict before
-the pool model is considered complete.
+registration, scheduler preview, and worker-pull claims.
+
+Explicit `WORKLOAD_POOLS_JSON` remains a partial override by default: if a
+workload is omitted, that workload is still eligible for all configured pools.
+Set `STRICT_WORKLOAD_POOLS=true` to require explicit pool policy for every known
+workload at startup. Strict workload policy is useful for production-like demos
+and deployments where an omitted workload should fail fast instead of silently
+routing through every pool.
 
 Worker registration is permissive by default: workers may register any non-empty
 pool string. Set `STRICT_WORKER_POOLS=true` to reject worker registration unless

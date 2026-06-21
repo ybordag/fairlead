@@ -245,15 +245,16 @@ pool references, and workload policies that reference undeclared pools.
 Phase 7B applies this validated policy to synchronous backend selection. A
 backend is eligible for chat or embeddings only when it supports the requested
 workload and its pool is allowed by that workload's policy. If an explicit
-policy omits a workload, that workload remains permissive for now. If every
+policy omits a workload, that workload remains permissive by default. If every
 backend is outside the workload's allowed pools, Fairlead returns `503` without
 contacting an upstream backend.
 
-Fairlead intentionally keeps omitted workloads permissive through Phase 7C while
-the same pool vocabulary is applied to async workers. Phase 7D will review the
-shared demos and decide whether explicit `WORKLOAD_POOLS_JSON` should become
-strict, meaning configured policy would need to mention every supported workload
-instead of acting as a partial override.
+Phase 7D adds optional strict workload pool validation. With the default
+permissive setting, explicit `WORKLOAD_POOLS_JSON` can be a partial override.
+With `STRICT_WORKLOAD_POOLS=true`, Fairlead fails startup unless
+`WORKLOAD_POOLS_JSON` is present and mentions every known workload. This makes
+production-like deployments fail fast when a workload was accidentally omitted,
+while local development can keep using incremental pool policy.
 
 For synchronous routing, the workload's pool list is ordered. Fairlead tries the
 first pool's eligible backends, then falls back to the next pool only when no

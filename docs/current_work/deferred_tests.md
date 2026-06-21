@@ -142,7 +142,9 @@ OpenAI-compatible backends:
 - make the first-pool backend return a retryable 5xx and verify same-request
   retry moves to the next pool only after the first pool is exhausted
 - verify a workload omitted from explicit `WORKLOAD_POOLS_JSON` remains
-  permissive until the Phase 7D strict-policy decision
+  permissive when `STRICT_WORKLOAD_POOLS` is unset or false
+- verify startup fails when `STRICT_WORKLOAD_POOLS=true` and the explicit
+  workload policy omits a known workload
 - verify `/metrics` includes `fairlead_pool_selections_total`,
   `fairlead_pool_candidate_backends_total`, and
   `fairlead_pool_resource_ineligible_backends_total` with expected labels
@@ -187,7 +189,9 @@ workers:
 - verify a worker in an allowed pool can claim the same queued job after a
   disallowed-pool worker receives no work
 - verify a workload omitted from explicit `WORKLOAD_POOLS_JSON` remains
-  permissive until the Phase 7D strict-policy decision
+  permissive when `STRICT_WORKLOAD_POOLS` is unset or false
+- verify startup fails when `STRICT_WORKLOAD_POOLS=true` and the explicit
+  workload policy omits a known async workload
 - verify `/metrics` includes `fairlead_async_pool_selections_total`,
   `fairlead_async_pool_candidate_workers_total`, and
   `fairlead_async_pool_no_compatible_jobs_total` with expected pool, worker,

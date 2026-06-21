@@ -75,6 +75,7 @@ async fn main() -> anyhow::Result<()> {
     info!(
         pool_count = cfg.pools.len(),
         workload_policy_count = cfg.workload_pools.len(),
+        strict_workload_pools = cfg.strict_workload_pools,
         strict_worker_pools = cfg.strict_worker_pools,
         pools = ?pool_ids,
         "loaded pool policy"

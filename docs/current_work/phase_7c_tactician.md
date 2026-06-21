@@ -31,9 +31,9 @@ Immediate coverage includes:
 - scheduler preview selects a worker from an allowed pool
 - worker claims skip higher-priority jobs outside the worker's pool and claim
   the next eligible job
-- worker claims keep omitted workload pool policy permissive for async job
-  types, matching the Phase 7B synchronous behavior until the Phase 7D
-  strictness decision
+- worker claims keep omitted workload pool policy permissive by default,
+  matching the Phase 7B synchronous behavior; Navigator adds optional
+  `STRICT_WORKLOAD_POOLS` for startup-time strictness
 - worker claims return `204 No Content` and release capacity when no queued job
   is eligible for the worker's pool
 - selected worker claims emit async pool selection and candidate-worker metrics,
@@ -46,8 +46,7 @@ Immediate coverage includes:
 ## Deferrals
 
 - Worker registration pool validation against configured `POOLS_JSON` is
-  deferred to Phase 7D, where shared sync/async pool demos can clarify whether
-  worker pools should be centrally enumerated or remain permissive metadata.
+  resolved in Phase 7D through optional `STRICT_WORKER_POOLS`.
 - Local process-level and DGX Spark async pool placement e2e tests are deferred
   to the integration harness tracked in
   [`deferred_tests.md`](deferred_tests.md).

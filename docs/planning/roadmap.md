@@ -129,7 +129,8 @@ It does not yet provide:
 - Shared sync/async pool demos and the final partial-vs-strict pool policy
   decision. Synchronous backend pool configuration and ordered fallback chains
   are implemented in Phase 7B; async worker pool placement and per-pool metrics
-  are implemented in Phase 7C.
+  are implemented in Phase 7C; optional strict worker/workload pool validation
+  is implemented in Phase 7D.
 - CPU resource accounting and richer resource dimensions beyond coarse VRAM/load.
 - Durable starvation/fairness policy beyond current priority queue ordering.
 - Worker deregistration, graceful shutdown, or completed-job pruning.
@@ -833,8 +834,10 @@ async workers.
 - [x] Add optional strict worker pool validation. Default registration remains
   permissive; `STRICT_WORKER_POOLS=true` rejects worker pools not present in
   configured or derived `POOLS_JSON`.
-- Decide whether explicit `WORKLOAD_POOLS_JSON` should stay a partial override
-  or become strict after both sync and async placement paths are implemented.
+- [x] Add optional strict workload pool validation. Default explicit
+  `WORKLOAD_POOLS_JSON` remains a partial override;
+  `STRICT_WORKLOAD_POOLS=true` requires explicit policy for every known workload
+  at startup.
 - Update deferred e2e plans for future cloud overflow pools.
 
 ### Phase 8: Scheduler Hardening

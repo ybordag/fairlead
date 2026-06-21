@@ -23,6 +23,25 @@ Fairlead now supports optional strict worker pool validation.
 This keeps Phase 7D compatible with existing worker registration while making
 the central control-plane behavior available for shared demos.
 
+### Workload Pool Policy Strictness
+
+Fairlead now supports optional strict workload pool validation.
+
+- Default behavior remains a partial override: explicit `WORKLOAD_POOLS_JSON`
+  can mention only the workloads that need placement constraints, while omitted
+  workloads remain eligible for all configured pools.
+- `STRICT_WORKLOAD_POOLS=true` requires `WORKLOAD_POOLS_JSON` to be present and
+  to include every known workload.
+- Strict mode is the better fit for production-like demos and deployments
+  because accidental omissions fail at startup instead of silently widening
+  placement.
+- Partial mode remains useful for local development and incremental workload
+  rollout.
+
+This mirrors strict worker pool validation: permissive defaults keep the simple
+setup easy, while strict flags make the central control-plane policy explicit
+when Fairlead is acting as shared infrastructure.
+
 ## Pooling Test Audit
 
 Immediate test coverage now checks the pooling cases that can be exercised
@@ -30,6 +49,13 @@ without a process harness:
 
 - Config parsing keeps strict worker pool validation off by default.
 - `STRICT_WORKER_POOLS=true` parses case-insensitively.
+- Config parsing keeps strict workload pool validation off by default.
+- `STRICT_WORKLOAD_POOLS=true` parses case-insensitively.
+- Strict workload pool validation rejects absent `WORKLOAD_POOLS_JSON`.
+- Strict workload pool validation rejects partial `WORKLOAD_POOLS_JSON` and
+  reports missing workloads.
+- Strict workload pool validation accepts complete policy for every known
+  workload.
 - Strict mode does not change the default derived pool set when no `POOLS_JSON`
   is provided.
 - Worker registration remains permissive by default for ad hoc pool names.
