@@ -7,9 +7,8 @@ health, circuit state, and session affinity.
 
 The name comes from sailing: a fairlead is a fitting that guides lines in exactly the right direction without friction or fouling.
 
-**Status:** Phase 6D is complete on the `halyard` branch and pending final
-review/PR merge. Fairlead currently runs as an Axum HTTP service with `/health`,
-`/metrics`, `/v1/models`,
+**Status:** Phase 6E is in progress on the `shackle` branch. Fairlead currently
+runs as an Axum HTTP service with `/health`, `/metrics`, `/v1/models`,
 `/v1/resources`, `/v1/resources/report`, `/v1/jobs`, `/v1/jobs/{id}`,
 `/v1/workers`, `/v1/workers/{id}/claim`,
 `/v1/workers/{worker_id}/jobs/{job_id}/renew`,
@@ -183,6 +182,20 @@ workload support. By default, health probes append `models` to the
 backend API base URL, so `http://spark-a:8000/v1` is probed at
 `http://spark-a:8000/v1/models`. Backends that expose health elsewhere can set
 `health_path`, for example `"/health"`.
+
+Async job state is in-memory by default. During Phase 6E, SQLite can be enabled
+explicitly for durable job state across ordinary Fairlead restarts:
+
+```bash
+JOB_STORE=sqlite \
+JOB_DB_PATH=fairlead_jobs.sqlite3 \
+cargo run
+```
+
+With `JOB_STORE=sqlite`, Fairlead persists submitted jobs, queue order, claim and
+lease state, attempts, cancellation, completion, failure, payloads, callback
+metadata, and result/error state. On startup, already-expired running leases are
+requeued when attempts remain and failed when attempts are exhausted.
 
 Health:
 

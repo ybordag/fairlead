@@ -55,10 +55,12 @@ cargo watch -x run
 
 ## Current status
 
-**Phase 6C complete** (cleat → main). **Phase 6D is complete on halyard** and
-pending final review/PR merge. Halyard adds worker completion/failure
-reporting, retries, worker capacity accounting, duration metrics, and
-per-attempt timeout state before durable state and callbacks.
+**Phase 6D complete** (halyard → main). **Phase 6E is in progress on shackle**:
+durable job state and restart recovery. Shackle keeps `JOB_STORE=memory` as the
+default and adds opt-in `JOB_STORE=sqlite` through `JOB_DB_PATH`. SQLite-backed
+registries now persist job records, queue order, claim/lease state, attempts,
+cancellation, completion, failure, callback metadata, and result/error state.
+Expired running leases are resolved during SQLite registry startup.
 
 | Phase | Branch | Status |
 |---|---|---|
@@ -70,8 +72,8 @@ per-attempt timeout state before durable state and callbacks.
 | 6A — Synchronous surface cleanup | clew → main | ✅ complete |
 | 6B — Async API + scheduler preview | tackle → main | ✅ complete |
 | 6C — Worker-pull claims + leases | cleat → main | ✅ complete |
-| 6D — Worker execution + retries | halyard | complete, pending PR |
-| 6E — Durable job state + recovery | — | pending |
+| 6D — Worker execution + retries | halyard → main | ✅ complete |
+| 6E — Durable job state + recovery | shackle | in progress |
 | 6F — Callback delivery + finalization | — | pending |
 | 7A — Pool-aware routing + placement | — | pending |
 | 7 — Advanced compute + full metrics | — | pending |
@@ -92,6 +94,7 @@ src/
   priority.rs       — per-priority synchronous admission limiter
   resources.rs      — POST/GET resource reports for VRAM/load control-plane state
   scheduler.rs      — scheduler preview, worker-pull claims, lease renewal, completion/failure
+  storage.rs        — SQLite job-store schema, snapshot persistence, and recovery
   workers.rs        — worker registration, heartbeat, stale status, capacity accounting
   router/
     mod.rs          — module entry point
@@ -150,18 +153,21 @@ POST   /v1/workers/{worker_id}/jobs/{job_id}/complete — complete a held job
 POST   /v1/workers/{worker_id}/jobs/{job_id}/fail — fail or requeue a held job
 ```
 
-The Phase 6B slices store job records in memory and track explicit per-priority
-queued job IDs. The first Phase 6C slice lets fresh workers claim compatible
-queued jobs. Claimed jobs become `running`, attempts increment, and lease
-metadata is attached. Expired running leases are requeued when attempts remain
-and failed when attempts are exhausted. Workers holding a lease can renew it
-before expiry. Phase 6D adds result reporting: the lease holder can complete a
-job with a result payload or fail it. Retryable failures requeue while attempts
-remain; non-retryable or exhausted failures become terminal. Expired leases
-record `attempt timed out`, requeue while attempts remain, and fail when
-attempts are exhausted. Worker utilization and terminal job duration metrics are
-implemented. Worker deregistration, callback delivery, completed-job pruning,
-and SQLite-backed persistence are still planned.
+The Phase 6B slices store job records and track explicit per-priority queued job
+IDs. The first Phase 6C slice lets fresh workers claim compatible queued jobs.
+Claimed jobs become `running`, attempts increment, and lease metadata is
+attached. Expired running leases are requeued when attempts remain and failed
+when attempts are exhausted. Workers holding a lease can renew it before expiry.
+Phase 6D adds result reporting: the lease holder can complete a job with a
+result payload or fail it. Retryable failures requeue while attempts remain;
+non-retryable or exhausted failures become terminal. Expired leases record
+`attempt timed out`, requeue while attempts remain, and fail when attempts are
+exhausted. Worker utilization and terminal job duration metrics are
+implemented. Phase 6E adds opt-in SQLite persistence for job records, queue
+order, claim/lease state, attempts, callback metadata, and terminal state.
+Expired running leases loaded from SQLite are requeued when attempts remain and
+failed when attempts are exhausted. Worker deregistration, callback delivery,
+completed-job pruning, and process-level restart e2e tests are still planned.
 
 Job request body:
 ```json
@@ -384,7 +390,8 @@ WORKER_HEARTBEAT_SECS        — interval before a worker is considered stale
 - Scheduler policy based on richer lease availability, VRAM headroom, and load.
 - Completed-job pruning.
 - Persistence path: SQLite first for local durable state, Postgres later for
-  multiple Fairlead instances.
+  multiple Fairlead instances. SQLite is currently opt-in through
+  `JOB_STORE=sqlite`.
 - Callback delivery: on completion, POST to `callback_url` with result payload;
   retry on failure.
 - Callback success/failure metrics.

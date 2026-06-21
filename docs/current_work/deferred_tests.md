@@ -156,16 +156,33 @@ heavier concurrency/e2e harness.
 
 ### `phase_6e_job_persistence_and_recovery`
 
-When Phase 6E implements durable job state, add tests for:
+Phase 6E now has unit-level restart tests for queue recovery, priority/FIFO
+ordering, next ID recovery, running lease preservation, cancelled state,
+completed state, callback metadata, terminal result state, expired running lease
+startup recovery, SQLite bootstrap migration, and endpoint-level AppState
+recovery. It also covers lease renewal persistence, custom worker failure
+persistence, and claiming a recovered queued job through worker endpoints after
+an app rebuild. Remaining deferred tests:
 
-- queue persistence or recovery behavior after Fairlead restart
-- recovery of queued jobs in original priority/FIFO order
-- recovery or requeueing of running jobs with expired leases
-- preservation of attempts, timestamps, callback metadata, and terminal states
-- SQLite migration/bootstrap behavior
+- Process-level e2e restart test with an actual Fairlead process and DB file:
+  submit jobs, stop Fairlead, restart with the same `JOB_DB_PATH`, verify list,
+  get, worker claim, complete/fail, and metrics behavior.
+- Process-level expired-lease restart test: claim a job with a short lease,
+  stop Fairlead until the lease expires, restart, and verify requeue/failure
+  behavior through HTTP.
+- Storage write failure tests: read-only DB path, unwritable parent directory,
+  disk-full simulation if feasible, and SQLite busy/locked write behavior.
+- Corrupted or incompatible SQLite file behavior: invalid file contents,
+  malformed JSON columns, unknown enum values, negative numeric fields, and
+  future `user_version` handling.
+- Multi-process safety test if Fairlead ever supports more than one active
+  router against the same SQLite file. SQLite is currently scoped for a single
+  Fairlead process.
+- Thor/Loki e2e recovery with jobs submitted before and after Fairlead restart.
 
-**Why deferred:** These need a persistent job store and restart harness. Phase 6B
-is intentionally in-memory only.
+**Why deferred:** The remaining cases need a larger restart harness or real
+deployment environment. The current Shackle tests cover the storage-backed
+registry boundary directly.
 
 ### `phase_6f_callback_delivery`
 

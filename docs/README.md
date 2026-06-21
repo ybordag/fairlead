@@ -32,6 +32,8 @@ detail.
 
 ## Current Work
 
+- [`current_work/phase_6e_shackle.md`](current_work/phase_6e_shackle.md) —
+  active Phase 6E durable job state and recovery notes.
 - [`current_work/phase_6d_halyard.md`](current_work/phase_6d_halyard.md) —
   completed Phase 6D worker execution, retries, and utilization notes.
 - [`current_work/phase_6c_cleat.md`](current_work/phase_6c_cleat.md) — completed

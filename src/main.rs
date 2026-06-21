@@ -9,6 +9,7 @@ mod proxy;
 mod resources;
 mod router;
 mod scheduler;
+mod storage;
 mod workers;
 
 use axum::{
@@ -55,6 +56,12 @@ async fn main() -> anyhow::Result<()> {
     let cfg = config::Config::from_env()?;
 
     init_tracing(&cfg);
+    let jobs = match &cfg.job_store {
+        config::JobStoreConfig::Memory => jobs::JobRegistry::default(),
+        config::JobStoreConfig::Sqlite { path } => {
+            jobs::JobRegistry::with_store(storage::SqliteJobStore::open(path)?)?
+        }
+    };
 
     let client = reqwest::Client::new();
 
@@ -96,7 +103,7 @@ async fn main() -> anyhow::Result<()> {
             cfg.priority_batch_limit,
             cfg.priority_background_limit,
         ),
-        jobs: jobs::JobRegistry::default(),
+        jobs,
         workers: workers::WorkerRegistry::default(),
     };
     let app = build_router(state);

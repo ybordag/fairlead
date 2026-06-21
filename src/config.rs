@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 use std::env::VarError;
 
 pub const DEFAULT_BACKEND_POOL: &str = "default";
+pub const DEFAULT_JOB_DB_PATH: &str = "fairlead_jobs.sqlite3";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -23,6 +24,12 @@ pub struct WorkloadRoute {
 pub enum BackendPoolPolicy {
     Any,
     Named(&'static str),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum JobStoreConfig {
+    Memory,
+    Sqlite { path: String },
 }
 
 impl BackendPoolPolicy {
@@ -166,6 +173,8 @@ pub struct Config {
     pub priority_batch_limit: usize,
     /// Max in-flight background requests. Default: 2.
     pub priority_background_limit: usize,
+    /// Job state persistence backend. Default: memory.
+    pub job_store: JobStoreConfig,
 }
 
 impl Config {
@@ -238,7 +247,34 @@ impl Config {
                 .unwrap_or_else(|_| "2".to_string())
                 .parse()
                 .map_err(|e| anyhow!("invalid PRIORITY_BACKGROUND_LIMIT: {}", e))?,
+
+            job_store: parse_job_store(&get)?,
         })
+    }
+}
+
+fn parse_job_store(get: &impl Fn(&str) -> Result<String, VarError>) -> Result<JobStoreConfig> {
+    match get("JOB_STORE")
+        .unwrap_or_else(|_| "memory".to_string())
+        .trim()
+        .to_lowercase()
+        .as_str()
+    {
+        "memory" => Ok(JobStoreConfig::Memory),
+        "sqlite" => {
+            let path = get("JOB_DB_PATH").unwrap_or_else(|_| DEFAULT_JOB_DB_PATH.to_string());
+            let path = path.trim();
+            if path.is_empty() {
+                return Err(anyhow!("invalid JOB_DB_PATH: path cannot be empty"));
+            }
+            Ok(JobStoreConfig::Sqlite {
+                path: path.to_string(),
+            })
+        }
+        other => Err(anyhow!(
+            "invalid JOB_STORE: expected 'memory' or 'sqlite', got '{}'",
+            other
+        )),
     }
 }
 
@@ -420,6 +456,7 @@ mod tests {
         assert_eq!(cfg.priority_realtime_limit, 8);
         assert_eq!(cfg.priority_batch_limit, 4);
         assert_eq!(cfg.priority_background_limit, 2);
+        assert_eq!(cfg.job_store, JobStoreConfig::Memory);
     }
 
     #[test]
@@ -517,6 +554,58 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("invalid PRIORITY_REALTIME_LIMIT"));
+    }
+
+    #[test]
+    fn job_store_defaults_to_memory() {
+        let cfg = Config::from_lookup(env(&[])).unwrap();
+        assert_eq!(cfg.job_store, JobStoreConfig::Memory);
+    }
+
+    #[test]
+    fn job_store_parses_sqlite_with_default_path() {
+        let cfg = Config::from_lookup(env(&[("JOB_STORE", "sqlite")])).unwrap();
+        assert_eq!(
+            cfg.job_store,
+            JobStoreConfig::Sqlite {
+                path: DEFAULT_JOB_DB_PATH.into(),
+            }
+        );
+    }
+
+    #[test]
+    fn job_store_parses_sqlite_with_configured_path() {
+        let cfg = Config::from_lookup(env(&[
+            ("JOB_STORE", "SQLITE"),
+            ("JOB_DB_PATH", " /tmp/fairlead-test.db "),
+        ]))
+        .unwrap();
+        assert_eq!(
+            cfg.job_store,
+            JobStoreConfig::Sqlite {
+                path: "/tmp/fairlead-test.db".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn invalid_job_store_returns_err() {
+        let result = Config::from_lookup(env(&[("JOB_STORE", "postgres")]));
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("invalid JOB_STORE"));
+    }
+
+    #[test]
+    fn empty_job_db_path_returns_err() {
+        let result = Config::from_lookup(env(&[("JOB_STORE", "sqlite"), ("JOB_DB_PATH", " ")]));
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("invalid JOB_DB_PATH"));
     }
 
     #[test]
