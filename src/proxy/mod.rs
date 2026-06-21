@@ -432,16 +432,89 @@ mod tests {
     use super::*;
     use crate::config::{BackendConfig, WorkloadKind};
     use crate::{build_router, router::BackendState, router::SessionAffinity};
-    use axum::{http::StatusCode, routing::post, Router};
+    use axum::{
+        http::{Request, StatusCode},
+        routing::post,
+        Router,
+    };
     use serde_json::json;
     use std::{
+        io,
         sync::{
             atomic::{AtomicBool, AtomicUsize, Ordering},
-            Arc,
+            Arc, Mutex, OnceLock,
         },
         time::Duration,
     };
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tower::ServiceExt;
+    use tracing::Level;
+    use tracing_subscriber::fmt::MakeWriter;
+
+    #[derive(Clone)]
+    struct CapturedLogs {
+        bytes: Arc<Mutex<Vec<u8>>>,
+    }
+
+    struct CapturedLogWriter {
+        bytes: Arc<Mutex<Vec<u8>>>,
+    }
+
+    impl CapturedLogs {
+        fn new() -> Self {
+            Self {
+                bytes: Arc::new(Mutex::new(Vec::new())),
+            }
+        }
+
+        fn lines(&self) -> Vec<serde_json::Value> {
+            let bytes = self.bytes.lock().unwrap().clone();
+            String::from_utf8(bytes)
+                .unwrap()
+                .lines()
+                .map(|line| serde_json::from_str(line).unwrap())
+                .collect()
+        }
+    }
+
+    impl io::Write for CapturedLogWriter {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.bytes.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> MakeWriter<'a> for CapturedLogs {
+        type Writer = CapturedLogWriter;
+
+        fn make_writer(&'a self) -> Self::Writer {
+            CapturedLogWriter {
+                bytes: self.bytes.clone(),
+            }
+        }
+    }
+
+    static CAPTURED_LOGS: OnceLock<CapturedLogs> = OnceLock::new();
+
+    fn captured_logs() -> CapturedLogs {
+        CAPTURED_LOGS
+            .get_or_init(|| {
+                let captured = CapturedLogs::new();
+                let subscriber = tracing_subscriber::fmt()
+                    .json()
+                    .with_writer(captured.clone())
+                    .with_max_level(Level::INFO)
+                    .finish();
+                tracing::subscriber::set_global_default(subscriber).unwrap();
+                tracing::callsite::rebuild_interest_cache();
+                captured
+            })
+            .clone()
+    }
 
     async fn start_mock(app: Router) -> String {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -1295,6 +1368,63 @@ mod tests {
         assert!(metrics.contains(
             "fairlead_fallbacks_total{workload=\"chat_completions\",backend=\"node-b-vllm\",node=\"node-b\",pool=\"local-llm\",origin_node=\"node-a\",reason=\"origin_unavailable\"} 1"
         ));
+    }
+
+    #[tokio::test]
+    async fn structured_tracing_fields_are_emitted_for_origin_fallback() {
+        let node_b = Router::new().route(
+            "/v1/chat/completions",
+            post(|| async { axum::Json(json!({"source":"node-b"})) }),
+        );
+        let node_b_url = start_mock(node_b).await;
+
+        let node_a_backend = backend_on_node("http://node-a:8000/v1".into(), "node-a");
+        for _ in 0..10 {
+            node_a_backend.circuit.write().await.record_failure();
+        }
+        let state = AppState {
+            client: reqwest::Client::new(),
+            backends: vec![node_a_backend, backend_on_node(node_b_url, "node-b")],
+            affinity: SessionAffinity::default(),
+            metrics: crate::metrics::RoutingMetrics::default(),
+        };
+        let app = build_router(state);
+
+        let captured = captured_logs();
+
+        let resp = app
+            .oneshot(
+                Request::post("/v1/chat/completions")
+                    .header("content-type", "application/json")
+                    .header("x-request-id", "trace-test-1")
+                    .header("x-fairlead-origin-node", "node-a")
+                    .header("x-fairlead-thread-id", "thread-trace")
+                    .body(Body::from(r#"{"model":"m","messages":[]}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+
+        let request_completed = captured
+            .lines()
+            .into_iter()
+            .find(|event| {
+                event["fields"]["message"] == "request completed"
+                    && event["fields"]["request_id"] == "trace-test-1"
+            })
+            .expect("expected request completed trace event");
+        let fields = &request_completed["fields"];
+
+        assert_eq!(fields["request_id"], "trace-test-1");
+        assert_eq!(fields["workload"], "chat_completions");
+        assert_eq!(fields["origin_node"], "node-a");
+        assert_eq!(fields["affinity_key"], "thread-trace");
+        assert_eq!(fields["selected_backend"], "node-b-vllm");
+        assert_eq!(fields["retry_count"], 0);
+        assert_eq!(fields["fallback_reason"], "origin_unavailable");
+        assert_eq!(fields["status"], 200);
+        assert_eq!(fields["outcome"], "completed");
     }
 
     #[tokio::test]
