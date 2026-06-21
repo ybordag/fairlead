@@ -9,8 +9,8 @@ use std::time::Duration;
 
 use crate::{
     jobs::{
-        CompleteJobRequest, FailJobRequest, FinishJobResult, JobFailure, JobRecord, JobRegistry,
-        RenewJobLeaseResult,
+        CompleteJobRequest, FailJobRequest, FinishJobResult, JobFailure, JobPruneReport, JobRecord,
+        JobRegistry, RenewJobLeaseResult,
     },
     metrics::AsyncPoolDecisionLabels,
     workers::{AcquireWorkerSlotResult, WorkerRegistry, WorkerSnapshot},
@@ -244,6 +244,12 @@ pub async fn sweep_expired_leases(state: &AppState) {
     }
 }
 
+pub async fn prune_terminal_jobs(state: &AppState) -> JobPruneReport {
+    let report = state.jobs.prune_terminal_jobs().await;
+    state.metrics.record_job_prune(&report);
+    report
+}
+
 pub fn spawn_lease_recovery_loop(
     state: AppState,
     interval: Duration,
@@ -252,6 +258,15 @@ pub fn spawn_lease_recovery_loop(
         loop {
             tokio::time::sleep(interval).await;
             sweep_expired_leases(&state).await;
+        }
+    })
+}
+
+pub fn spawn_job_pruning_loop(state: AppState, interval: Duration) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(interval).await;
+            prune_terminal_jobs(&state).await;
         }
     })
 }
@@ -384,7 +399,7 @@ mod tests {
     use crate::{
         build_router,
         config::Priority,
-        jobs::{JobKind, SubmitJobRequest},
+        jobs::{JobKind, JobRetentionPolicy, SubmitJobRequest},
         metrics::RoutingMetrics,
         priority::PriorityLimiter,
         resources::{ResourceRegistry, ResourceRoutingPolicy},
@@ -2549,6 +2564,60 @@ mod tests {
         .unwrap();
 
         task.abort();
+    }
+
+    #[tokio::test]
+    async fn job_pruning_loop_removes_terminal_jobs_and_records_metrics() {
+        let jobs = JobRegistry::new(JobRetentionPolicy {
+            terminal_retention_ms: 0,
+            max_pruned_jobs: 1,
+        });
+        let workers = WorkerRegistry::default();
+
+        for kind in [
+            JobKind::VisionAnalysis,
+            JobKind::VisionAnalysis,
+            JobKind::IndexBuild,
+        ] {
+            jobs.submit(SubmitJobRequest {
+                kind,
+                priority: Priority::Batch,
+                payload: Value::Null,
+                callback_url: None,
+                idempotency_key: None,
+            })
+            .await
+            .unwrap();
+        }
+        for job_id in ["job-1", "job-2"] {
+            jobs.claim_next_for_worker("vision-worker", &[JobKind::VisionAnalysis], 30_000)
+                .await
+                .unwrap();
+            jobs.complete_lease(job_id, "vision-worker", None, json!({"ok": true}))
+                .await;
+        }
+
+        let state = test_state(jobs.clone(), workers);
+        let metrics = state.metrics.clone();
+        let task = spawn_job_pruning_loop(state, Duration::from_millis(10));
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if jobs.get("job-1").await.is_none()
+                    && jobs.get("job-2").await.is_none()
+                    && jobs.get("job-3").await.is_some()
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap();
+
+        task.abort();
+        let metrics = metrics.render_for_tests();
+        assert!(metrics.contains("fairlead_job_prunes_total{status=\"complete\"} 2"));
     }
 
     #[tokio::test]

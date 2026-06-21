@@ -878,9 +878,9 @@ workload protocols.
 - **8D Clove: Background Maintenance Loops**
   - [x] Add a configurable background lease expiry/recovery loop using the same
     sweep path as worker claims.
-  - Add optional background pruning loop that invokes the 8B terminal-job
+  - [x] Add optional background pruning loop that invokes the 8B terminal-job
     pruning policy on a configured interval.
-  - Keep explicit `POST /v1/jobs/prune` as the operator/manual path even if a
+  - [x] Keep explicit `POST /v1/jobs/prune` as the operator/manual path even if a
     background pruning loop is enabled later.
 - **8E Reef: Process-Level E2E Harness**
   - Add process-level restart e2e harnesses for jobs, leases, callbacks, and

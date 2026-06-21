@@ -1521,15 +1521,16 @@ The current code does not:
 - Inspect model-specific request JSON.
 - Estimate token count or memory use.
 - Manage CUDA memory.
-- Apply pool policy to async worker placement yet.
 - Push-dispatch jobs to workers.
 - Reserve GPU memory for a request; resource reports are cooperative control-plane
   hints, not allocator-level reservations.
 
-Push dispatch, background pruning, and process-level restart harnesses are
-future roadmap phases, not current behavior. Background lease recovery is
-current behavior: `main()` spawns a maintenance loop that calls the same expired
-lease sweep used by worker claim, renew, complete, and fail handlers.
+Push dispatch and process-level restart harnesses are future roadmap phases,
+not current behavior. Background lease recovery is current behavior: `main()`
+spawns a maintenance loop that calls the same expired lease sweep used by worker
+claim, renew, complete, and fail handlers. Optional background pruning is also
+current behavior when `JOB_PRUNE_INTERVAL_SECS` is configured; it calls the same
+prune helper as `POST /v1/jobs/prune`.
 Synchronous backend pool routing, async worker pool eligibility and metrics,
 durable job state, terminal callbacks, and explicit terminal-job pruning are
 current behavior when the relevant configuration is enabled.

@@ -120,9 +120,9 @@ Implemented generalization work includes:
 Phase 8C is complete on `splice` and adds stronger idempotency semantics for
 async job submission, cancellation retries, and terminal worker result retries.
 Phase 8D is underway on `clove` and adds background maintenance loops. Remaining
-Phase 8 work adds background pruning and process-level e2e harnesses. Later
-phases add adapter boundaries, richer resource policy,
-external scale/overflow, and transport/SDK hardening.
+Phase 8 work adds process-level e2e harnesses. Later phases add adapter
+boundaries, richer resource policy, external scale/overflow, and transport/SDK
+hardening.
 
 See [`docs/planning/roadmap.md`](docs/planning/roadmap.md) for the
 implementation plan and acceptance criteria.
@@ -281,6 +281,8 @@ Pruning removes only terminal jobs older than `JOB_RETENTION_SECS`, up to
 `JOB_PRUNE_LIMIT` jobs per call. Jobs with pending callbacks are retained so
 callback delivery can continue. Removed jobs are also deleted from SQLite, and
 their submit idempotency keys are released, when `JOB_STORE=sqlite` is enabled.
+Set `JOB_PRUNE_INTERVAL_SECS` to enable optional background pruning on the same
+policy; leave it unset to prune only through the explicit endpoint.
 
 `DELETE /v1/jobs/{id}` is idempotent for jobs that are already `cancelled`.
 Cancelling a job that already completed or failed still returns a conflict,
@@ -296,6 +298,7 @@ Contradictory terminal reports still return a conflict.
 JOB_RETENTION_SECS=86400 \
 JOB_PRUNE_LIMIT=1000 \
 JOB_MAINTENANCE_INTERVAL_SECS=30 \
+JOB_PRUNE_INTERVAL_SECS=3600 \
 cargo run
 ```
 

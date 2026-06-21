@@ -17,12 +17,14 @@ execution protocol.
   exhausted jobs with callback dispatch.
 - Added in-process coverage proving the loop requeues an expired lease and
   releases worker capacity without waiting for another worker claim.
+- Added optional background terminal-job pruning with `JOB_PRUNE_INTERVAL_SECS`.
+- Background pruning calls the same helper as `POST /v1/jobs/prune`, so
+  retention age, per-run limits, pending-callback protection, SQLite
+  persistence, submit idempotency-key release, and metrics stay consistent.
+- Added in-process coverage proving background pruning removes eligible terminal
+  jobs across bounded intervals, retains queued jobs, and records prune metrics.
 
 ## Remaining In 8D
 
-- Add optional background terminal-job pruning that invokes the Phase 8B pruning
-  policy on a configured interval.
-- Keep `POST /v1/jobs/prune` as the explicit operator/manual path even when
-  background pruning is enabled.
 - Add or defer tests for process-level timing, restart, SQLite, callback, and
   metric/log behavior.

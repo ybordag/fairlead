@@ -413,8 +413,9 @@ Current async scheduler behavior:
 - a background lease recovery loop periodically applies the same expired-lease
   sweep used by worker claims, so timed-out jobs can requeue or fail without
   waiting for another worker request
-- background terminal-job pruning is still deferred; operators use
-  `POST /v1/jobs/prune` explicitly for now
+- optional background terminal-job pruning applies the same retention,
+  per-run-limit, pending-callback, SQLite, idempotency-key, and metric behavior
+  as `POST /v1/jobs/prune`; operators can leave it disabled and prune manually
 
 Current worker-pull execution flow:
 

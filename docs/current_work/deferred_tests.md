@@ -455,9 +455,9 @@ access.
 
 ### `phase_8d_background_maintenance_process_e2e`
 
-Phase 8D now has in-process coverage for automatic lease expiry/recovery. Add
-opt-in process-level e2e coverage for automatic lease expiry/recovery and, once
-implemented, background pruning:
+Phase 8D now has in-process coverage for automatic lease expiry/recovery and
+background pruning. Add opt-in process-level e2e coverage for automatic lease
+expiry/recovery and background pruning:
 
 - start Fairlead with a short maintenance interval and SQLite job storage
 - submit a running job with an expired lease and verify the background loop
@@ -478,10 +478,10 @@ implemented, background pruning:
 - verify shutdown does not interrupt SQLite writes in a way that corrupts job
   state
 
-**Why deferred:** The current branch covers the lease recovery loop in process.
-The remaining cases need process lifecycle control, deterministic maintenance
-timing, SQLite restart checks, callback receiver processes, and log/metric
-scraping.
+**Why deferred:** The current branch covers lease recovery and pruning loops in
+process. The remaining cases need process lifecycle control, deterministic
+maintenance timing, SQLite restart checks, callback receiver processes, and
+log/metric scraping.
 
 ### `phase_6c_worker_claims_and_leases`
 
