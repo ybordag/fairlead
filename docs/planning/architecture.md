@@ -115,8 +115,10 @@ scheduler input, not the source of truth for GPU execution.
 The current code implements the synchronous gateway path: backend selection,
 circuit breaking, health probing, soft affinity, streaming proxying, resource
 reporting, resource-aware backend eligibility, priority admission, and basic
-metrics. Durable priority queues, worker registration, and async job dispatch
-are planned later phases.
+metrics. The early async path implements in-memory job records and
+non-dispatching worker registration, queue metrics, and scheduler preview.
+Worker-pull claims, worker execution, leases, callbacks, and durable job
+recovery are planned for Phase 6C+.
 
 ### Rhizome example: spark-a and spark-b
 
@@ -233,16 +235,44 @@ request arrives
 
 ### Surface 2: Async job dispatch
 
-This is planned for Phase 6B, not implemented in the current synchronous proxy.
-The design belongs in the architecture because it defines Fairlead's boundary:
-Fairlead should be a compute control plane, not a general-purpose workflow
-engine.
+Phase 6B implements the HTTP job surface, non-dispatching worker registration,
+queue visibility, and scheduler preview with in-memory state. Worker-pull
+claims, leases, execution, persistence, and callback delivery are Phase 6C+
+work. The design belongs in the architecture because it defines Fairlead's
+boundary: Fairlead should be a compute control plane, not a general-purpose
+workflow engine.
 
 ```
 POST /v1/jobs        — submit, get job_id immediately
+GET  /v1/jobs        — list in-memory job records
 GET  /v1/jobs/{id}   — poll status
 DELETE /v1/jobs/{id} — cancel queued or running work when supported
+GET  /v1/scheduler/preview    — preview next job/worker match without mutation
+POST /v1/workers/register       — register or update worker capabilities
+POST /v1/workers/{id}/heartbeat — refresh worker liveness
+GET  /v1/workers                — list registered workers
 ```
+
+Current early Phase 6B behavior:
+
+- submitted jobs enter `queued`
+- submitted jobs are tracked in in-memory per-priority queues
+- `GET /v1/jobs` lists current in-memory job records
+- `/metrics` exposes `fairlead_job_queue_depth{priority,type}`
+- `/metrics` exposes `fairlead_job_queue_wait_seconds_sum{priority,type}` and
+  `fairlead_job_queue_wait_seconds_max{priority,type}`
+- job state is in memory and is lost on process restart
+- cancellation marks queued jobs `cancelled`
+- cancellation removes queued jobs from queue depth and wait-time accounting
+- registered workers are listed with stale status
+- `/metrics` exposes `fairlead_workers{type,status}`
+- `GET /v1/scheduler/preview` selects the next queued job and fresh compatible
+  worker without changing job state
+- no job is dispatched to a worker yet
+- no callback is delivered yet
+- no durable queue, lease, or scheduler loop exists yet
+
+Future Phase 6C+ behavior:
 
 ```
 job submitted
@@ -261,10 +291,13 @@ job submitted
 - `cluster` — k-means or HDBSCAN over an embedding space
 
 **Supporting infrastructure:**
-- `POST /v1/workers/register` — workers announce capabilities and VRAM cost
+- `POST /v1/workers/register` — workers announce capabilities, endpoint, and
+  node metadata
+- `POST /v1/workers/{id}/heartbeat` — workers refresh liveness
+- `GET /v1/workers` — current in-memory worker registry
 - `POST /v1/resources/report` — GPU consumers and workers report capacity
 - `GET /v1/resources` — current resource control-plane state
-- `GET /metrics` — Prometheus: queue depth, circuit states, VRAM per node
+- `GET /metrics` — Prometheus: queue depth/wait, circuit states, VRAM per node
 - Persistent job state for running attempts, retries, callbacks, and pruning.
 
 ### Scheduler boundaries
@@ -434,8 +467,8 @@ metrics.
 
 This is not yet a durable priority queue. A full synchronous bucket fails fast
 with `429 Too Many Requests`; Fairlead does not currently wait in a queue for
-capacity. Queue depth, queue wait time, starvation policy, and async job
-scheduling remain future scheduler work.
+capacity. The async job API exposes in-memory queue depth and wait age, but
+starvation policy and async job scheduling remain future scheduler work.
 
 ---
 
@@ -449,7 +482,11 @@ scheduling remain future scheduler work.
 | 4 | Fallback chain, session affinity, same-request retry | Local resilience across configured backends |
 | 5 | Resource registry, VRAM accounting, priority admission | Synchronous inference avoids oversubscribed local GPUs and fails fast by priority |
 | 6A | Synchronous surface cleanup: workload metadata, pool metadata, header policy, `/v1/models` | More synchronous workloads can share the proxy cleanly |
-| 6B | Async job API, durable priority queues, worker registration, leases, callbacks | Vision and embedding jobs go through Fairlead |
+| 6B | Async job API, queue visibility, worker registration, scheduler preview | Fairlead can describe async work and select a compatible worker without dispatching |
+| 6C | Worker-pull claims and leases | Workers can safely claim bounded jobs without duplicate execution |
+| 6D | Worker execution, retries, and utilization | Leased jobs can complete/fail with bounded attempts and useful metrics |
+| 6E | Durable job state and recovery | Queued/running async work survives ordinary Fairlead restarts |
+| 6F | Callback delivery and async finalization | Callers can receive terminal job updates without polling forever |
 | 7A | Pool-aware routing and placement policies for sync backends and async workers | Workloads can target named local, peer, or overflow compute pools consistently |
 | 7 | Adapter boundaries, index/cluster job types, FAISS/GPU, cloud fallback, full metrics | Advanced RAG indexing, external overflow, complete observability |
 
@@ -496,7 +533,7 @@ and background task:
 - `Arc<RwLock<BackendMap>>` — backend states and circuit breakers
 - `Arc<RwLock<ResourceRegistry>>` — cooperative resource reports per node/backend
 - `Arc<RwLock<AffinityMap>>` — workload-scoped thread ID → preferred backend
-- `Arc<RwLock<WorkerRegistry>>` — registered job workers
+- `WorkerRegistry` wrapping `Arc<RwLock<...>>` — registered job workers
 
 ### 2. The async model requires structure, not just `async fn`
 

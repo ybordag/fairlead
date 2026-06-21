@@ -1,12 +1,15 @@
 mod config;
 mod error;
 mod health;
+mod jobs;
 mod metrics;
 mod models;
 mod priority;
 mod proxy;
 mod resources;
 mod router;
+mod scheduler;
+mod workers;
 
 use axum::{
     routing::{get, post},
@@ -41,6 +44,10 @@ pub struct AppState {
     pub resource_policy: ResourceRoutingPolicy,
     /// Per-priority synchronous admission limits.
     pub priority_limiter: PriorityLimiter,
+    /// In-memory async job state for Phase 6B job API requests.
+    pub jobs: jobs::JobRegistry,
+    /// In-memory non-dispatching worker registry for Phase 6B.
+    pub workers: workers::WorkerRegistry,
 }
 
 #[tokio::main]
@@ -89,6 +96,8 @@ async fn main() -> anyhow::Result<()> {
             cfg.priority_batch_limit,
             cfg.priority_background_limit,
         ),
+        jobs: jobs::JobRegistry::default(),
+        workers: workers::WorkerRegistry::default(),
     };
     let app = build_router(state);
 
@@ -108,6 +117,15 @@ pub(crate) fn build_router(state: AppState) -> Router {
         .route("/v1/resources", get(resources::list_resources))
         .route("/v1/resources/report", post(resources::report_resources))
         .route("/v1/models", get(models::list_models))
+        .route("/v1/jobs", get(jobs::list_jobs).post(jobs::submit_job))
+        .route("/v1/jobs/:id", get(jobs::get_job).delete(jobs::cancel_job))
+        .route(
+            "/v1/scheduler/preview",
+            get(scheduler::preview_next_assignment_handler),
+        )
+        .route("/v1/workers", get(workers::list_workers))
+        .route("/v1/workers/register", post(workers::register_worker))
+        .route("/v1/workers/:id/heartbeat", post(workers::heartbeat_worker))
         .route("/v1/chat/completions", post(proxy::chat_completions))
         .route("/v1/embeddings", post(proxy::embeddings))
         .with_state(state)
@@ -139,6 +157,8 @@ mod tests {
             resources: ResourceRegistry::default(),
             resource_policy: ResourceRoutingPolicy::default(),
             priority_limiter: PriorityLimiter::default(),
+            jobs: jobs::JobRegistry::default(),
+            workers: workers::WorkerRegistry::default(),
         };
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();

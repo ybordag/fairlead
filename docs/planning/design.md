@@ -30,9 +30,9 @@ An AI agent application that makes LLM calls against local hardware faces severa
 - **No cloud fallback.** When local hardware is saturated, requests queue indefinitely or are dropped.
 - **No VRAM awareness.** Multiple GPU consumers (LLM serving, vision sidecars, embedding servers) compete for memory with no coordination, causing OOM failures.
 - **No session continuity.** A mid-session node failure has no recovery path.
-- **No compute-worker dispatch.** The application has no infrastructure-level
-  way to submit bounded compute jobs, select eligible workers, enforce leases,
-  or retry failed attempts.
+- **No compute-worker dispatch.** The application needs an infrastructure-level
+  way to select eligible workers, enforce leases, and retry failed attempts for
+  bounded async jobs.
 
 Solving these problems inside the application couples infrastructure concerns to business logic. Fairlead solves them as a separate infrastructure layer.
 
@@ -50,6 +50,14 @@ Current implemented endpoints:
 POST /v1/chat/completions
 POST /v1/embeddings
 GET  /v1/models
+POST /v1/jobs
+GET  /v1/jobs
+GET  /v1/jobs/{id}
+DELETE /v1/jobs/{id}
+GET  /v1/scheduler/preview
+POST /v1/workers/register
+POST /v1/workers/{id}/heartbeat
+GET  /v1/workers
 GET  /health
 GET  /metrics
 POST /v1/resources/report
@@ -59,15 +67,15 @@ GET  /v1/resources
 Planned endpoints:
 
 ```text
-POST /v1/jobs
-GET  /v1/jobs/{id}
-POST /v1/workers/register
+DELETE /v1/workers/{id}
 ```
 
 The application points its model client at `http://fairlead/v1` instead of a
 single model-server endpoint. Routing, failover, resource-aware backend
 eligibility, and priority admission happen transparently behind that address.
-Worker registration and async job dispatch are future phases.
+The scheduler preview endpoint is non-mutating: it shows which queued job and
+fresh compatible worker would match next. Worker-pull claims, durable queues,
+leases, execution, and callback delivery are future Phase 6 subphases.
 
 ---
 

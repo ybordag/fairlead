@@ -200,12 +200,70 @@ pub async fn metrics(State(state): State<AppState>) -> Response<String> {
     body.push_str(&state.metrics.render());
     body.push_str(&render_priority_metrics(&state));
     body.push_str(&render_resource_metrics(&state).await);
+    body.push_str(&render_job_queue_metrics(&state).await);
+    body.push_str(&render_worker_metrics(&state).await);
 
     Response::builder()
         .status(200)
         .header("content-type", "text/plain; version=0.0.4; charset=utf-8")
         .body(body)
         .unwrap()
+}
+
+async fn render_worker_metrics(state: &AppState) -> String {
+    let snapshots = state.workers.availability_snapshots().await;
+    let mut body = String::from(
+        "# HELP fairlead_workers Registered workers by job type and status\n\
+         # TYPE fairlead_workers gauge\n",
+    );
+
+    for snapshot in snapshots {
+        let job_type = prometheus_escape(snapshot.job_type);
+        let status = prometheus_escape(snapshot.status);
+        body.push_str(&format!(
+            "fairlead_workers{{type=\"{job_type}\",status=\"{status}\"}} {}\n",
+            snapshot.count,
+        ));
+    }
+
+    body
+}
+
+async fn render_job_queue_metrics(state: &AppState) -> String {
+    let snapshots = state.jobs.queue_snapshots().await;
+    let wait_snapshots = state.jobs.queue_wait_snapshots().await;
+    let mut body = String::from(
+        "# HELP fairlead_job_queue_depth Queued async jobs by priority and type\n\
+         # TYPE fairlead_job_queue_depth gauge\n\
+         # HELP fairlead_job_queue_wait_seconds_sum Total current queued job wait age by priority and type\n\
+         # TYPE fairlead_job_queue_wait_seconds_sum gauge\n\
+         # HELP fairlead_job_queue_wait_seconds_max Oldest current queued job age by priority and type\n\
+         # TYPE fairlead_job_queue_wait_seconds_max gauge\n",
+    );
+
+    for snapshot in snapshots {
+        let priority = prometheus_escape(snapshot.priority);
+        let kind = prometheus_escape(snapshot.kind);
+        body.push_str(&format!(
+            "fairlead_job_queue_depth{{priority=\"{priority}\",type=\"{kind}\"}} {}\n",
+            snapshot.depth,
+        ));
+    }
+
+    for snapshot in wait_snapshots {
+        let priority = prometheus_escape(snapshot.priority);
+        let kind = prometheus_escape(snapshot.kind);
+        body.push_str(&format!(
+            "fairlead_job_queue_wait_seconds_sum{{priority=\"{priority}\",type=\"{kind}\"}} {:.6}\n",
+            snapshot.wait_seconds_sum,
+        ));
+        body.push_str(&format!(
+            "fairlead_job_queue_wait_seconds_max{{priority=\"{priority}\",type=\"{kind}\"}} {:.6}\n",
+            snapshot.wait_seconds_max,
+        ));
+    }
+
+    body
 }
 
 fn render_priority_metrics(state: &AppState) -> String {
@@ -298,6 +356,8 @@ mod tests {
             resources: crate::resources::ResourceRegistry::default(),
             resource_policy: crate::resources::ResourceRoutingPolicy::default(),
             priority_limiter: crate::priority::PriorityLimiter::default(),
+            jobs: crate::jobs::JobRegistry::default(),
+            workers: crate::workers::WorkerRegistry::default(),
         };
         router_with_state(state)
     }
@@ -525,6 +585,8 @@ mod tests {
             resources: crate::resources::ResourceRegistry::default(),
             resource_policy: crate::resources::ResourceRoutingPolicy::default(),
             priority_limiter,
+            jobs: crate::jobs::JobRegistry::default(),
+            workers: crate::workers::WorkerRegistry::default(),
         };
         let app = router_with_state(state);
         let resp = app
@@ -566,6 +628,8 @@ mod tests {
             resources,
             resource_policy: crate::resources::ResourceRoutingPolicy::default(),
             priority_limiter: crate::priority::PriorityLimiter::default(),
+            jobs: crate::jobs::JobRegistry::default(),
+            workers: crate::workers::WorkerRegistry::default(),
         };
         let app = router_with_state(state);
         let resp = app

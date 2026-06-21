@@ -37,7 +37,7 @@ flowchart TD
     probes --> probe_loop["background health loop\nGET backend health URL"]
     probe_loop --> circuit
 
-    main --> app_state["AppState\nclient + backends + affinity + resources + priority limiter"]
+    main --> app_state["AppState\nclient + backends + affinity + resources + jobs"]
     app_state --> router_build["build_router()"]
 
     router_build --> health_route["GET /health\nhealth::health()"]
@@ -100,22 +100,28 @@ At the top of `src/main.rs`:
 mod config;
 mod error;
 mod health;
+mod jobs;
 mod metrics;
 mod models;
 mod priority;
 mod proxy;
 mod resources;
 mod router;
+mod scheduler;
+mod workers;
 ```
 
 These lines tell the Rust compiler to compile files or directories with those
 names:
 
 - `mod config;` loads `src/config.rs`.
+- `mod jobs;` loads `src/jobs.rs`.
 - `mod priority;` loads `src/priority.rs`.
 - `mod proxy;` loads `src/proxy/mod.rs`.
 - `mod resources;` loads `src/resources.rs`.
 - `mod router;` loads `src/router/mod.rs`.
+- `mod scheduler;` loads `src/scheduler.rs`.
+- `mod workers;` loads `src/workers.rs`.
 
 This is closer to declaring compilation units than to copying source text into
 the current file. The compiler still understands these modules as part of one
@@ -298,6 +304,8 @@ pub struct AppState {
     pub resources: ResourceRegistry,
     pub resource_policy: ResourceRoutingPolicy,
     pub priority_limiter: PriorityLimiter,
+    pub jobs: JobRegistry,
+    pub workers: WorkerRegistry,
 }
 ```
 
@@ -376,12 +384,15 @@ The program starts in `src/main.rs`.
 mod config;
 mod error;
 mod health;
+mod jobs;
 mod metrics;
 mod models;
 mod priority;
 mod proxy;
 mod resources;
 mod router;
+mod scheduler;
+mod workers;
 ```
 
 These make the rest of the source tree available to `main.rs`.
@@ -411,6 +422,8 @@ pub struct AppState {
 - `resources` stores cooperative VRAM/load reports.
 - `resource_policy` controls whether resource-aware eligibility is active.
 - `priority_limiter` stores per-priority synchronous admission limits.
+- `jobs` stores first-slice in-memory async job records.
+- `workers` stores non-dispatching worker registration and heartbeat state.
 
 `#[derive(Clone)]` asks Rust to generate a `clone()` implementation. Axum clones
 state handles into request handlers. This is cheap here because the expensive
@@ -594,12 +607,13 @@ let state = AppState {
         cfg.priority_batch_limit,
         cfg.priority_background_limit,
     ),
+    jobs: JobRegistry::default(),
 };
 ```
 
 This packages the HTTP client, backend list, empty affinity map, metrics,
-resource registry, resource policy, and priority limiter into one value that Axum
-can pass to handlers.
+resource registry, resource policy, priority limiter, and in-memory job registry
+into one value that Axum can pass to handlers.
 
 ### 10. Build the HTTP Router
 
@@ -616,6 +630,12 @@ Router::new()
     .route("/v1/models", get(models::list_models))
     .route("/v1/resources", get(resources::list_resources))
     .route("/v1/resources/report", post(resources::report_resources))
+    .route("/v1/jobs", get(jobs::list_jobs).post(jobs::submit_job))
+    .route("/v1/jobs/:id", get(jobs::get_job).delete(jobs::cancel_job))
+    .route("/v1/scheduler/preview", get(scheduler::preview_next_assignment_handler))
+    .route("/v1/workers", get(workers::list_workers))
+    .route("/v1/workers/register", post(workers::register_worker))
+    .route("/v1/workers/:id/heartbeat", post(workers::heartbeat_worker))
     .route("/v1/chat/completions", post(proxy::chat_completions))
     .route("/v1/embeddings", post(proxy::embeddings))
     .with_state(state)
@@ -628,6 +648,15 @@ This means:
 - `GET /v1/models` calls `models::list_models`.
 - `GET /v1/resources` calls `resources::list_resources`.
 - `POST /v1/resources/report` calls `resources::report_resources`.
+- `POST /v1/jobs` calls `jobs::submit_job`.
+- `GET /v1/jobs` calls `jobs::list_jobs`.
+- `GET /v1/jobs/{id}` calls `jobs::get_job`.
+- `DELETE /v1/jobs/{id}` calls `jobs::cancel_job`.
+- `GET /v1/scheduler/preview` calls
+  `scheduler::preview_next_assignment_handler`.
+- `GET /v1/workers` calls `workers::list_workers`.
+- `POST /v1/workers/register` calls `workers::register_worker`.
+- `POST /v1/workers/{id}/heartbeat` calls `workers::heartbeat_worker`.
 - `POST /v1/chat/completions` calls `proxy::chat_completions`.
 - `POST /v1/embeddings` calls `proxy::embeddings`.
 
@@ -1172,6 +1201,39 @@ fairlead_resource_load{node="spark-a",backend="spark-a-vllm"} 0.250000
 fairlead_resource_report_stale{node="spark-a",backend="spark-a-vllm"} 0
 ```
 
+Async job queue visibility exposes queued job depth and current wait age by
+priority and job type:
+
+```text
+fairlead_job_queue_depth{priority="batch",type="vision_analysis"} 2
+fairlead_job_queue_wait_seconds_sum{priority="batch",type="vision_analysis"} 4.200000
+fairlead_job_queue_wait_seconds_max{priority="batch",type="vision_analysis"} 2.400000
+```
+
+The wait metric only considers jobs still in `queued` state. Cancelled jobs are
+removed from queue depth and wait-time accounting.
+
+Worker registration exposes current non-dispatching worker availability:
+
+```text
+fairlead_workers{type="vision_analysis",status="available"} 1
+fairlead_workers{type="embed_batch",status="stale"} 1
+```
+
+`GET /v1/scheduler/preview` asks the scheduler to inspect the in-memory queues
+and registered workers:
+
+1. `JobRegistry::queued_jobs_by_priority()` returns queued jobs in
+   `realtime`, `batch`, then `background` order, preserving FIFO order inside
+   each priority.
+2. `WorkerRegistry::list()` returns registered workers with their fresh/stale
+   status.
+3. `scheduler::preview_next_assignment()` scans jobs in priority order and picks
+   the first non-stale worker that supports the job type.
+
+The preview response is deliberately non-mutating. The job remains `queued`, no
+lease is created, and Fairlead does not call the worker endpoint.
+
 The proxy logs structured fields for the same decision: request ID, workload,
 origin node, affinity key, selected backend, retry count, fallback reason,
 status, and outcome.
@@ -1234,7 +1296,7 @@ The current code does not:
 - Estimate token count or memory use.
 - Manage CUDA memory.
 - Enforce complete pool-aware routing and placement policies.
-- Implement job queues or worker registration.
+- Dispatch jobs to workers, enforce leases, or deliver callbacks.
 - Reserve GPU memory for a request; resource reports are cooperative control-plane
   hints, not allocator-level reservations.
 
