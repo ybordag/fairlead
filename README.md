@@ -11,7 +11,7 @@ The name comes from sailing: a fairlead is a fitting that guides lines in exactl
 scheduler after the completed Phase 7 pool-aware placement work.
 Fairlead currently runs as an Axum HTTP service with `/health`, `/metrics`,
 `/v1/models`, `/v1/resources`, `/v1/resources/report`, `/v1/jobs`,
-`/v1/jobs/{id}`, `/v1/workers`, `/v1/workers/{id}`,
+`/v1/jobs/prune`, `/v1/jobs/{id}`, `/v1/workers`, `/v1/workers/{id}`,
 `/v1/workers/{id}/drain`, `/v1/workers/{id}/reactivate`,
 `/v1/workers/{id}/claim`,
 `/v1/workers/{worker_id}/jobs/{job_id}/renew`,
@@ -111,9 +111,11 @@ Implemented generalization work includes:
   known workload.
 - **Worker lifecycle controls** so operators can drain, reactivate, and
   deregister async workers without dropping held leases.
+- **Terminal job pruning** through an explicit endpoint with configurable
+  retention age, per-run limit, SQLite persistence, and Prometheus counters.
 
-Phase 8A adds graceful worker lifecycle controls. Future Phase 8 work adds
-completed-job pruning, stronger idempotency semantics, background maintenance
+Phase 8B is active on `stopper` and adds terminal-job retention and pruning.
+Future Phase 8 work adds stronger idempotency semantics, background maintenance
 loops, and process-level e2e harnesses. Later phases add adapter boundaries,
 richer resource policy, external scale/overflow, and transport/SDK hardening.
 
@@ -257,6 +259,18 @@ metadata, callback delivery state, and result/error state. On startup,
 already-expired running leases are requeued when attempts remain and failed when
 attempts are exhausted.
 
+Terminal async jobs can be pruned explicitly with `POST /v1/jobs/prune`.
+Pruning removes only terminal jobs older than `JOB_RETENTION_SECS`, up to
+`JOB_PRUNE_LIMIT` jobs per call. Jobs with pending callbacks are retained so
+callback delivery can continue. Removed jobs are also deleted from SQLite when
+`JOB_STORE=sqlite` is enabled.
+
+```bash
+JOB_RETENTION_SECS=86400 \
+JOB_PRUNE_LIMIT=1000 \
+cargo run
+```
+
 Terminal async jobs with `callback_url` are delivered asynchronously. Callback
 delivery is at-least-once when SQLite persistence is enabled: pending callback
 state survives ordinary Fairlead restarts and the recovery loop retries delivery
@@ -274,7 +288,8 @@ cargo run
 ```
 
 Each callback attempt is counted in `/metrics` by job type, terminal status,
-delivery outcome, and callback HTTP status.
+delivery outcome, and callback HTTP status. Pruning operations are counted in
+`/metrics` as `fairlead_job_prunes_total{status}`.
 
 Health:
 

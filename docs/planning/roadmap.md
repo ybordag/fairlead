@@ -128,7 +128,7 @@ It does not yet provide:
 
 - CPU resource accounting and richer resource dimensions beyond coarse VRAM/load.
 - Durable starvation/fairness policy beyond current priority queue ordering.
-- Worker deregistration, graceful shutdown, or completed-job pruning.
+- Background pruning loops beyond the explicit `POST /v1/jobs/prune` endpoint.
 - Adapter boundaries for non-OpenAI-compatible protocols.
 - Cloud-provider overflow pools and provider credential policy.
 - Multi-instance job coordination beyond single-process SQLite.
@@ -854,9 +854,10 @@ workload protocols.
   - [x] Audit worker lifecycle edge tests and deferred e2e coverage.
   - [x] Add final 8A docs/readiness pass before PR.
 - **8B Stopper: Retention And Pruning**
-  - Add completed-job pruning policy.
-  - Add configurable retention limits.
-  - Add SQLite pruning behavior and metrics.
+  - [x] Add completed-job pruning policy.
+  - [x] Add configurable retention limits.
+  - [x] Add SQLite pruning behavior and metrics.
+  - Audit test coverage and deferred process-level pruning tests before PR.
 - **8C Splice: Idempotency**
   - Add stronger idempotency semantics for submit, complete, fail, cancel, and
     callback handling where needed.

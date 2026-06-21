@@ -347,6 +347,28 @@ deregistration:
 This e2e needs process lifecycle management, port allocation, fake worker
 scripts, SQLite job storage, restart assertions, and optional DGX Spark access.
 
+### `phase_8b_retention_pruning_process_e2e`
+
+Add an opt-in process-level e2e for terminal-job retention and pruning:
+
+- start Fairlead with `JOB_STORE=sqlite`, low `JOB_RETENTION_SECS`, and a small
+  `JOB_PRUNE_LIMIT`
+- submit jobs that complete, fail, cancel, remain queued, and remain running
+- create terminal jobs with pending and delivered callbacks
+- call `POST /v1/jobs/prune` and verify only eligible terminal jobs are removed
+- verify pending-callback terminal jobs are retained until delivery succeeds
+- restart Fairlead and verify pruned jobs stay absent while retained jobs
+  recover from SQLite
+- scrape `/metrics` and verify `fairlead_job_prunes_total{status}` increments
+  by terminal status
+- run a larger bounded-prune scenario where multiple prune calls are needed
+  because `JOB_PRUNE_LIMIT` is smaller than the eligible terminal set
+
+**Why deferred:** In-process tests cover registry behavior, SQLite persistence,
+the endpoint response, and metrics. This e2e needs process lifecycle
+management, port allocation, callback receiver processes, SQLite restart
+assertions, and timing control around retention age.
+
 ### `phase_6c_worker_claims_and_leases`
 
 When later phases build on Phase 6C/6D worker-pull claims, leases, and result

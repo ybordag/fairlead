@@ -52,6 +52,7 @@ POST /v1/embeddings
 GET  /v1/models
 POST /v1/jobs
 GET  /v1/jobs
+POST /v1/jobs/prune
 GET  /v1/jobs/{id}
 DELETE /v1/jobs/{id}
 GET  /v1/scheduler/preview

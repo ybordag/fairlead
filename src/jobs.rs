@@ -157,6 +157,11 @@ pub struct JobListResponse {
     pub jobs: Vec<JobRecord>,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct JobPruneResponse {
+    pub pruned: JobPruneReport,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct JobQueueSnapshot {
     pub priority: &'static str,
@@ -185,6 +190,52 @@ pub struct JobDurationSnapshot {
     pub duration_seconds_max: f64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct JobRetentionPolicy {
+    pub terminal_retention_ms: u128,
+    pub max_pruned_jobs: usize,
+}
+
+impl Default for JobRetentionPolicy {
+    fn default() -> Self {
+        Self {
+            terminal_retention_ms: 86_400_000,
+            max_pruned_jobs: 1000,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct JobPruneReport {
+    pub removed: usize,
+    pub retained_pending_callbacks: usize,
+    pub by_status: Vec<JobPruneStatusSnapshot>,
+}
+
+impl JobPruneReport {
+    fn record_removed(&mut self, status: JobStatus) {
+        self.removed += 1;
+        if let Some(snapshot) = self
+            .by_status
+            .iter_mut()
+            .find(|snapshot| snapshot.status == status.as_str())
+        {
+            snapshot.removed += 1;
+        } else {
+            self.by_status.push(JobPruneStatusSnapshot {
+                status: status.as_str(),
+                removed: 1,
+            });
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct JobPruneStatusSnapshot {
+    pub status: &'static str,
+    pub removed: usize,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct LeaseExpiryReport {
     pub requeued: usize,
@@ -197,6 +248,7 @@ pub struct LeaseExpiryReport {
 pub struct JobRegistry {
     inner: Arc<RwLock<JobRegistryInner>>,
     store: Option<SqliteJobStore>,
+    retention_policy: JobRetentionPolicy,
 }
 
 #[derive(Default)]
@@ -241,7 +293,22 @@ impl JobQueues {
 }
 
 impl JobRegistry {
+    pub fn new(retention_policy: JobRetentionPolicy) -> Self {
+        Self {
+            inner: Arc::new(RwLock::new(JobRegistryInner::default())),
+            store: None,
+            retention_policy,
+        }
+    }
+
     pub fn with_store(store: SqliteJobStore) -> anyhow::Result<Self> {
+        Self::with_store_and_retention(store, JobRetentionPolicy::default())
+    }
+
+    pub fn with_store_and_retention(
+        store: SqliteJobStore,
+        retention_policy: JobRetentionPolicy,
+    ) -> anyhow::Result<Self> {
         let mut inner = store.load_registry_snapshot()?;
         let recovery_report = requeue_expired_leases_locked(&mut inner);
         if recovery_report.requeued > 0 || recovery_report.failed > 0 {
@@ -250,6 +317,7 @@ impl JobRegistry {
         Ok(Self {
             inner: Arc::new(RwLock::new(inner)),
             store: Some(store),
+            retention_policy,
         })
     }
 
@@ -415,6 +483,13 @@ impl JobRegistry {
             )
         });
         snapshots
+    }
+
+    pub async fn prune_terminal_jobs(&self) -> JobPruneReport {
+        let mut guard = self.inner.write().await;
+        let report = prune_terminal_jobs_locked(&mut guard, self.retention_policy);
+        self.persist_locked(&guard).ok();
+        report
     }
 
     pub async fn queued_jobs_by_priority(&self) -> Vec<JobRecord> {
@@ -760,6 +835,55 @@ fn prepare_callback(job: &mut JobRecord) {
     }
 }
 
+fn prune_terminal_jobs_locked(
+    inner: &mut JobRegistryInner,
+    policy: JobRetentionPolicy,
+) -> JobPruneReport {
+    let now = unix_ms();
+    let mut report = JobPruneReport::default();
+    let mut remove_ids = Vec::new();
+
+    for id in &inner.order {
+        if remove_ids.len() >= policy.max_pruned_jobs {
+            break;
+        }
+        let Some(job) = inner.jobs.get(id) else {
+            continue;
+        };
+        if !job.status.is_terminal() {
+            continue;
+        }
+        if now.saturating_sub(job.updated_at_unix_ms) < policy.terminal_retention_ms {
+            continue;
+        }
+        if has_pending_callback(job) {
+            report.retained_pending_callbacks += 1;
+            continue;
+        }
+        remove_ids.push((job.id.clone(), job.priority, job.status));
+    }
+
+    for (id, priority, status) in remove_ids {
+        inner.jobs.remove(&id);
+        inner.queues.remove(priority, &id);
+        report.record_removed(status);
+    }
+    inner.order.retain(|id| inner.jobs.contains_key(id));
+    report
+        .by_status
+        .sort_by_key(|snapshot| status_rank(snapshot.status));
+    report
+}
+
+fn has_pending_callback(job: &JobRecord) -> bool {
+    if job.callback_url.is_none() {
+        return false;
+    }
+    !job.callback
+        .as_ref()
+        .is_some_and(|callback| callback.status == JobCallbackStatus::Delivered)
+}
+
 fn requeue_expired_leases_locked(inner: &mut JobRegistryInner) -> LeaseExpiryReport {
     let now = unix_ms();
     let mut report = LeaseExpiryReport::default();
@@ -849,6 +973,12 @@ pub async fn list_jobs(State(state): State<AppState>) -> Json<JobListResponse> {
     Json(JobListResponse {
         jobs: state.jobs.list().await,
     })
+}
+
+pub async fn prune_jobs(State(state): State<AppState>) -> Json<JobPruneResponse> {
+    let report = state.jobs.prune_terminal_jobs().await;
+    state.metrics.record_job_prune(&report);
+    Json(JobPruneResponse { pruned: report })
 }
 
 pub async fn get_job(State(state): State<AppState>, Path(id): Path<String>) -> Response {
@@ -2502,6 +2632,219 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn prune_terminal_jobs_removes_only_eligible_terminal_jobs() {
+        let jobs = JobRegistry::new(JobRetentionPolicy {
+            terminal_retention_ms: 60_000,
+            max_pruned_jobs: 10,
+        });
+
+        for kind in [
+            JobKind::VisionAnalysis,
+            JobKind::Cluster,
+            JobKind::EmbedBatch,
+            JobKind::IndexBuild,
+            JobKind::VisionAnalysis,
+            JobKind::Cluster,
+        ] {
+            jobs.submit(SubmitJobRequest {
+                kind,
+                priority: Priority::Batch,
+                payload: Value::Null,
+                callback_url: None,
+            })
+            .await
+            .unwrap();
+        }
+        jobs.submit(SubmitJobRequest {
+            kind: JobKind::EmbedBatch,
+            priority: Priority::Batch,
+            payload: Value::Null,
+            callback_url: Some("http://rhizome/jobs/job-7".into()),
+        })
+        .await
+        .unwrap();
+
+        jobs.claim_next_for_worker("worker-a", &[JobKind::VisionAnalysis], 30_000)
+            .await
+            .unwrap();
+        jobs.complete_lease("job-1", "worker-a", json!({"ok": true}))
+            .await;
+        jobs.claim_next_for_worker("worker-a", &[JobKind::Cluster], 30_000)
+            .await
+            .unwrap();
+        jobs.fail_lease(
+            "job-2",
+            "worker-a",
+            JobFailure {
+                message: "bad input".into(),
+                retryable: false,
+            },
+        )
+        .await;
+        jobs.cancel("job-3").await;
+        jobs.claim_next_for_worker("worker-a", &[JobKind::IndexBuild], 30_000)
+            .await
+            .unwrap();
+        jobs.complete_lease("job-4", "worker-a", json!({"ok": true}))
+            .await;
+        jobs.claim_next_for_worker("worker-a", &[JobKind::VisionAnalysis], 30_000)
+            .await
+            .unwrap();
+        jobs.complete_lease("job-5", "worker-a", json!({"ok": true}))
+            .await;
+        jobs.claim_next_for_worker("worker-a", &[JobKind::EmbedBatch], 30_000)
+            .await
+            .unwrap();
+        jobs.complete_lease("job-7", "worker-a", json!({"ok": true}))
+            .await;
+
+        age_job_updated_at(&jobs, "job-1", 120_000).await;
+        age_job_updated_at(&jobs, "job-2", 120_000).await;
+        age_job_updated_at(&jobs, "job-3", 120_000).await;
+        age_job_updated_at(&jobs, "job-4", 30_000).await;
+        age_job_updated_at(&jobs, "job-7", 120_000).await;
+
+        let report = jobs.prune_terminal_jobs().await;
+        assert_eq!(report.removed, 3);
+        assert_eq!(report.retained_pending_callbacks, 1);
+        assert_eq!(
+            report.by_status,
+            vec![
+                JobPruneStatusSnapshot {
+                    status: "complete",
+                    removed: 1
+                },
+                JobPruneStatusSnapshot {
+                    status: "failed",
+                    removed: 1
+                },
+                JobPruneStatusSnapshot {
+                    status: "cancelled",
+                    removed: 1
+                },
+            ]
+        );
+        assert!(jobs.get("job-1").await.is_none());
+        assert!(jobs.get("job-2").await.is_none());
+        assert!(jobs.get("job-3").await.is_none());
+        assert!(jobs.get("job-4").await.is_some());
+        assert!(jobs.get("job-5").await.is_some());
+        assert!(jobs.get("job-6").await.is_some());
+        assert!(jobs.get("job-7").await.is_some());
+    }
+
+    #[tokio::test]
+    async fn prune_terminal_jobs_respects_max_prune_limit() {
+        let jobs = JobRegistry::new(JobRetentionPolicy {
+            terminal_retention_ms: 0,
+            max_pruned_jobs: 2,
+        });
+
+        for _ in 0..3 {
+            jobs.submit(SubmitJobRequest {
+                kind: JobKind::VisionAnalysis,
+                priority: Priority::Batch,
+                payload: Value::Null,
+                callback_url: None,
+            })
+            .await
+            .unwrap();
+        }
+        for id in ["job-1", "job-2", "job-3"] {
+            jobs.claim_next_for_worker("worker-a", &[JobKind::VisionAnalysis], 30_000)
+                .await
+                .unwrap();
+            jobs.complete_lease(id, "worker-a", json!({"ok": true}))
+                .await;
+        }
+
+        let report = jobs.prune_terminal_jobs().await;
+        assert_eq!(report.removed, 2);
+        assert!(jobs.get("job-1").await.is_none());
+        assert!(jobs.get("job-2").await.is_none());
+        assert!(jobs.get("job-3").await.is_some());
+    }
+
+    #[tokio::test]
+    async fn sqlite_pruning_persists_removed_terminal_jobs() {
+        let path = unique_db_path("prune");
+        let policy = JobRetentionPolicy {
+            terminal_retention_ms: 0,
+            max_pruned_jobs: 10,
+        };
+        let jobs = JobRegistry::with_store_and_retention(
+            crate::storage::SqliteJobStore::open(&path).unwrap(),
+            policy,
+        )
+        .unwrap();
+
+        jobs.submit(SubmitJobRequest {
+            kind: JobKind::Cluster,
+            priority: Priority::Background,
+            payload: Value::Null,
+            callback_url: None,
+        })
+        .await
+        .unwrap();
+        jobs.claim_next_for_worker("worker-a", &[JobKind::Cluster], 30_000)
+            .await
+            .unwrap();
+        jobs.complete_lease("job-1", "worker-a", json!({"ok": true}))
+            .await;
+
+        let report = jobs.prune_terminal_jobs().await;
+        assert_eq!(report.removed, 1);
+
+        let restored = JobRegistry::with_store_and_retention(
+            crate::storage::SqliteJobStore::open(&path).unwrap(),
+            policy,
+        )
+        .unwrap();
+        assert!(restored.get("job-1").await.is_none());
+        assert!(restored.list().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn prune_endpoint_returns_report_and_records_metrics() {
+        let jobs = JobRegistry::new(JobRetentionPolicy {
+            terminal_retention_ms: 0,
+            max_pruned_jobs: 10,
+        });
+        jobs.submit(SubmitJobRequest {
+            kind: JobKind::VisionAnalysis,
+            priority: Priority::Batch,
+            payload: Value::Null,
+            callback_url: None,
+        })
+        .await
+        .unwrap();
+        jobs.claim_next_for_worker("worker-a", &[JobKind::VisionAnalysis], 30_000)
+            .await
+            .unwrap();
+        jobs.complete_lease("job-1", "worker-a", json!({"ok": true}))
+            .await;
+
+        let app = build_router(test_state_with_jobs(jobs));
+        let response = app
+            .clone()
+            .oneshot(Request::post("/v1/jobs/prune").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let value = response_json(response).await;
+        assert_eq!(value["pruned"]["removed"], 1);
+        assert_eq!(value["pruned"]["by_status"][0]["status"], "complete");
+        assert_eq!(value["pruned"]["by_status"][0]["removed"], 1);
+
+        let response = app
+            .oneshot(Request::get("/metrics").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let metrics = response_text(response).await;
+        assert!(metrics.contains("fairlead_job_prunes_total{status=\"complete\"} 1"));
+    }
+
+    #[tokio::test]
     async fn cancel_terminal_job_returns_conflict() {
         let app = build_router(test_state());
 
@@ -2611,6 +2954,15 @@ mod tests {
             .await
             .unwrap();
         serde_json::from_slice(&bytes).unwrap()
+    }
+
+    async fn age_job_updated_at(jobs: &JobRegistry, id: &str, age_ms: u128) {
+        let mut guard = jobs.inner.write().await;
+        let now = unix_ms();
+        let job = guard.jobs.get_mut(id).unwrap();
+        job.updated_at_unix_ms = now.saturating_sub(age_ms);
+        job.created_at_unix_ms = job.updated_at_unix_ms.saturating_sub(1);
+        jobs.persist_locked(&guard).unwrap();
     }
 
     fn unique_db_path(prefix: &str) -> std::path::PathBuf {
