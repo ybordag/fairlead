@@ -292,12 +292,12 @@ Goal: give Fairlead a simple control-plane view of node/backend capacity.
 
 Scope:
 
-- [ ] Define resource structs for node ID, backend ID, total VRAM, reserved VRAM,
+- [x] Define resource structs for node ID, backend ID, total VRAM, reserved VRAM,
   current load, and timestamp.
-- [ ] Add an in-memory registry guarded by `Arc<RwLock<_>>`.
-- [ ] Add registration/update endpoint for cooperative reporting.
-- [ ] Add stale-report handling.
-- [ ] Add tests for resource registration, update, stale expiry, and lookup.
+- [x] Add an in-memory registry guarded by `Arc<RwLock<_>>`.
+- [x] Add registration/update endpoint for cooperative reporting.
+- [x] Add stale-report handling.
+- [x] Add tests for resource registration, update, stale expiry, and lookup.
 
 Initial API sketch:
 
@@ -309,7 +309,8 @@ GET  /v1/resources
 Acceptance criteria:
 
 - vLLM or a mock worker can report capacity for `spark-a` and `spark-b`.
-- Fairlead can read the latest reported capacity during backend selection.
+- Fairlead can read the latest fresh report from the registry; routing
+  integration lands in Resource-Aware Selection.
 - Stale reports stop being trusted after a configurable timeout.
 
 ### Resource-Aware Selection

@@ -146,9 +146,8 @@ GET    /v1/workers              — list registered workers and their status
 ### VRAM accounting
 
 ```
-POST   /v1/vram/register        — consumer reports allocation: node, name, mb
-DELETE /v1/vram/register/{id}   — release on shutdown
-GET    /v1/vram                 — current VRAM state per node
+POST   /v1/resources/report     — consumer reports node/backend VRAM and load
+GET    /v1/resources            — current resource state per node/backend
 ```
 
 ## Priority queue model
@@ -250,8 +249,8 @@ LOG_LEVEL                    — tracing level: error, warn, info, debug, trace 
 
 ### Phase 5 — VRAM accounting and priority queues
 
-- `VramRegistry`: per-node consumer list with allocated MB
-- `POST /v1/vram/register` and `DELETE /v1/vram/register/{id}`
+- `ResourceRegistry`: per-node/backend resource reports with VRAM, load, and TTL
+- `POST /v1/resources/report` and `GET /v1/resources`
 - Router checks available VRAM before selecting a backend
 - Three-tier priority queue with Tokio channels (realtime / batch / background)
 - Scheduler drains higher-priority channels before accepting lower-priority work

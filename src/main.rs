@@ -3,6 +3,7 @@ mod error;
 mod health;
 mod metrics;
 mod proxy;
+mod resources;
 mod router;
 
 use axum::{
@@ -14,6 +15,7 @@ use tracing::info;
 use tracing_subscriber::EnvFilter;
 
 use metrics::RoutingMetrics;
+use resources::ResourceRegistry;
 use router::{spawn_health_probe, BackendState, SessionAffinity};
 
 /// Shared state cloned into every handler by Axum's `State` extractor.
@@ -30,6 +32,8 @@ pub struct AppState {
     pub affinity: SessionAffinity,
     /// In-process routing metrics rendered by `/metrics`.
     pub metrics: RoutingMetrics,
+    /// Cooperative resource reports from model servers and compute workers.
+    pub resources: ResourceRegistry,
 }
 
 #[tokio::main]
@@ -67,6 +71,7 @@ async fn main() -> anyhow::Result<()> {
         backends,
         affinity: SessionAffinity::default(),
         metrics: RoutingMetrics::default(),
+        resources: ResourceRegistry::new(Duration::from_secs(cfg.resource_report_ttl_secs)),
     };
     let app = build_router(state);
 
@@ -83,6 +88,8 @@ pub(crate) fn build_router(state: AppState) -> Router {
     Router::new()
         .route("/health", get(health::health))
         .route("/metrics", get(metrics::metrics))
+        .route("/v1/resources", get(resources::list_resources))
+        .route("/v1/resources/report", post(resources::report_resources))
         .route("/v1/chat/completions", post(proxy::chat_completions))
         .route("/v1/embeddings", post(proxy::embeddings))
         .with_state(state)
@@ -111,6 +118,7 @@ mod tests {
             backends: vec![],
             affinity: SessionAffinity::default(),
             metrics: RoutingMetrics::default(),
+            resources: ResourceRegistry::default(),
         };
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();

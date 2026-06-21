@@ -190,12 +190,58 @@ pub async fn metrics(State(state): State<AppState>) -> Response<String> {
         ));
     }
     body.push_str(&state.metrics.render());
+    body.push_str(&render_resource_metrics(&state).await);
 
     Response::builder()
         .status(200)
         .header("content-type", "text/plain; version=0.0.4; charset=utf-8")
         .body(body)
         .unwrap()
+}
+
+async fn render_resource_metrics(state: &AppState) -> String {
+    let snapshots = state.resources.snapshots().await;
+    let mut body = String::from(
+        "# HELP fairlead_resource_vram_total_mb Reported total VRAM by node/backend\n\
+         # TYPE fairlead_resource_vram_total_mb gauge\n\
+         # HELP fairlead_resource_vram_reserved_mb Reported reserved VRAM by node/backend\n\
+         # TYPE fairlead_resource_vram_reserved_mb gauge\n\
+         # HELP fairlead_resource_vram_available_mb Reported available VRAM by node/backend\n\
+         # TYPE fairlead_resource_vram_available_mb gauge\n\
+         # HELP fairlead_resource_load Reported normalized load by node/backend\n\
+         # TYPE fairlead_resource_load gauge\n\
+         # HELP fairlead_resource_report_stale Whether the latest resource report is stale (0=fresh 1=stale)\n\
+         # TYPE fairlead_resource_report_stale gauge\n",
+    );
+
+    for snapshot in snapshots {
+        let node = prometheus_escape(&snapshot.report.node_id);
+        let backend = prometheus_escape(snapshot.report.backend_id.as_deref().unwrap_or(""));
+        let stale = u8::from(snapshot.stale);
+        body.push_str(&format!(
+            "fairlead_resource_vram_total_mb{{node=\"{node}\",backend=\"{backend}\"}} {}\n",
+            snapshot.report.total_vram_mb,
+        ));
+        body.push_str(&format!(
+            "fairlead_resource_vram_reserved_mb{{node=\"{node}\",backend=\"{backend}\"}} {}\n",
+            snapshot.report.reserved_vram_mb,
+        ));
+        body.push_str(&format!(
+            "fairlead_resource_vram_available_mb{{node=\"{node}\",backend=\"{backend}\"}} {}\n",
+            snapshot.report.available_vram_mb,
+        ));
+        if let Some(load) = snapshot.report.current_load {
+            body.push_str(&format!(
+                "fairlead_resource_load{{node=\"{node}\",backend=\"{backend}\"}} {:.6}\n",
+                load,
+            ));
+        }
+        body.push_str(&format!(
+            "fairlead_resource_report_stale{{node=\"{node}\",backend=\"{backend}\"}} {stale}\n",
+        ));
+    }
+
+    body
 }
 
 fn prometheus_escape(value: &str) -> String {
@@ -217,7 +263,12 @@ mod tests {
             backends,
             affinity: crate::router::SessionAffinity::default(),
             metrics: RoutingMetrics::default(),
+            resources: crate::resources::ResourceRegistry::default(),
         };
+        router_with_state(state)
+    }
+
+    fn router_with_state(state: AppState) -> Router {
         Router::new()
             .route("/metrics", get(metrics))
             .with_state(state)
@@ -424,5 +475,51 @@ mod tests {
         let text = body_text(resp).await;
         assert!(text.contains("# HELP fairlead_circuit_state"));
         assert!(!text.contains("fairlead_circuit_state{"));
+    }
+
+    #[tokio::test]
+    async fn metrics_reports_resource_snapshots() {
+        let resources = crate::resources::ResourceRegistry::default();
+        resources
+            .report(crate::resources::ResourceReportRequest {
+                node_id: "node-a".into(),
+                backend_id: Some("node-a-vllm".into()),
+                total_vram_mb: 64_000,
+                reserved_vram_mb: 16_000,
+                current_load: Some(0.25),
+            })
+            .await
+            .unwrap();
+        let state = AppState {
+            client: reqwest::Client::new(),
+            backends: vec![],
+            affinity: crate::router::SessionAffinity::default(),
+            metrics: RoutingMetrics::default(),
+            resources,
+        };
+        let app = router_with_state(state);
+        let resp = app
+            .oneshot(
+                axum::http::Request::get("/metrics")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        let text = body_text(resp).await;
+        assert!(text.contains(
+            "fairlead_resource_vram_total_mb{node=\"node-a\",backend=\"node-a-vllm\"} 64000"
+        ));
+        assert!(text.contains(
+            "fairlead_resource_vram_reserved_mb{node=\"node-a\",backend=\"node-a-vllm\"} 16000"
+        ));
+        assert!(text.contains(
+            "fairlead_resource_vram_available_mb{node=\"node-a\",backend=\"node-a-vllm\"} 48000"
+        ));
+        assert!(text
+            .contains("fairlead_resource_load{node=\"node-a\",backend=\"node-a-vllm\"} 0.250000"));
+        assert!(text
+            .contains("fairlead_resource_report_stale{node=\"node-a\",backend=\"node-a-vllm\"} 0"));
     }
 }

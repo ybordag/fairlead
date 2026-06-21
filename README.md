@@ -29,8 +29,10 @@ The current service provides:
 - **Origin-node locality** through `X-Fairlead-Origin-Node`.
 - **Same-request retry** across eligible backends for connection failures,
   timeouts, and 5xx responses before response bytes are streamed.
+- **Cooperative resource reporting** through `/v1/resources/report` and
+  `/v1/resources`, with stale-report detection.
 - **Prometheus-style metrics** for backend circuit state, request outcomes,
-  latency, fallback reasons, and retry reasons.
+  latency, fallback reasons, retry reasons, and reported resource state.
 
 Fairlead does **not** run inference itself. It routes requests to model servers
 such as vLLM. vLLM owns model loading, GPU execution, KV cache management, and
@@ -156,6 +158,20 @@ Metrics:
 
 ```bash
 curl http://localhost:7000/metrics
+```
+
+Resource report:
+
+```bash
+curl http://localhost:7000/v1/resources/report \
+  -H 'content-type: application/json' \
+  -d '{"node_id":"spark-a","backend_id":"spark-a-vllm","total_vram_mb":64000,"reserved_vram_mb":16000,"current_load":0.25}'
+```
+
+Current resource state:
+
+```bash
+curl http://localhost:7000/v1/resources
 ```
 
 Chat completions are proxied to one of the configured backends:

@@ -248,7 +248,8 @@ job submitted
 
 **Supporting infrastructure:**
 - `POST /v1/workers/register` — workers announce capabilities and VRAM cost
-- `POST /v1/vram/register` — GPU consumers report allocation
+- `POST /v1/resources/report` — GPU consumers and workers report capacity
+- `GET /v1/resources` — current resource control-plane state
 - `GET /metrics` — Prometheus: queue depth, circuit states, VRAM per node
 - Persistent job state for running attempts, retries, callbacks, and pruning.
 
@@ -277,7 +278,7 @@ chat response at 9am. This is enforced structurally, not by policy.
 | 2 | OpenAI proxy, single backend, streaming | Rhizome can call Fairlead instead of cloud |
 | 3 | Circuit breaker, health checks, basic /metrics | Automatic failover when vLLM crashes |
 | 4 | Fallback chain, session affinity, cloud providers | Full resilience across local + cloud |
-| 5 | VRAM accounting, priority queue | Vision sidecar coexists without OOM; background work yields to users |
+| 5 | Resource registry, VRAM accounting, priority queue | Vision sidecar coexists without OOM; background work yields to users |
 | 6 | Async job API, worker registration, leases, callbacks | Vision and embedding jobs go through Fairlead |
 | 7 | Index/cluster job types, FAISS/GPU, full metrics | Advanced RAG indexing, complete observability |
 
@@ -321,7 +322,7 @@ The type encodes the concurrency pattern.
 Fairlead's shared state objects, each `Arc`-wrapped and cloned into each handler
 and background task:
 - `Arc<RwLock<BackendMap>>` — backend states and circuit breakers
-- `Arc<RwLock<VramRegistry>>` — VRAM accounting per node
+- `Arc<RwLock<ResourceRegistry>>` — cooperative resource reports per node/backend
 - `Arc<RwLock<AffinityMap>>` — thread_id → preferred backend
 - `Arc<RwLock<WorkerRegistry>>` — registered job workers
 

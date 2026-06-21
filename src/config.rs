@@ -77,6 +77,8 @@ pub struct Config {
     pub circuit_cooldown_secs: u64,
     /// Seconds between background health probes per backend. Default: 10.
     pub health_probe_interval_secs: u64,
+    /// Seconds before a resource report is considered stale. Default: 30.
+    pub resource_report_ttl_secs: u64,
 }
 
 impl Config {
@@ -115,6 +117,11 @@ impl Config {
                 .unwrap_or_else(|_| "10".to_string())
                 .parse()
                 .map_err(|e| anyhow!("invalid HEALTH_PROBE_INTERVAL_SECS: {}", e))?,
+
+            resource_report_ttl_secs: get("RESOURCE_REPORT_TTL_SECS")
+                .unwrap_or_else(|_| "30".to_string())
+                .parse()
+                .map_err(|e| anyhow!("invalid RESOURCE_REPORT_TTL_SECS: {}", e))?,
         })
     }
 }
@@ -256,6 +263,7 @@ mod tests {
         assert_eq!(cfg.circuit_failure_threshold, 3);
         assert_eq!(cfg.circuit_cooldown_secs, 30);
         assert_eq!(cfg.health_probe_interval_secs, 10);
+        assert_eq!(cfg.resource_report_ttl_secs, 30);
     }
 
     #[test]
@@ -264,11 +272,13 @@ mod tests {
             ("CIRCUIT_FAILURE_THRESHOLD", "5"),
             ("CIRCUIT_COOLDOWN_SECS", "60"),
             ("HEALTH_PROBE_INTERVAL_SECS", "15"),
+            ("RESOURCE_REPORT_TTL_SECS", "45"),
         ]))
         .unwrap();
         assert_eq!(cfg.circuit_failure_threshold, 5);
         assert_eq!(cfg.circuit_cooldown_secs, 60);
         assert_eq!(cfg.health_probe_interval_secs, 15);
+        assert_eq!(cfg.resource_report_ttl_secs, 45);
     }
 
     #[test]
@@ -299,6 +309,16 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("invalid HEALTH_PROBE_INTERVAL_SECS"));
+    }
+
+    #[test]
+    fn invalid_resource_report_ttl_returns_err() {
+        let result = Config::from_lookup(env(&[("RESOURCE_REPORT_TTL_SECS", "abc")]));
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("invalid RESOURCE_REPORT_TTL_SECS"));
     }
 
     #[test]

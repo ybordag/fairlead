@@ -564,6 +564,7 @@ mod tests {
             backends,
             affinity: SessionAffinity::default(),
             metrics: crate::metrics::RoutingMetrics::default(),
+            resources: crate::resources::ResourceRegistry::default(),
         };
         start_fairlead_with_state(state).await
     }
@@ -1387,6 +1388,7 @@ mod tests {
             backends: vec![node_a_backend, backend_on_node(node_b_url, "node-b")],
             affinity: SessionAffinity::default(),
             metrics: crate::metrics::RoutingMetrics::default(),
+            resources: crate::resources::ResourceRegistry::default(),
         };
         let app = build_router(state);
 
@@ -1624,6 +1626,7 @@ mod tests {
             backends: vec![BackendState::new(backend, 10, Duration::from_secs(60))],
             affinity: affinity.clone(),
             metrics: crate::metrics::RoutingMetrics::default(),
+            resources: crate::resources::ResourceRegistry::default(),
         };
         let fairlead = start_fairlead_with_state(state).await;
 
