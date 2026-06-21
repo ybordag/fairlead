@@ -41,10 +41,15 @@ behavior that in-process Rust tests cannot cover.
   storage to verify an expired running lease is recovered on Fairlead restart,
   requeued with an attempt-timeout error, and claimable by a newly registered
   replacement worker.
+- Added `JOB_LEASE_DURATION_MS`, defaulting to the previous 30-second lease
+  behavior, so process tests and local demos can use short leases without
+  changing production defaults.
+- Added `background_maintenance_requeues_expired_lease`, which verifies a live
+  Fairlead process requeues an expired lease from the background maintenance
+  loop without relying on another worker claim to trigger recovery.
 
 ## Next Slices
 
 - Add helpers for worker renew/fail/drain/reactivate/deregister and prune
   endpoints.
-- Add process-level coverage for maintenance-loop behavior.
 - Move deferred Phase 8 local-process cases into concrete tests incrementally.

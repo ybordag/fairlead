@@ -372,8 +372,8 @@ Worker lifecycle cases:
 Retention, pruning, and maintenance cases:
 
 - start with `JOB_STORE=sqlite`, low `JOB_RETENTION_SECS`, small
-  `JOB_PRUNE_LIMIT`, short `JOB_MAINTENANCE_INTERVAL_SECS`, and optional
-  `JOB_PRUNE_INTERVAL_SECS`
+  `JOB_PRUNE_LIMIT`, short `JOB_LEASE_DURATION_MS`, short
+  `JOB_MAINTENANCE_INTERVAL_SECS`, and optional `JOB_PRUNE_INTERVAL_SECS`
 - submit jobs that complete, fail, cancel, remain queued, and remain running
 - create terminal jobs with pending and delivered callbacks
 - verify manual `POST /v1/jobs/prune` removes only eligible terminal jobs
@@ -389,8 +389,8 @@ Retention, pruning, and maintenance cases:
   across multiple intervals
 - verify omitting `JOB_PRUNE_INTERVAL_SECS` disables background pruning while
   leaving manual pruning enabled
-- verify expired running leases requeue or fail through the background recovery
-  loop without waiting for another worker claim
+- verify exhausted expired leases fail through the background recovery loop
+  without waiting for another worker claim
 - verify exhausted expired leases dispatch terminal callbacks through the
   background recovery loop after process restart
 - verify shutdown does not interrupt SQLite writes in a way that corrupts job
@@ -425,7 +425,7 @@ Metrics and config cases:
   terminal duration, callback, prune, and maintenance-related behavior remain
   internally consistent
 - verify invalid env configuration fails startup for `JOB_RETENTION_SECS`,
-  `JOB_PRUNE_LIMIT`, `JOB_MAINTENANCE_INTERVAL_SECS`, and
+  `JOB_PRUNE_LIMIT`, `JOB_LEASE_DURATION_MS`, `JOB_MAINTENANCE_INTERVAL_SECS`, and
   `JOB_PRUNE_INTERVAL_SECS`
 - verify logs or metrics distinguish lease recovery from pruning
 

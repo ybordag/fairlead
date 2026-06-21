@@ -630,6 +630,7 @@ mod tests {
             resources: crate::resources::ResourceRegistry::default(),
             resource_policy: crate::resources::ResourceRoutingPolicy::default(),
             priority_limiter: crate::priority::PriorityLimiter::default(),
+            lease_duration_ms: crate::config::DEFAULT_JOB_LEASE_DURATION_MS,
             jobs: crate::jobs::JobRegistry::default(),
             workers: crate::workers::WorkerRegistry::default(),
         };
@@ -864,6 +865,7 @@ mod tests {
             resources: crate::resources::ResourceRegistry::default(),
             resource_policy: crate::resources::ResourceRoutingPolicy::default(),
             priority_limiter,
+            lease_duration_ms: crate::config::DEFAULT_JOB_LEASE_DURATION_MS,
             jobs: crate::jobs::JobRegistry::default(),
             workers: crate::workers::WorkerRegistry::default(),
         };
@@ -912,6 +914,7 @@ mod tests {
             resources,
             resource_policy: crate::resources::ResourceRoutingPolicy::default(),
             priority_limiter: crate::priority::PriorityLimiter::default(),
+            lease_duration_ms: crate::config::DEFAULT_JOB_LEASE_DURATION_MS,
             jobs: crate::jobs::JobRegistry::default(),
             workers: crate::workers::WorkerRegistry::default(),
         };

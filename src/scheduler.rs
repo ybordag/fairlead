@@ -17,8 +17,6 @@ use crate::{
     AppState,
 };
 
-const DEFAULT_LEASE_DURATION_MS: u128 = 30_000;
-
 #[derive(Debug, Clone, Serialize)]
 pub struct SchedulerPreview {
     pub job: JobRecord,
@@ -78,7 +76,7 @@ pub async fn claim_worker_job_handler(
             &worker.job_types,
             &worker.pool,
             &state.workload_pools,
-            DEFAULT_LEASE_DURATION_MS,
+            state.lease_duration_ms,
         )
         .await
     {
@@ -109,7 +107,7 @@ pub async fn renew_worker_job_lease_handler(
 
     match state
         .jobs
-        .renew_lease(&job_id, &worker.id, DEFAULT_LEASE_DURATION_MS)
+        .renew_lease(&job_id, &worker.id, state.lease_duration_ms)
         .await
     {
         RenewJobLeaseResult::Renewed(job) => Json(JobClaimResponse { job }).into_response(),
@@ -455,6 +453,7 @@ mod tests {
             resources: ResourceRegistry::default(),
             resource_policy: ResourceRoutingPolicy::default(),
             priority_limiter: PriorityLimiter::default(),
+            lease_duration_ms: crate::config::DEFAULT_JOB_LEASE_DURATION_MS,
             jobs,
             workers,
         }

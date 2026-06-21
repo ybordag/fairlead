@@ -14,6 +14,7 @@ pub const DEFAULT_JOB_DB_PATH: &str = "fairlead_jobs.sqlite3";
 pub const DEFAULT_JOB_RETENTION_SECS: u64 = 86_400;
 pub const DEFAULT_JOB_PRUNE_LIMIT: usize = 1000;
 pub const DEFAULT_JOB_MAINTENANCE_INTERVAL_SECS: u64 = 30;
+pub const DEFAULT_JOB_LEASE_DURATION_MS: u128 = 30_000;
 
 const KNOWN_POOL_WORKLOADS: &[&str] = &[
     "chat_completions",
@@ -268,6 +269,8 @@ pub struct Config {
     pub job_prune_interval_secs: Option<u64>,
     /// Seconds between background async job maintenance sweeps. Default: 30.
     pub job_maintenance_interval_secs: u64,
+    /// Milliseconds granted to a worker lease before recovery. Default: 30000.
+    pub job_lease_duration_ms: u128,
     /// Max callback delivery attempts for terminal async jobs. Default: 3.
     pub callback_max_attempts: u32,
     /// Per-attempt callback timeout in seconds. Default: 5.
@@ -378,6 +381,12 @@ impl Config {
             job_maintenance_interval_secs: parse_nonzero(
                 "JOB_MAINTENANCE_INTERVAL_SECS",
                 DEFAULT_JOB_MAINTENANCE_INTERVAL_SECS,
+                &get,
+            )?,
+
+            job_lease_duration_ms: parse_nonzero(
+                "JOB_LEASE_DURATION_MS",
+                DEFAULT_JOB_LEASE_DURATION_MS,
                 &get,
             )?,
 
@@ -856,6 +865,7 @@ mod tests {
             cfg.job_maintenance_interval_secs,
             DEFAULT_JOB_MAINTENANCE_INTERVAL_SECS
         );
+        assert_eq!(cfg.job_lease_duration_ms, DEFAULT_JOB_LEASE_DURATION_MS);
         assert_eq!(cfg.callback_max_attempts, DEFAULT_CALLBACK_MAX_ATTEMPTS);
         assert_eq!(cfg.callback_timeout_secs, DEFAULT_CALLBACK_TIMEOUT_SECS);
         assert_eq!(cfg.callback_retry_delay_ms, DEFAULT_CALLBACK_RETRY_DELAY_MS);
@@ -961,6 +971,7 @@ mod tests {
             ("JOB_PRUNE_LIMIT", "25"),
             ("JOB_PRUNE_INTERVAL_SECS", "60"),
             ("JOB_MAINTENANCE_INTERVAL_SECS", "12"),
+            ("JOB_LEASE_DURATION_MS", "250"),
             ("CALLBACK_MAX_ATTEMPTS", "5"),
             ("CALLBACK_TIMEOUT_SECS", "9"),
             ("CALLBACK_RETRY_DELAY_MS", "50"),
@@ -980,6 +991,7 @@ mod tests {
         assert_eq!(cfg.job_prune_limit, 25);
         assert_eq!(cfg.job_prune_interval_secs, Some(60));
         assert_eq!(cfg.job_maintenance_interval_secs, 12);
+        assert_eq!(cfg.job_lease_duration_ms, 250);
         assert_eq!(cfg.callback_max_attempts, 5);
         assert_eq!(cfg.callback_timeout_secs, 9);
         assert_eq!(cfg.callback_retry_delay_ms, 50);
@@ -1064,6 +1076,8 @@ mod tests {
             ("JOB_PRUNE_INTERVAL_SECS", "abc"),
             ("JOB_MAINTENANCE_INTERVAL_SECS", "0"),
             ("JOB_MAINTENANCE_INTERVAL_SECS", "abc"),
+            ("JOB_LEASE_DURATION_MS", "0"),
+            ("JOB_LEASE_DURATION_MS", "abc"),
         ] {
             let result = Config::from_lookup(env(&[(key, value)]));
             assert!(result.is_err(), "expected {key}={value} to fail");

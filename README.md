@@ -116,7 +116,8 @@ Implemented generalization work includes:
   retention age, per-run limit, SQLite persistence, and Prometheus counters.
 - **Background lease recovery** so expired async worker leases are requeued or
   failed on a configured maintenance interval, without waiting for the next
-  worker claim.
+  worker claim. Worker lease duration defaults to 30 seconds and is configurable
+  with `JOB_LEASE_DURATION_MS`.
 - **Optional background terminal-job pruning** using the same retention,
   per-run limit, callback-safety, SQLite, idempotency-key, and metrics behavior
   as `POST /v1/jobs/prune`.
@@ -275,7 +276,8 @@ Fairlead also runs a background lease recovery loop. The loop uses the same
 expiry path as worker claims: expired running leases release worker capacity,
 record `attempt timed out`, and either requeue the job or fail it when attempts
 are exhausted. The interval defaults to 30 seconds and can be changed with
-`JOB_MAINTENANCE_INTERVAL_SECS`.
+`JOB_MAINTENANCE_INTERVAL_SECS`. Worker leases default to 30 seconds and can be
+changed with `JOB_LEASE_DURATION_MS`.
 
 Terminal async jobs can be pruned explicitly with `POST /v1/jobs/prune`.
 Pruning removes only terminal jobs older than `JOB_RETENTION_SECS`, up to
@@ -298,6 +300,7 @@ Contradictory terminal reports still return a conflict.
 ```bash
 JOB_RETENTION_SECS=86400 \
 JOB_PRUNE_LIMIT=1000 \
+JOB_LEASE_DURATION_MS=30000 \
 JOB_MAINTENANCE_INTERVAL_SECS=30 \
 JOB_PRUNE_INTERVAL_SECS=3600 \
 cargo run

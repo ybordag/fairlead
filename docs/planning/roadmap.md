@@ -895,6 +895,10 @@ workload protocols.
     recovery.
   - [x] Add SQLite-backed process restart coverage for expired running-lease
     requeue and reclaim.
+  - [x] Add configurable worker lease duration for tests/local demos while
+    preserving the 30-second production default.
+  - [x] Add process-level background maintenance-loop coverage for expired
+    lease requeue and reclaim.
   - Add process-level restart e2e harnesses for jobs, leases, callbacks, and
     metrics.
 - Keep Temporal deferred unless application workflows need durable multi-step

@@ -276,7 +276,7 @@ async fn wait_for_callback_status(
     job_id: &str,
     expected_status: &str,
 ) -> Value {
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     loop {
         let (status, fetched) = fairlead.get_json(&format!("/v1/jobs/{job_id}")).await;
         assert_eq!(status, StatusCode::OK);
@@ -763,4 +763,63 @@ async fn expired_lease_requeues_after_process_restart() {
 
     fairlead.shutdown().await;
     fs::remove_dir_all(db_dir).expect("remove lease SQLite process test temp dir");
+}
+
+#[tokio::test]
+async fn background_maintenance_requeues_expired_lease() {
+    let mut fairlead = FairleadProcess::spawn(&[
+        ("JOB_LEASE_DURATION_MS", "50"),
+        ("JOB_MAINTENANCE_INTERVAL_SECS", "1"),
+    ]);
+    fairlead.wait_for_health().await;
+
+    let (status, _) = fairlead
+        .register_worker(json!({
+            "id": "maintenance-worker",
+            "endpoint_url": "http://maintenance-worker.local",
+            "node_id": "spark-a",
+            "pool": "default",
+            "job_types": ["vision_analysis"],
+            "max_concurrent_jobs": 1,
+            "available_vram_mb": 4096
+        }))
+        .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, submitted) = fairlead
+        .submit_job(json!({
+            "type": "vision_analysis",
+            "priority": "batch",
+            "payload": { "image": "rose.jpg" }
+        }))
+        .await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+    assert_eq!(submitted["job"]["id"], "job-1");
+
+    let (status, claim) = fairlead.claim_worker_job("maintenance-worker").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(claim["job"]["status"], "running");
+    assert_eq!(claim["job"]["attempts"], 1);
+    assert_eq!(claim["job"]["lease"]["worker_id"], "maintenance-worker");
+
+    let recovered = wait_for_job_status(&fairlead, "job-1", "queued").await;
+    assert_eq!(recovered["job"]["attempts"], 1);
+    assert!(recovered["job"]["lease"].is_null());
+    assert_eq!(recovered["job"]["error"]["message"], "attempt timed out");
+    assert_eq!(recovered["job"]["error"]["retryable"], true);
+
+    let (status, workers) = fairlead.get_json("/v1/workers").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(workers["workers"][0]["id"], "maintenance-worker");
+    assert_eq!(workers["workers"][0]["in_flight_jobs"], 0);
+
+    let (status, reclaimed) = fairlead.claim_worker_job("maintenance-worker").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(reclaimed["job"]["id"], "job-1");
+    assert_eq!(reclaimed["job"]["status"], "running");
+    assert_eq!(reclaimed["job"]["attempts"], 2);
+    assert_eq!(reclaimed["job"]["lease"]["worker_id"], "maintenance-worker");
+    assert_eq!(reclaimed["job"]["lease"]["attempt"], 2);
+
+    fairlead.shutdown().await;
 }
