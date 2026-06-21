@@ -18,10 +18,11 @@ processes can bound completed job history without weakening callback delivery.
 - Added `fairlead_job_prunes_total{status}` metrics.
 - Added tests for config parsing, retention age, per-call limits, pending
   callback protection, SQLite persistence, endpoint responses, and metrics.
+- Added edge tests for delivered callback pruning, queued/running job
+  preservation, and cumulative prune metrics across bounded prune calls.
 
 ## Remaining
 
-- Audit pruning test coverage and deferred e2e coverage before PR.
 - Do a final docs/readiness pass before PR.
 
 ## Semantics

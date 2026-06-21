@@ -2766,6 +2766,83 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn prune_terminal_jobs_removes_delivered_callback_jobs() {
+        let jobs = JobRegistry::new(JobRetentionPolicy {
+            terminal_retention_ms: 0,
+            max_pruned_jobs: 10,
+        });
+
+        jobs.submit(SubmitJobRequest {
+            kind: JobKind::VisionAnalysis,
+            priority: Priority::Batch,
+            payload: Value::Null,
+            callback_url: Some("http://rhizome/jobs/job-1".into()),
+        })
+        .await
+        .unwrap();
+        jobs.claim_next_for_worker("worker-a", &[JobKind::VisionAnalysis], 30_000)
+            .await
+            .unwrap();
+        jobs.complete_lease("job-1", "worker-a", json!({"ok": true}))
+            .await;
+
+        let pending = jobs.prune_terminal_jobs().await;
+        assert_eq!(pending.removed, 0);
+        assert_eq!(pending.retained_pending_callbacks, 1);
+        assert!(jobs.get("job-1").await.is_some());
+
+        jobs.record_callback_success("job-1", 200).await.unwrap();
+        let delivered = jobs.prune_terminal_jobs().await;
+        assert_eq!(delivered.removed, 1);
+        assert_eq!(delivered.retained_pending_callbacks, 0);
+        assert!(jobs.get("job-1").await.is_none());
+    }
+
+    #[tokio::test]
+    async fn prune_terminal_jobs_preserves_queued_and_running_jobs() {
+        let jobs = JobRegistry::new(JobRetentionPolicy {
+            terminal_retention_ms: 0,
+            max_pruned_jobs: 10,
+        });
+
+        for kind in [
+            JobKind::VisionAnalysis,
+            JobKind::EmbedBatch,
+            JobKind::Cluster,
+        ] {
+            jobs.submit(SubmitJobRequest {
+                kind,
+                priority: Priority::Batch,
+                payload: Value::Null,
+                callback_url: None,
+            })
+            .await
+            .unwrap();
+        }
+        jobs.claim_next_for_worker("worker-a", &[JobKind::VisionAnalysis], 30_000)
+            .await
+            .unwrap();
+        jobs.complete_lease("job-1", "worker-a", json!({"ok": true}))
+            .await;
+        jobs.claim_next_for_worker("worker-b", &[JobKind::EmbedBatch], 30_000)
+            .await
+            .unwrap();
+
+        let report = jobs.prune_terminal_jobs().await;
+        assert_eq!(report.removed, 1);
+        assert!(jobs.get("job-1").await.is_none());
+        assert_eq!(jobs.get("job-2").await.unwrap().status, JobStatus::Running);
+        assert_eq!(jobs.get("job-3").await.unwrap().status, JobStatus::Queued);
+
+        let claimed = jobs
+            .claim_next_for_worker("worker-c", &[JobKind::Cluster], 30_000)
+            .await
+            .unwrap();
+        assert_eq!(claimed.id, "job-3");
+        assert_eq!(claimed.status, JobStatus::Running);
+    }
+
+    #[tokio::test]
     async fn sqlite_pruning_persists_removed_terminal_jobs() {
         let path = unique_db_path("prune");
         let policy = JobRetentionPolicy {
@@ -2808,21 +2885,35 @@ mod tests {
     async fn prune_endpoint_returns_report_and_records_metrics() {
         let jobs = JobRegistry::new(JobRetentionPolicy {
             terminal_retention_ms: 0,
-            max_pruned_jobs: 10,
+            max_pruned_jobs: 1,
         });
-        jobs.submit(SubmitJobRequest {
-            kind: JobKind::VisionAnalysis,
-            priority: Priority::Batch,
-            payload: Value::Null,
-            callback_url: None,
-        })
-        .await
-        .unwrap();
+        for kind in [JobKind::VisionAnalysis, JobKind::Cluster] {
+            jobs.submit(SubmitJobRequest {
+                kind,
+                priority: Priority::Batch,
+                payload: Value::Null,
+                callback_url: None,
+            })
+            .await
+            .unwrap();
+        }
         jobs.claim_next_for_worker("worker-a", &[JobKind::VisionAnalysis], 30_000)
             .await
             .unwrap();
         jobs.complete_lease("job-1", "worker-a", json!({"ok": true}))
             .await;
+        jobs.claim_next_for_worker("worker-a", &[JobKind::Cluster], 30_000)
+            .await
+            .unwrap();
+        jobs.fail_lease(
+            "job-2",
+            "worker-a",
+            JobFailure {
+                message: "bad input".into(),
+                retryable: false,
+            },
+        )
+        .await;
 
         let app = build_router(test_state_with_jobs(jobs));
         let response = app
@@ -2837,11 +2928,23 @@ mod tests {
         assert_eq!(value["pruned"]["by_status"][0]["removed"], 1);
 
         let response = app
+            .clone()
+            .oneshot(Request::post("/v1/jobs/prune").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let value = response_json(response).await;
+        assert_eq!(value["pruned"]["removed"], 1);
+        assert_eq!(value["pruned"]["by_status"][0]["status"], "failed");
+        assert_eq!(value["pruned"]["by_status"][0]["removed"], 1);
+
+        let response = app
             .oneshot(Request::get("/metrics").body(Body::empty()).unwrap())
             .await
             .unwrap();
         let metrics = response_text(response).await;
         assert!(metrics.contains("fairlead_job_prunes_total{status=\"complete\"} 1"));
+        assert!(metrics.contains("fairlead_job_prunes_total{status=\"failed\"} 1"));
     }
 
     #[tokio::test]
