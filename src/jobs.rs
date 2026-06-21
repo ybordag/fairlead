@@ -375,6 +375,40 @@ impl JobRegistry {
         report
     }
 
+    pub async fn renew_lease(
+        &self,
+        id: &str,
+        worker_id: &str,
+        lease_duration_ms: u128,
+    ) -> RenewJobLeaseResult {
+        let mut guard = self.inner.write().await;
+        let Some(job) = guard.jobs.get_mut(id) else {
+            return RenewJobLeaseResult::NotFound;
+        };
+
+        if job.status != JobStatus::Running {
+            return RenewJobLeaseResult::NotRunning(job.clone());
+        }
+
+        let Some(lease) = &job.lease else {
+            return RenewJobLeaseResult::NotRunning(job.clone());
+        };
+
+        if lease.worker_id != worker_id {
+            return RenewJobLeaseResult::LeaseNotHeld(job.clone());
+        }
+
+        let now = unix_ms();
+        if lease.expires_at_unix_ms <= now {
+            return RenewJobLeaseResult::Expired(job.clone());
+        }
+
+        let lease = job.lease.as_mut().expect("lease checked above");
+        lease.expires_at_unix_ms = now + lease_duration_ms;
+        job.updated_at_unix_ms = now;
+        RenewJobLeaseResult::Renewed(job.clone())
+    }
+
     pub async fn cancel(&self, id: &str) -> CancelJobResult {
         let mut guard = self.inner.write().await;
         let Some(job) = guard.jobs.get_mut(id) else {
@@ -397,6 +431,14 @@ impl JobRegistry {
 pub enum CancelJobResult {
     Cancelled(JobRecord),
     AlreadyTerminal(JobRecord),
+    NotFound,
+}
+
+pub enum RenewJobLeaseResult {
+    Renewed(JobRecord),
+    NotRunning(JobRecord),
+    LeaseNotHeld(JobRecord),
+    Expired(JobRecord),
     NotFound,
 }
 
@@ -974,6 +1016,124 @@ mod tests {
             JobStatus::Cancelled
         );
         assert!(jobs.queued_jobs_by_priority().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn renew_lease_extends_current_workers_running_job() {
+        let jobs = JobRegistry::default();
+        jobs.submit(SubmitJobRequest {
+            kind: JobKind::VisionAnalysis,
+            priority: Priority::Batch,
+            payload: Value::Null,
+            callback_url: None,
+        })
+        .await
+        .unwrap();
+
+        let claimed = jobs
+            .claim_next_for_worker("worker-a", &[JobKind::VisionAnalysis], 30_000)
+            .await
+            .unwrap();
+        let original_lease = claimed.lease.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+
+        let result = jobs.renew_lease("job-1", "worker-a", 30_000).await;
+        let RenewJobLeaseResult::Renewed(job) = result else {
+            panic!("expected lease renewal");
+        };
+        let renewed_lease = job.lease.unwrap();
+
+        assert_eq!(job.status, JobStatus::Running);
+        assert_eq!(job.attempts, 1);
+        assert_eq!(renewed_lease.worker_id, "worker-a");
+        assert_eq!(renewed_lease.attempt, 1);
+        assert_eq!(
+            renewed_lease.claimed_at_unix_ms,
+            original_lease.claimed_at_unix_ms
+        );
+        assert!(renewed_lease.expires_at_unix_ms > original_lease.expires_at_unix_ms);
+    }
+
+    #[tokio::test]
+    async fn renew_lease_rejects_expired_lease() {
+        let jobs = JobRegistry::default();
+        jobs.submit(SubmitJobRequest {
+            kind: JobKind::VisionAnalysis,
+            priority: Priority::Batch,
+            payload: Value::Null,
+            callback_url: None,
+        })
+        .await
+        .unwrap();
+
+        jobs.claim_next_for_worker("worker-a", &[JobKind::VisionAnalysis], 0)
+            .await
+            .unwrap();
+
+        let result = jobs.renew_lease("job-1", "worker-a", 30_000).await;
+        let RenewJobLeaseResult::Expired(job) = result else {
+            panic!("expected expired lease rejection");
+        };
+        assert_eq!(job.status, JobStatus::Running);
+        assert_eq!(job.lease.unwrap().worker_id, "worker-a");
+    }
+
+    #[tokio::test]
+    async fn renew_lease_rejects_worker_that_does_not_hold_lease() {
+        let jobs = JobRegistry::default();
+        jobs.submit(SubmitJobRequest {
+            kind: JobKind::EmbedBatch,
+            priority: Priority::Realtime,
+            payload: Value::Null,
+            callback_url: None,
+        })
+        .await
+        .unwrap();
+
+        jobs.claim_next_for_worker("worker-a", &[JobKind::EmbedBatch], 30_000)
+            .await
+            .unwrap();
+
+        let result = jobs.renew_lease("job-1", "worker-b", 30_000).await;
+        let RenewJobLeaseResult::LeaseNotHeld(job) = result else {
+            panic!("expected lease ownership rejection");
+        };
+        assert_eq!(job.status, JobStatus::Running);
+        assert_eq!(job.lease.unwrap().worker_id, "worker-a");
+    }
+
+    #[tokio::test]
+    async fn renew_lease_rejects_non_running_job() {
+        let jobs = JobRegistry::default();
+        jobs.submit(SubmitJobRequest {
+            kind: JobKind::IndexBuild,
+            priority: Priority::Background,
+            payload: Value::Null,
+            callback_url: None,
+        })
+        .await
+        .unwrap();
+
+        let queued_result = jobs.renew_lease("job-1", "worker-a", 30_000).await;
+        let RenewJobLeaseResult::NotRunning(queued_job) = queued_result else {
+            panic!("expected queued job rejection");
+        };
+        assert_eq!(queued_job.status, JobStatus::Queued);
+
+        jobs.cancel("job-1").await;
+        let cancelled_result = jobs.renew_lease("job-1", "worker-a", 30_000).await;
+        let RenewJobLeaseResult::NotRunning(cancelled_job) = cancelled_result else {
+            panic!("expected terminal job rejection");
+        };
+        assert_eq!(cancelled_job.status, JobStatus::Cancelled);
+    }
+
+    #[tokio::test]
+    async fn renew_lease_reports_missing_job() {
+        let jobs = JobRegistry::default();
+
+        let result = jobs.renew_lease("missing", "worker-a", 30_000).await;
+        assert!(matches!(result, RenewJobLeaseResult::NotFound));
     }
 
     #[tokio::test]

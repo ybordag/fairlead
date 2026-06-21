@@ -704,10 +704,12 @@ execution simple and bounded.
 - [x] Prevent duplicate claims for the same job.
 - [x] Requeue expired leases when attempts remain.
 - [x] Mark expired leases `failed` when retry attempts are exhausted.
+- [x] Add worker-scoped lease renewal for the worker holding the running lease.
 - [x] Define initial cancellation semantics for queued and running jobs.
 - [x] Add tests for priority ordering, FIFO ordering, stale worker exclusion,
   unsupported job types, and duplicate-claim prevention.
 - [x] Add tests for lease expiry.
+- [x] Add tests for lease renewal and lease ownership.
 - Add tests for cancellation races.
 
 ### Phase 6D: Worker Execution, Retries, and Utilization

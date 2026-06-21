@@ -253,6 +253,7 @@ GET  /v1/scheduler/preview    — preview next job/worker match without mutation
 POST /v1/workers/register       — register or update worker capabilities
 POST /v1/workers/{id}/heartbeat — refresh worker liveness
 POST /v1/workers/{id}/claim     — lease a compatible queued job to a worker
+POST /v1/workers/{worker_id}/jobs/{job_id}/renew — renew a held lease
 GET  /v1/workers                — list registered workers
 ```
 
@@ -275,6 +276,9 @@ Current Phase 6B/6C behavior:
   compatible queued job, marks it `running`, and removes it from queue metrics
 - worker claims first sweep expired leases: expired jobs reenter their priority
   queue if attempts remain, otherwise they become `failed`
+- `POST /v1/workers/{worker_id}/jobs/{job_id}/renew` validates the worker,
+  sweeps expired leases, and extends the lease only if that worker still holds
+  the running job
 - no job is dispatched to a worker yet
 - no callback is delivered yet
 - no durable queue or background scheduler loop exists yet
@@ -287,7 +291,7 @@ job submitted
   → scheduler selects a registered worker with matching job type + VRAM headroom
   → Fairlead records a bounded lease for the running attempt
   → worker processes async
-  → worker completes or heartbeats before the lease expires
+  → worker completes or renews the job lease before it expires
   → callback fires to caller on completion
 ```
 
@@ -303,6 +307,7 @@ job submitted
 - `POST /v1/workers/{id}/heartbeat` — workers refresh liveness
 - `GET /v1/workers` — current in-memory worker registry
 - `POST /v1/workers/{id}/claim` — Phase 6C worker-pull claim endpoint
+- `POST /v1/workers/{worker_id}/jobs/{job_id}/renew` — Phase 6C lease renewal
 - `POST /v1/resources/report` — GPU consumers and workers report capacity
 - `GET /v1/resources` — current resource control-plane state
 - `GET /metrics` — Prometheus: queue depth/wait, circuit states, VRAM per node
@@ -448,11 +453,13 @@ leased/running
 ```
 
 The key mechanism is a lease. When a worker starts a job, Fairlead records the
-worker ID and a `lease_expires_at` timestamp. The worker must complete or
-heartbeat before the lease expires. If it does not, Fairlead releases any
+worker ID and a `lease_expires_at` timestamp. The worker must complete the job
+or renew that job lease before it expires. If it does not, Fairlead releases any
 resource reservation and either retries the job on another worker or marks it
-failed. This avoids holding an open process relationship for days; Fairlead only
-stores job state and watches bounded leases.
+failed. This is separate from worker heartbeat, which only proves worker
+liveness. Job renewal proves that the leased attempt is still making progress.
+This avoids holding an open process relationship for days; Fairlead only stores
+job state and watches bounded leases.
 
 The first useful workload is `vision_analysis`: a user-triggered image workflow
 that should outrank background indexing but yield to realtime chat or retrieval.

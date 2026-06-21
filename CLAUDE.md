@@ -143,15 +143,16 @@ GET    /v1/jobs/{id}         — check status: queued | running | complete | fai
 DELETE /v1/jobs/{id}         — cancel a queued job
 GET    /v1/scheduler/preview — preview next job/worker match without mutation
 POST   /v1/workers/{id}/claim — lease a compatible queued job to a worker
+POST   /v1/workers/{worker_id}/jobs/{job_id}/renew — renew a held lease
 ```
 
 The Phase 6B slices store job records in memory and track explicit per-priority
 queued job IDs. The first Phase 6C slice lets fresh workers claim compatible
 queued jobs. Claimed jobs become `running`, attempts increment, and lease
 metadata is attached. Expired running leases are requeued when attempts remain
-and failed when attempts are exhausted. Worker execution, deregistration,
-callback delivery, worker utilization metrics, and SQLite-backed persistence are
-still planned.
+and failed when attempts are exhausted. Workers holding a lease can renew it
+before expiry. Worker execution, deregistration, callback delivery, worker
+utilization metrics, and SQLite-backed persistence are still planned.
 
 Job request body:
 ```json
@@ -169,6 +170,7 @@ Job request body:
 POST   /v1/workers/register        — worker announces: job types, endpoint, node
 POST   /v1/workers/{id}/heartbeat  — refresh worker liveness
 POST   /v1/workers/{id}/claim      — claim a compatible queued job
+POST   /v1/workers/{worker_id}/jobs/{job_id}/renew — renew a held lease
 GET    /v1/workers                 — list registered workers and their status
 ```
 
@@ -354,6 +356,7 @@ WORKER_HEARTBEAT_SECS        — interval before a worker is considered stale
 - [x] Initial cancellation semantics for queued and running jobs.
 - [x] Requeue expired leases when attempts remain.
 - [x] Mark expired leases failed when attempts are exhausted.
+- [x] Let the worker holding a running lease renew it before expiry.
 
 ### Phase 6D+ — Remaining async compute router work
 

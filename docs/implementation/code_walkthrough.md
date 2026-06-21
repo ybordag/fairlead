@@ -636,6 +636,10 @@ Router::new()
     .route("/v1/workers", get(workers::list_workers))
     .route("/v1/workers/register", post(workers::register_worker))
     .route("/v1/workers/:id/claim", post(scheduler::claim_worker_job_handler))
+    .route(
+        "/v1/workers/:worker_id/jobs/:job_id/renew",
+        post(scheduler::renew_worker_job_lease_handler),
+    )
     .route("/v1/workers/:id/heartbeat", post(workers::heartbeat_worker))
     .route("/v1/chat/completions", post(proxy::chat_completions))
     .route("/v1/embeddings", post(proxy::embeddings))
@@ -658,6 +662,8 @@ This means:
 - `GET /v1/workers` calls `workers::list_workers`.
 - `POST /v1/workers/register` calls `workers::register_worker`.
 - `POST /v1/workers/{id}/claim` calls `scheduler::claim_worker_job_handler`.
+- `POST /v1/workers/{worker_id}/jobs/{job_id}/renew` calls
+  `scheduler::renew_worker_job_lease_handler`.
 - `POST /v1/workers/{id}/heartbeat` calls `workers::heartbeat_worker`.
 - `POST /v1/chat/completions` calls `proxy::chat_completions`.
 - `POST /v1/embeddings` calls `proxy::embeddings`.
@@ -1252,6 +1258,20 @@ lease is created, and Fairlead does not call the worker endpoint.
 
 The claim endpoint still does not call the worker process. It only grants the
 worker a bounded lease and returns the job payload to run.
+
+`POST /v1/workers/{worker_id}/jobs/{job_id}/renew` extends a running lease:
+
+1. Fairlead looks up the worker by ID.
+2. Missing workers return `404`; stale workers return `409`.
+3. Fairlead sweeps expired leases before renewal. A late renewal request cannot
+   resurrect an expired lease.
+4. `JobRegistry::renew_lease()` checks that the job exists, is still `running`,
+   and has a lease held by that worker.
+5. If those checks pass, Fairlead keeps the same attempt number and claimed-at
+   timestamp, extends `expires_at_unix_ms`, updates the job timestamp, and
+   returns the job.
+6. If the job is missing, Fairlead returns `404`. If it is not running or is
+   leased to another worker, Fairlead returns `409`.
 
 The proxy logs structured fields for the same decision: request ID, workload,
 origin node, affinity key, selected backend, retry count, fallback reason,

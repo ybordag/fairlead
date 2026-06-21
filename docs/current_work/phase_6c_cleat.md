@@ -19,12 +19,13 @@ Cleat includes:
   and expiry time.
 - Duplicate-claim prevention by removing claimed jobs from the queue.
 - Opportunistic lease expiry handling before fresh worker claims.
+- Worker-scoped lease renewal for the worker currently holding the lease.
 - Initial cancellation behavior for queued and running jobs.
 
 Cleat does not include:
 
 - Worker execution or callbacks.
-- Worker lease renewal or completion/failure endpoints.
+- Worker completion/failure endpoints.
 - Durable job persistence.
 - Background lease expiry scheduler loop.
 - Complete worker utilization metrics.
@@ -59,9 +60,22 @@ Implemented:
   terminal jobs.
 - Added endpoint coverage proving worker claims can reclaim an expired lease.
 
+## Third Slice
+
+Implemented:
+
+- Added `JobRegistry::renew_lease()`.
+- Added `POST /v1/workers/{worker_id}/jobs/{job_id}/renew`.
+- Renewal validates worker existence and freshness before touching the job.
+- Renewal first sweeps expired leases so late renewal cannot resurrect an
+  expired lease.
+- Only the worker holding the running lease can renew it.
+- Renewal preserves the attempt number and original claimed-at timestamp while
+  extending the expiry time.
+- Added registry and endpoint tests for success, missing workers/jobs, stale
+  workers, wrong lease holders, non-running jobs, and expired leases.
+
 Remaining likely Cleat work:
 
-- Decide whether to add explicit lease renewal in 6C or defer it to worker
-  execution in 6D.
 - Tighten cancellation-race tests around running jobs and future completion
   endpoints.

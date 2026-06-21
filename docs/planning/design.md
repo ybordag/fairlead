@@ -58,6 +58,7 @@ GET  /v1/scheduler/preview
 POST /v1/workers/register
 POST /v1/workers/{id}/heartbeat
 POST /v1/workers/{id}/claim
+POST /v1/workers/{worker_id}/jobs/{job_id}/renew
 GET  /v1/workers
 GET  /health
 GET  /metrics
@@ -76,8 +77,9 @@ single model-server endpoint. Routing, failover, resource-aware backend
 eligibility, and priority admission happen transparently behind that address.
 The scheduler preview endpoint is non-mutating: it shows which queued job and
 fresh compatible worker would match next. The worker claim endpoint grants a
-bounded lease and marks a compatible job running. Durable queues, execution, and
-callback delivery are future Phase 6 subphases.
+bounded lease and marks a compatible job running. The worker lease renewal
+endpoint extends a running lease only for the worker currently holding it.
+Durable queues, execution, and callback delivery are future Phase 6 subphases.
 
 ---
 

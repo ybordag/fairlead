@@ -101,9 +101,8 @@ synchronous and async compute.
 
 When Phase 6C finishes worker-pull claims and leases, add tests for:
 
-- lease heartbeat or renewal behavior, if implemented
 - cancellation races between claim and cancel
-- lease ownership checks for future renew/complete/fail endpoints
+- lease ownership checks for future complete/fail endpoints
 - background lease sweep behavior, if Fairlead adds a scheduler loop instead of
   claim-time opportunistic sweeps only
 
@@ -112,7 +111,8 @@ metrics, and non-mutating scheduler preview. These tests require mutating claims
 lease metadata, running-job state, and later worker execution endpoints. Cleat
 now covers the claim endpoint, duplicate-claim prevention, stale worker
 exclusion, unsupported job types, priority ordering, FIFO ordering,
-queued/running cancellation basics, and claim-time expired lease requeue/failure.
+queued/running cancellation basics, claim-time expired lease requeue/failure,
+lease renewal, and renewal ownership checks.
 
 ### `phase_6d_worker_execution_and_utilization`
 
