@@ -345,8 +345,11 @@ recovery, metrics, and structured traces:
 ```
 
 The demo starts two mock OpenAI-compatible backends named `spark-a` and
-`spark-b`, starts Fairlead, then asserts the expected routing behavior. See
-[`demo/README.md`](demo/README.md) for details.
+`spark-b`, starts Fairlead, then asserts the expected routing behavior. The
+routing and async demos both source
+[`demo/shared_pool_policy.sh`](demo/shared_pool_policy.sh) so local demos use
+the same strict pool vocabulary. See [`demo/README.md`](demo/README.md) for
+details.
 
 ## Local Inference: vLLM
 

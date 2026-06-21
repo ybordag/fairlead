@@ -8,6 +8,9 @@ FAIRLEAD_PORT="${FAIRLEAD_DEMO_PORT:-17000}"
 LOG_DIR="${ROOT_DIR}/target/routing-demo"
 FAIRLEAD_LOG="${LOG_DIR}/fairlead.log"
 
+# shellcheck source=demo/shared_pool_policy.sh
+source "${ROOT_DIR}/demo/shared_pool_policy.sh"
+
 mkdir -p "${LOG_DIR}"
 
 PIDS=()
@@ -122,6 +125,10 @@ echo "Starting Fairlead on http://127.0.0.1:${FAIRLEAD_PORT}..."
   cd "${ROOT_DIR}"
   PORT="${FAIRLEAD_PORT}" \
   BACKENDS_JSON="${BACKENDS_JSON}" \
+  POOLS_JSON="${POOLS_JSON}" \
+  WORKLOAD_POOLS_JSON="${WORKLOAD_POOLS_JSON}" \
+  STRICT_WORKLOAD_POOLS="${STRICT_WORKLOAD_POOLS}" \
+  STRICT_WORKER_POOLS="${STRICT_WORKER_POOLS}" \
   CIRCUIT_FAILURE_THRESHOLD=1 \
   CIRCUIT_COOLDOWN_SECS=2 \
   HEALTH_PROBE_INTERVAL_SECS=60 \

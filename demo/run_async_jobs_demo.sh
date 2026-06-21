@@ -10,6 +10,9 @@ CALLBACK_LOG="${LOG_DIR}/callback.log"
 CALLBACK_PAYLOAD="${LOG_DIR}/callback-payload.json"
 JOB_DB="${LOG_DIR}/fairlead-jobs.sqlite3"
 
+# shellcheck source=demo/shared_pool_policy.sh
+source "${ROOT_DIR}/demo/shared_pool_policy.sh"
+
 mkdir -p "${LOG_DIR}"
 rm -f "${FAIRLEAD_LOG}" "${CALLBACK_LOG}" "${CALLBACK_PAYLOAD}" "${JOB_DB}" "${JOB_DB}-shm" "${JOB_DB}-wal"
 
@@ -108,6 +111,10 @@ echo "Starting Fairlead async job service on http://127.0.0.1:${FAIRLEAD_PORT}..
 (
   cd "${ROOT_DIR}"
   PORT="${FAIRLEAD_PORT}" \
+  POOLS_JSON="${POOLS_JSON}" \
+  WORKLOAD_POOLS_JSON="${WORKLOAD_POOLS_JSON}" \
+  STRICT_WORKLOAD_POOLS="${STRICT_WORKLOAD_POOLS}" \
+  STRICT_WORKER_POOLS="${STRICT_WORKER_POOLS}" \
   JOB_STORE=sqlite \
   JOB_DB_PATH="${JOB_DB}" \
   CALLBACK_MAX_ATTEMPTS=3 \
@@ -126,6 +133,7 @@ worker_response="$(post_json "http://127.0.0.1:${FAIRLEAD_PORT}/v1/workers/regis
   "id": "vision-worker",
   "endpoint_url": "http://127.0.0.1:19000",
   "node_id": "spark-a",
+  "pool": "vision",
   "job_types": ["vision_analysis"],
   "max_concurrent_jobs": 1,
   "available_vram_mb": 24000

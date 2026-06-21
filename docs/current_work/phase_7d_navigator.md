@@ -16,15 +16,17 @@ decisions.
 - Added unit coverage for strict worker registration, defaulted worker pools,
   strict workload startup validation, complete workload policy, and derived
   backend pools.
+- Added `demo/shared_pool_policy.sh` and wired both local demos to use the same
+  strict sync/async pool vocabulary.
+- Updated the DGX Spark deployment notes with shared `interactive-llm`,
+  `vision`, and `batch` pool examples, strictness flags, and worker registration
+  examples.
 - Updated deferred e2e plans for strict workload startup, strict worker
   registration, DGX Spark smoke tests, and future cloud overflow pools.
 
 ## Remaining
 
-- Add local demo config that shows sync and async workloads using the same pool
-  vocabulary.
-- Document local DGX pools, peer-node pools, and shared Fairlead deployment
-  examples using the finalized strictness flags.
+- Do a final docs/demo consistency pass before opening the Phase 7D PR.
 
 ## Decisions
 

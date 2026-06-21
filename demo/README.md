@@ -6,6 +6,19 @@ Fairlead includes GPU-free demos that run entirely on localhost:
 - `run_async_jobs_demo.sh` shows async job submission, worker-pull execution,
   terminal callback delivery, SQLite job state, and metrics.
 
+Both demos source `shared_pool_policy.sh`, which defines one pool vocabulary for
+sync and async work:
+
+- `local-llm` for OpenAI-compatible chat and embedding backends.
+- `vision` for user-triggered vision jobs.
+- `batch` for background and batch work.
+
+The shared policy enables `STRICT_WORKLOAD_POOLS=true` and
+`STRICT_WORKER_POOLS=true`, so the demos fail fast if workload policy is
+incomplete or a worker registers with a misspelled pool. This is the same shape
+recommended for production-like demos, while local experiments can still leave
+the strict flags unset.
+
 ---
 
 ## Routing Demo
@@ -25,6 +38,10 @@ The script starts:
 - mock backend `spark-a` on `127.0.0.1:18101`
 - mock backend `spark-b` on `127.0.0.1:18102`
 - Fairlead on `127.0.0.1:17000`
+
+The mock backends are both in the `local-llm` pool. The routing demo therefore
+shows locality, affinity, resource pressure, circuit fallback, retry, and
+metrics within one eligible workload pool.
 
 Ports can be overridden:
 
@@ -79,6 +96,10 @@ The script starts:
 - callback receiver on `127.0.0.1:18110`
 - Fairlead on `127.0.0.1:17010`
 - SQLite job store at `target/async-demo/fairlead-jobs.sqlite3`
+
+The fake worker registers in the `vision` pool. The async demo therefore shows
+worker-pull placement through the same `WORKLOAD_POOLS_JSON` vocabulary used by
+the synchronous routing demo.
 
 Ports can be overridden:
 

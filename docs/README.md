@@ -28,7 +28,8 @@ detail.
 ## Implementation And Examples
 
 - [`../demo/README.md`](../demo/README.md) — local GPU-free routing and async job
-  demos. The executable demos remain under the repo-level `demo/` directory.
+  demos, including the shared strict pool policy used by both runners. The
+  executable demos remain under the repo-level `demo/` directory.
 - [`implementation/dgx_spark_deployment.md`](implementation/dgx_spark_deployment.md)
   — manual two-node DGX Spark deployment notes using vLLM and Fairlead.
 - [`implementation/fixture_examples.md`](implementation/fixture_examples.md) —

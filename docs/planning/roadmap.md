@@ -829,8 +829,8 @@ async workers.
 
 #### Phase 7D: Shared Pool Demo and Docs
 
-- Document local DGX pools, peer-node pools, and shared Fairlead deployments.
-- Add local demo config that shows sync and async workloads using the same pool
+- [x] Document local DGX pools, peer-node pools, and shared Fairlead deployments.
+- [x] Add local demo config that shows sync and async workloads using the same pool
   vocabulary.
 - [x] Add optional strict worker pool validation. Default registration remains
   permissive; `STRICT_WORKER_POOLS=true` rejects worker pools not present in

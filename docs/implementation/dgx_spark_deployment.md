@@ -19,6 +19,31 @@ cache, batching, and token generation. Fairlead owns the routing decision: which
 backend should receive the request, whether a circuit is open, and whether the
 request origin should prefer a same-node backend.
 
+## Pool Shape For Shared Deployments
+
+For a shared Fairlead process that receives requests from more than one DGX
+Spark node, put both interactive vLLM backends in the same LLM pool. That lets
+the workload policy say "chat can use the interactive LLM pool" while
+`X-Fairlead-Origin-Node` decides which backend in that pool should be preferred.
+
+```text
+pool: interactive-llm
+  - spark-a-vllm, node_id=spark-a
+  - spark-b-vllm, node_id=spark-b
+
+pool: vision
+  - async vision workers
+
+pool: batch
+  - async embedding, indexing, and clustering workers
+```
+
+If instead one Fairlead process is router-local to a single node and should
+always prefer that node before a peer, use ordered pools such as `local-llm` and
+`peer-llm` for that process. Pool order is evaluated before cross-pool origin
+locality, so use separate local/peer pools only when that ordering is the
+intended policy.
+
 ## What uv Is
 
 `uv` is a Python environment and package manager. In this setup it replaces the
@@ -137,19 +162,30 @@ target/release/fairlead
 Run Fairlead on one DGX Spark node and point it at both vLLM servers.
 
 ```bash
+POOLS_JSON='["interactive-llm", "vision", "batch"]' \
+WORKLOAD_POOLS_JSON='{
+  "chat_completions": ["interactive-llm"],
+  "embeddings": ["interactive-llm"],
+  "vision_analysis": ["vision"],
+  "embed_batch": ["batch", "vision"],
+  "index_build": ["batch"],
+  "cluster": ["batch"]
+}' \
+STRICT_WORKLOAD_POOLS=true \
+STRICT_WORKER_POOLS=true \
 BACKENDS_JSON='[
   {
     "id": "spark-a-vllm",
     "url": "http://localhost:8000/v1",
     "node_id": "spark-a",
-    "pool": "local-llm",
+    "pool": "interactive-llm",
     "workloads": ["chat_completions", "embeddings"]
   },
   {
     "id": "spark-b-vllm",
     "url": "http://spark-b:8000/v1",
     "node_id": "spark-b",
-    "pool": "local-llm",
+    "pool": "interactive-llm",
     "workloads": ["chat_completions", "embeddings"]
   }
 ]' \
@@ -162,19 +198,30 @@ Detached form:
 
 ```bash
 mkdir -p ~/logs
-nohup bash -lc 'BACKENDS_JSON='"'"'[
+nohup bash -lc 'POOLS_JSON='"'"'["interactive-llm", "vision", "batch"]'"'"' \
+WORKLOAD_POOLS_JSON='"'"'{
+  "chat_completions": ["interactive-llm"],
+  "embeddings": ["interactive-llm"],
+  "vision_analysis": ["vision"],
+  "embed_batch": ["batch", "vision"],
+  "index_build": ["batch"],
+  "cluster": ["batch"]
+}'"'"' \
+STRICT_WORKLOAD_POOLS=true \
+STRICT_WORKER_POOLS=true \
+BACKENDS_JSON='"'"'[
   {
     "id": "spark-a-vllm",
     "url": "http://localhost:8000/v1",
     "node_id": "spark-a",
-    "pool": "local-llm",
+    "pool": "interactive-llm",
     "workloads": ["chat_completions", "embeddings"]
   },
   {
     "id": "spark-b-vllm",
     "url": "http://spark-b:8000/v1",
     "node_id": "spark-b",
-    "pool": "local-llm",
+    "pool": "interactive-llm",
     "workloads": ["chat_completions", "embeddings"]
   }
 ]'"'"' PORT=7000 LOG_LEVEL=info ./target/release/fairlead' \
@@ -191,8 +238,8 @@ curl http://localhost:7000/metrics
 The metrics output should show both backend circuits:
 
 ```text
-fairlead_circuit_state{backend="spark-a-vllm",node="spark-a",pool="local-llm",...} 0
-fairlead_circuit_state{backend="spark-b-vllm",node="spark-b",pool="local-llm",...} 0
+fairlead_circuit_state{backend="spark-a-vllm",node="spark-a",pool="interactive-llm",...} 0
+fairlead_circuit_state{backend="spark-b-vllm",node="spark-b",pool="interactive-llm",...} 0
 ```
 
 ## Test Origin-Aware Routing
@@ -251,11 +298,60 @@ curl http://localhost:7000/metrics
 The peer backend should show circuit state `2`, which means open:
 
 ```text
-fairlead_circuit_state{backend="spark-b-vllm",node="spark-b",pool="local-llm",...} 2
+fairlead_circuit_state{backend="spark-b-vllm",node="spark-b",pool="interactive-llm",...} 2
 ```
 
 Now send the same peer-origin request again. Fairlead should skip the
 circuit-open peer backend and route directly to the local backend.
+
+## Register Async Workers By Pool
+
+Async workers should use the same pool vocabulary as the synchronous backends.
+With `STRICT_WORKER_POOLS=true`, a typo such as `vison` is rejected before it
+can affect placement or metrics.
+
+Register a vision worker on the node where that worker process runs:
+
+```bash
+curl http://localhost:7000/v1/workers/register \
+  -H 'content-type: application/json' \
+  -d '{
+    "id": "spark-a-vision-worker",
+    "endpoint_url": "http://spark-a:9000",
+    "node_id": "spark-a",
+    "pool": "vision",
+    "job_types": ["vision_analysis"],
+    "max_concurrent_jobs": 1,
+    "available_vram_mb": 24000
+  }'
+```
+
+Register batch workers separately when they exist:
+
+```bash
+curl http://localhost:7000/v1/workers/register \
+  -H 'content-type: application/json' \
+  -d '{
+    "id": "spark-b-batch-worker",
+    "endpoint_url": "http://spark-b:9001",
+    "node_id": "spark-b",
+    "pool": "batch",
+    "job_types": ["embed_batch", "index_build", "cluster"],
+    "max_concurrent_jobs": 2,
+    "available_vram_mb": 16000
+  }'
+```
+
+The important separation is:
+
+- `interactive-llm` holds OpenAI-compatible vLLM backends for synchronous chat
+  and embeddings.
+- `vision` holds user-triggered image/vision workers.
+- `batch` holds lower-priority indexing, embedding, and clustering workers.
+
+This keeps user-facing chat from competing with async background work at the
+placement-policy level. Actual GPU sharing still depends on how vLLM and worker
+processes are deployed on each node.
 
 ## Operational Notes
 
@@ -267,5 +363,8 @@ circuit-open peer backend and route directly to the local backend.
 - Fairlead probes OpenAI-compatible backends at `/v1/models` by default. Use
   `health_path` in `BACKENDS_JSON` for backends that expose health elsewhere,
   such as `/health`.
+- Keep private hostnames, model paths, API keys, and node-specific fixture files
+  out of git. Use sanitized names like `spark-a`, `spark-b`, `interactive-llm`,
+  `vision`, and `batch` in committed examples.
 - Detached `nohup` processes are useful for manual tests. Production deployment
   should use systemd, Docker, k3s, or another supervisor.
