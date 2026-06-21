@@ -5,7 +5,7 @@ use std::{
     time::Duration,
 };
 
-use crate::{router::CircuitState, AppState};
+use crate::{jobs::JobPruneReport, router::CircuitState, AppState};
 
 #[derive(Clone, Default)]
 pub struct RoutingMetrics {
@@ -20,6 +20,7 @@ struct RoutingMetricsInner {
     pool_decisions: HashMap<PoolDecisionLabels, PoolDecisionAggregate>,
     async_pool_decisions: HashMap<AsyncPoolDecisionLabels, AsyncPoolDecisionAggregate>,
     callbacks: HashMap<CallbackLabels, u64>,
+    job_prunes: HashMap<JobPruneLabels, u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -83,6 +84,11 @@ pub struct CallbackLabels {
     pub status: String,
     pub outcome: String,
     pub http_status: u16,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct JobPruneLabels {
+    pub status: String,
 }
 
 #[derive(Default)]
@@ -152,6 +158,16 @@ impl RoutingMetrics {
     pub fn record_callback(&self, labels: CallbackLabels) {
         let mut guard = self.inner.lock().expect("routing metrics mutex poisoned");
         *guard.callbacks.entry(labels).or_default() += 1;
+    }
+
+    pub fn record_job_prune(&self, report: &JobPruneReport) {
+        let mut guard = self.inner.lock().expect("routing metrics mutex poisoned");
+        for snapshot in &report.by_status {
+            let labels = JobPruneLabels {
+                status: snapshot.status.to_string(),
+            };
+            *guard.job_prunes.entry(labels).or_default() += snapshot.removed as u64;
+        }
     }
 
     fn render(&self) -> String {
@@ -345,6 +361,19 @@ impl RoutingMetrics {
                 prometheus_escape(&labels.status),
                 prometheus_escape(&labels.outcome),
                 labels.http_status,
+                count,
+            ));
+        }
+
+        body.push_str(
+            "# HELP fairlead_job_prunes_total Terminal async jobs pruned by terminal status\n\
+             # TYPE fairlead_job_prunes_total counter\n",
+        );
+
+        for (labels, count) in &guard.job_prunes {
+            body.push_str(&format!(
+                "fairlead_job_prunes_total{{status=\"{}\"}} {}\n",
+                prometheus_escape(&labels.status),
                 count,
             ));
         }

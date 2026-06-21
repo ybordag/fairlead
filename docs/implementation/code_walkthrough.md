@@ -674,6 +674,7 @@ Router::new()
     .route("/v1/resources", get(resources::list_resources))
     .route("/v1/resources/report", post(resources::report_resources))
     .route("/v1/jobs", get(jobs::list_jobs).post(jobs::submit_job))
+    .route("/v1/jobs/prune", post(jobs::prune_jobs))
     .route("/v1/jobs/:id", get(jobs::get_job).delete(jobs::cancel_job))
     .route("/v1/scheduler/preview", get(scheduler::preview_next_assignment_handler))
     .route("/v1/workers", get(workers::list_workers))
@@ -709,6 +710,7 @@ This means:
 - `POST /v1/resources/report` calls `resources::report_resources`.
 - `POST /v1/jobs` calls `jobs::submit_job`.
 - `GET /v1/jobs` calls `jobs::list_jobs`.
+- `POST /v1/jobs/prune` calls `jobs::prune_jobs`.
 - `GET /v1/jobs/{id}` calls `jobs::get_job`.
 - `DELETE /v1/jobs/{id}` calls `jobs::cancel_job`.
 - `GET /v1/scheduler/preview` calls
@@ -1489,7 +1491,8 @@ The current code does not:
 - Reserve GPU memory for a request; resource reports are cooperative control-plane
   hints, not allocator-level reservations.
 
-Push dispatch, completed-job pruning, and process-level restart harnesses are
+Push dispatch, background pruning, and process-level restart harnesses are
 future roadmap phases, not current behavior. Synchronous backend pool routing,
-async worker pool eligibility and metrics, durable job state, and terminal
-callbacks are current behavior when the relevant configuration is enabled.
+async worker pool eligibility and metrics, durable job state, terminal
+callbacks, and explicit terminal-job pruning are current behavior when the
+relevant configuration is enabled.

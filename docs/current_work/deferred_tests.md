@@ -342,10 +342,88 @@ deregistration:
   `status="draining"` while drained workers are registered
 - run the same lifecycle sequence against two DGX Spark nodes with one worker on
   each node and verify drain on the local node causes claims to move to the peer
+- verify an operator can delete the draining worker after its last held job
+  completes or fails
+- verify a drained worker that keeps heartbeating remains visible as draining,
+  not silently reactivated
+- verify a worker re-registering while drained remains drained until explicit
+  reactivation
+- verify route ordering does not let `/v1/workers/{id}` shadow claim, drain,
+  reactivate, heartbeat, or result routes in a real HTTP process
+- verify graceful shutdown behavior when Fairlead receives drain/delete calls
+  while fake workers are polling and reporting results concurrently
 
 **Why deferred:** The in-process tests cover the registry and endpoint behavior.
 This e2e needs process lifecycle management, port allocation, fake worker
 scripts, SQLite job storage, restart assertions, and optional DGX Spark access.
+
+### `phase_8b_retention_pruning_process_e2e`
+
+Add an opt-in process-level e2e for terminal-job retention and pruning:
+
+- start Fairlead with `JOB_STORE=sqlite`, low `JOB_RETENTION_SECS`, and a small
+  `JOB_PRUNE_LIMIT`
+- submit jobs that complete, fail, cancel, remain queued, and remain running
+- create terminal jobs with pending and delivered callbacks
+- call `POST /v1/jobs/prune` and verify only eligible terminal jobs are removed
+- verify pending-callback terminal jobs are retained until delivery succeeds
+- verify delivered-callback terminal jobs become prunable
+- verify queued and running jobs survive pruning and can still be claimed,
+  renewed, completed, failed, or cancelled afterward
+- restart Fairlead and verify pruned jobs stay absent while retained jobs
+  recover from SQLite
+- scrape `/metrics` and verify `fairlead_job_prunes_total{status}` increments
+  by terminal status
+- run a larger bounded-prune scenario where multiple prune calls are needed
+  because `JOB_PRUNE_LIMIT` is smaller than the eligible terminal set
+- verify `GET /v1/jobs` ordering remains stable for retained jobs after pruning
+- verify `GET /v1/jobs/{id}` returns `404` for pruned jobs and still returns
+  retained terminal/running/queued jobs
+- verify queue depth, queue wait, terminal duration, callback, and prune metrics
+  stay internally consistent after pruning
+- verify repeated prune calls with no eligible jobs return `removed: 0` and do
+  not create misleading prune metrics
+- verify invalid environment configuration fails startup for
+  `JOB_RETENTION_SECS` and `JOB_PRUNE_LIMIT`
+- verify a large SQLite database with many terminal jobs can be pruned in
+  bounded batches without blocking request handling for an unacceptable time
+- verify pruning does not delete or corrupt callback delivery state for pending
+  callbacks across a restart
+- verify pruning after failed callback attempts retains the job until delivery
+  succeeds or a future callback-retention policy explicitly allows removal
+
+**Why deferred:** In-process tests cover registry behavior, SQLite persistence,
+the endpoint response, and metrics. This e2e needs process lifecycle
+management, port allocation, callback receiver processes, SQLite restart
+assertions, and timing control around retention age.
+
+### `phase_8d_background_maintenance_process_e2e`
+
+When Phase 8D adds background maintenance loops, add opt-in process-level e2e
+coverage for automatic lease expiry/recovery and background pruning:
+
+- start Fairlead with a short maintenance interval and SQLite job storage
+- submit a running job with an expired lease and verify the background loop
+  requeues or fails it without waiting for another worker claim
+- submit eligible terminal jobs and verify the background pruning loop removes
+  them without a manual `POST /v1/jobs/prune` call
+- verify the same pruning eligibility rules still apply in the background loop:
+  queued/running jobs are retained, recent terminal jobs are retained, and
+  pending-callback terminal jobs are retained
+- verify manual `POST /v1/jobs/prune` still works when the background loop is
+  enabled
+- verify background pruning respects the configured per-run prune limit and
+  makes progress across multiple intervals
+- verify background maintenance metrics or logs distinguish lease recovery from
+  pruning
+- restart Fairlead while a background maintenance interval is due and verify the
+  loop resumes without duplicating destructive work
+- verify shutdown does not interrupt SQLite writes in a way that corrupts job
+  state
+
+**Why deferred:** Phase 8D has not introduced background maintenance tasks yet.
+These tests need process lifecycle control, deterministic maintenance timing,
+SQLite restart checks, and log/metric scraping.
 
 ### `phase_6c_worker_claims_and_leases`
 

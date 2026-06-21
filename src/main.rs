@@ -81,11 +81,16 @@ async fn main() -> anyhow::Result<()> {
         "loaded pool policy"
     );
 
+    let job_retention_policy = jobs::JobRetentionPolicy {
+        terminal_retention_ms: u128::from(cfg.job_retention_secs) * 1000,
+        max_pruned_jobs: cfg.job_prune_limit,
+    };
     let jobs = match &cfg.job_store {
-        config::JobStoreConfig::Memory => jobs::JobRegistry::default(),
-        config::JobStoreConfig::Sqlite { path } => {
-            jobs::JobRegistry::with_store(storage::SqliteJobStore::open(path)?)?
-        }
+        config::JobStoreConfig::Memory => jobs::JobRegistry::new(job_retention_policy),
+        config::JobStoreConfig::Sqlite { path } => jobs::JobRegistry::with_store_and_retention(
+            storage::SqliteJobStore::open(path)?,
+            job_retention_policy,
+        )?,
     };
 
     let client = reqwest::Client::new();
@@ -169,6 +174,7 @@ pub(crate) fn build_router(state: AppState) -> Router {
         .route("/v1/resources/report", post(resources::report_resources))
         .route("/v1/models", get(models::list_models))
         .route("/v1/jobs", get(jobs::list_jobs).post(jobs::submit_job))
+        .route("/v1/jobs/prune", post(jobs::prune_jobs))
         .route("/v1/jobs/:id", get(jobs::get_job).delete(jobs::cancel_job))
         .route(
             "/v1/scheduler/preview",

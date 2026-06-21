@@ -321,6 +321,7 @@ general-purpose workflow engine.
 ```
 POST /v1/jobs        — submit, get job_id immediately
 GET  /v1/jobs        — list in-memory job records
+POST /v1/jobs/prune  — remove eligible terminal jobs by retention policy
 GET  /v1/jobs/{id}   — poll status
 DELETE /v1/jobs/{id} — cancel queued or running work when supported
 GET  /v1/scheduler/preview    — preview next job/worker match without mutation
@@ -389,6 +390,12 @@ Current async scheduler behavior:
   retry and timeout policy
 - SQLite-backed callback state gives at-least-once delivery across ordinary
   Fairlead restarts by retrying pending callbacks after startup
+- `POST /v1/jobs/prune` removes terminal jobs older than the configured
+  retention age, up to the configured per-call limit
+- pruning skips terminal jobs with pending callbacks so callback delivery can
+  continue
+- pruning persists to SQLite when `JOB_STORE=sqlite` is enabled
+- `/metrics` exposes `fairlead_job_prunes_total{status}`
 - there is no background scheduler loop yet
 
 Current worker-pull execution flow:
@@ -429,14 +436,15 @@ job submitted
 - `POST /v1/workers/{worker_id}/jobs/{job_id}/renew` — lease renewal
 - `POST /v1/workers/{worker_id}/jobs/{job_id}/complete` — completion
 - `POST /v1/workers/{worker_id}/jobs/{job_id}/fail` — failure/retry
+- `POST /v1/jobs/prune` — explicit terminal-job pruning
 - `POST /v1/resources/report` — GPU consumers and workers report capacity
 - `GET /v1/resources` — current resource control-plane state
 - `GET /metrics` — Prometheus: queue depth/wait, circuit states, VRAM per node,
   worker availability, worker in-flight capacity, async worker pool placement,
-  job duration, and callback delivery outcomes
+  job duration, callback delivery outcomes, and terminal job pruning
 - Persistent callback-attempt state and pending callback recovery are
   implemented for SQLite-backed job state.
-- Future completed-job pruning.
+- Background pruning remains deferred to Phase 8D; Phase 8B pruning is explicit.
 
 ### Worker-pull claim decision
 

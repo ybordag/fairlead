@@ -11,6 +11,8 @@ use crate::callbacks::{
 
 pub const DEFAULT_BACKEND_POOL: &str = "default";
 pub const DEFAULT_JOB_DB_PATH: &str = "fairlead_jobs.sqlite3";
+pub const DEFAULT_JOB_RETENTION_SECS: u64 = 86_400;
+pub const DEFAULT_JOB_PRUNE_LIMIT: usize = 1000;
 
 const KNOWN_POOL_WORKLOADS: &[&str] = &[
     "chat_completions",
@@ -257,6 +259,10 @@ pub struct Config {
     pub priority_background_limit: usize,
     /// Job state persistence backend. Default: memory.
     pub job_store: JobStoreConfig,
+    /// Minimum age before terminal jobs are eligible for pruning. Default: 86400.
+    pub job_retention_secs: u64,
+    /// Maximum terminal jobs removed by one prune operation. Default: 1000.
+    pub job_prune_limit: usize,
     /// Max callback delivery attempts for terminal async jobs. Default: 3.
     pub callback_max_attempts: u32,
     /// Per-attempt callback timeout in seconds. Default: 5.
@@ -354,6 +360,13 @@ impl Config {
                 .map_err(|e| anyhow!("invalid PRIORITY_BACKGROUND_LIMIT: {}", e))?,
 
             job_store: parse_job_store(&get)?,
+
+            job_retention_secs: get("JOB_RETENTION_SECS")
+                .unwrap_or_else(|_| DEFAULT_JOB_RETENTION_SECS.to_string())
+                .parse()
+                .map_err(|e| anyhow!("invalid JOB_RETENTION_SECS: {}", e))?,
+
+            job_prune_limit: parse_nonzero("JOB_PRUNE_LIMIT", DEFAULT_JOB_PRUNE_LIMIT, &get)?,
 
             callback_max_attempts: parse_nonzero(
                 "CALLBACK_MAX_ATTEMPTS",
@@ -805,6 +818,8 @@ mod tests {
         assert_eq!(cfg.priority_batch_limit, 4);
         assert_eq!(cfg.priority_background_limit, 2);
         assert_eq!(cfg.job_store, JobStoreConfig::Memory);
+        assert_eq!(cfg.job_retention_secs, DEFAULT_JOB_RETENTION_SECS);
+        assert_eq!(cfg.job_prune_limit, DEFAULT_JOB_PRUNE_LIMIT);
         assert_eq!(cfg.callback_max_attempts, DEFAULT_CALLBACK_MAX_ATTEMPTS);
         assert_eq!(cfg.callback_timeout_secs, DEFAULT_CALLBACK_TIMEOUT_SECS);
         assert_eq!(cfg.callback_retry_delay_ms, DEFAULT_CALLBACK_RETRY_DELAY_MS);
@@ -906,6 +921,8 @@ mod tests {
             ("PRIORITY_REALTIME_LIMIT", "16"),
             ("PRIORITY_BATCH_LIMIT", "6"),
             ("PRIORITY_BACKGROUND_LIMIT", "3"),
+            ("JOB_RETENTION_SECS", "3600"),
+            ("JOB_PRUNE_LIMIT", "25"),
             ("CALLBACK_MAX_ATTEMPTS", "5"),
             ("CALLBACK_TIMEOUT_SECS", "9"),
             ("CALLBACK_RETRY_DELAY_MS", "50"),
@@ -921,6 +938,8 @@ mod tests {
         assert_eq!(cfg.priority_realtime_limit, 16);
         assert_eq!(cfg.priority_batch_limit, 6);
         assert_eq!(cfg.priority_background_limit, 3);
+        assert_eq!(cfg.job_retention_secs, 3600);
+        assert_eq!(cfg.job_prune_limit, 25);
         assert_eq!(cfg.callback_max_attempts, 5);
         assert_eq!(cfg.callback_timeout_secs, 9);
         assert_eq!(cfg.callback_retry_delay_ms, 50);
@@ -994,6 +1013,15 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("invalid PRIORITY_REALTIME_LIMIT"));
+    }
+
+    #[test]
+    fn invalid_job_retention_policy_returns_err() {
+        for (key, value) in [("JOB_RETENTION_SECS", "abc"), ("JOB_PRUNE_LIMIT", "0")] {
+            let result = Config::from_lookup(env(&[(key, value)]));
+            assert!(result.is_err(), "expected {key}={value} to fail");
+            assert!(result.unwrap_err().to_string().contains(key));
+        }
     }
 
     #[test]
