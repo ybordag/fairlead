@@ -17,14 +17,22 @@ execution protocol.
   exhausted jobs with callback dispatch.
 - Added in-process coverage proving the loop requeues an expired lease and
   releases worker capacity without waiting for another worker claim.
+- Added in-process coverage proving exhausted expired leases fail from the
+  background loop and dispatch terminal callbacks.
 - Added optional background terminal-job pruning with `JOB_PRUNE_INTERVAL_SECS`.
 - Background pruning calls the same helper as `POST /v1/jobs/prune`, so
   retention age, per-run limits, pending-callback protection, SQLite
   persistence, submit idempotency-key release, and metrics stay consistent.
 - Added in-process coverage proving background pruning removes eligible terminal
   jobs across bounded intervals, retains queued jobs, and records prune metrics.
+- Added in-process coverage proving background pruning retains pending-callback
+  terminal jobs until callback delivery succeeds.
+- Audited Phase 8 coverage. Remaining Phase 8 gaps are process-level restart,
+  concurrency, invalid-startup, SQLite durability, callback receiver, and
+  deployment smoke tests recorded in `deferred_tests.md`.
 
 ## Remaining In 8D
 
-- Add or defer tests for process-level timing, restart, SQLite, callback, and
-  metric/log behavior.
+- None for in-process coverage. Process-level timing, restart, SQLite,
+  callback receiver, concurrent manual/background pruning, and metric/log
+  behavior are deferred to the Phase 8E harness.

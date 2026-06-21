@@ -384,7 +384,7 @@ Add an opt-in process-level e2e for terminal-job retention and pruning:
 - verify repeated prune calls with no eligible jobs return `removed: 0` and do
   not create misleading prune metrics
 - verify invalid environment configuration fails startup for
-  `JOB_RETENTION_SECS` and `JOB_PRUNE_LIMIT`
+  `JOB_RETENTION_SECS`, `JOB_PRUNE_LIMIT`, and `JOB_PRUNE_INTERVAL_SECS`
 - verify a large SQLite database with many terminal jobs can be pruned in
   bounded batches without blocking request handling for an unacceptable time
 - verify pruning does not delete or corrupt callback delivery state for pending
@@ -469,8 +469,16 @@ expiry/recovery and background pruning:
   pending-callback terminal jobs are retained
 - verify manual `POST /v1/jobs/prune` still works when the background loop is
   enabled
+- run manual `POST /v1/jobs/prune` concurrently with the background pruning loop
+  and verify pruning is idempotent, bounded, and does not double-count metrics
 - verify background pruning respects the configured per-run prune limit and
   makes progress across multiple intervals
+- verify omitting `JOB_PRUNE_INTERVAL_SECS` disables background pruning while
+  leaving manual `POST /v1/jobs/prune` enabled
+- verify invalid environment configuration fails startup for
+  `JOB_MAINTENANCE_INTERVAL_SECS` and `JOB_PRUNE_INTERVAL_SECS`
+- verify exhausted expired leases fail and dispatch terminal callbacks through
+  the background lease recovery loop after process restart
 - verify background maintenance metrics or logs distinguish lease recovery from
   pruning
 - restart Fairlead while a background maintenance interval is due and verify the

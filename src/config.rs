@@ -1061,7 +1061,9 @@ mod tests {
             ("JOB_RETENTION_SECS", "abc"),
             ("JOB_PRUNE_LIMIT", "0"),
             ("JOB_PRUNE_INTERVAL_SECS", "0"),
+            ("JOB_PRUNE_INTERVAL_SECS", "abc"),
             ("JOB_MAINTENANCE_INTERVAL_SECS", "0"),
+            ("JOB_MAINTENANCE_INTERVAL_SECS", "abc"),
         ] {
             let result = Config::from_lookup(env(&[(key, value)]));
             assert!(result.is_err(), "expected {key}={value} to fail");
