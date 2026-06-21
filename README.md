@@ -183,8 +183,8 @@ backend API base URL, so `http://spark-a:8000/v1` is probed at
 `http://spark-a:8000/v1/models`. Backends that expose health elsewhere can set
 `health_path`, for example `"/health"`.
 
-Async job state is in-memory by default while Phase 6E wires durable recovery.
-SQLite can be bootstrapped explicitly:
+Async job state is in-memory by default. During Phase 6E, SQLite can be enabled
+explicitly for durable job state across ordinary Fairlead restarts:
 
 ```bash
 JOB_STORE=sqlite \
@@ -192,8 +192,10 @@ JOB_DB_PATH=fairlead_jobs.sqlite3 \
 cargo run
 ```
 
-This creates the SQLite schema and validates the database path. Job transitions
-are still being migrated to durable storage during Shackle.
+With `JOB_STORE=sqlite`, Fairlead persists submitted jobs, queue order, claim and
+lease state, attempts, cancellation, completion, failure, payloads, callback
+metadata, and result/error state. Already-expired running leases are still
+resolved by the next lease sweep after restart.
 
 Health:
 

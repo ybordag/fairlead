@@ -536,9 +536,9 @@ Recommended persistence path:
 
 - **SQLite first:** good for a local appliance, single Fairlead process, demos,
   and portfolio deployment. It is durable, inspectable, transactional, and does
-  not require another service. Phase 6E starts with `JOB_STORE=memory` as the
-  default and `JOB_STORE=sqlite` as an opt-in schema/bootstrap path while job
-  transitions are migrated to durable storage.
+  not require another service. Phase 6E keeps `JOB_STORE=memory` as the default
+  and adds `JOB_STORE=sqlite` as an opt-in durable path for job records, queue
+  order, leases, attempts, result/error state, and terminal state.
 - **Postgres later:** better when multiple Fairlead instances need to coordinate
   safely. Row locking and transactions map well to job claiming and leases.
 - **Redis optionally:** useful for fast queues, pub/sub, rate limits, or caches,

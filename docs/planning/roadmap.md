@@ -743,12 +743,16 @@ Fairlead the application source of truth.
 
 - [x] Add job store configuration with `memory` default and `sqlite` opt-in.
 - [x] Add SQLite schema bootstrap as the first persistent backend.
-- Persist jobs, queue position, status, attempts, lease metadata, timestamps,
-  callback metadata, and terminal state.
-- Recover queued jobs after restart.
+- [x] Persist jobs, queue position, status, attempts, lease metadata,
+  timestamps, callback metadata, and terminal state.
+- [x] Recover queued jobs after restart.
+- [x] Preserve list order, priority/FIFO queue order, and next job ID after
+  restart.
+- [x] Add restart/recovery tests for queued, running, cancelled, and complete
+  job state.
 - Resolve stale running leases after restart.
 - Keep Rhizome or other callers as the source of truth for domain objects.
-- Add restart/recovery tests.
+- Add endpoint-level and process-level restart/recovery tests.
 
 ### Phase 6F: Callback Delivery and Async Finalization
 

@@ -156,16 +156,20 @@ heavier concurrency/e2e harness.
 
 ### `phase_6e_job_persistence_and_recovery`
 
-When Phase 6E implements durable job state, add tests for:
+Phase 6E now has unit-level restart tests for queue recovery, priority/FIFO
+ordering, next ID recovery, running lease preservation, cancelled state,
+completed state, callback metadata, terminal result state, and SQLite bootstrap
+migration. Remaining deferred tests:
 
-- queue persistence or recovery behavior after Fairlead restart
-- recovery of queued jobs in original priority/FIFO order
 - recovery or requeueing of running jobs with expired leases
-- preservation of attempts, timestamps, callback metadata, and terminal states
-- SQLite migration/bootstrap behavior
+- endpoint-level restart tests using SQLite-backed `AppState`
+- process-level e2e restart test with an actual Fairlead process and DB file
+- corrupted or incompatible SQLite file behavior
+- Thor/Loki e2e recovery with jobs submitted before and after Fairlead restart
 
-**Why deferred:** These need a persistent job store and restart harness. Phase 6B
-is intentionally in-memory only.
+**Why deferred:** The remaining cases need a larger restart harness or real
+deployment environment. The current Shackle tests cover the storage-backed
+registry boundary directly.
 
 ### `phase_6f_callback_delivery`
 

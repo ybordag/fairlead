@@ -56,7 +56,12 @@ async fn main() -> anyhow::Result<()> {
     let cfg = config::Config::from_env()?;
 
     init_tracing(&cfg);
-    storage::bootstrap_job_store(&cfg.job_store)?;
+    let jobs = match &cfg.job_store {
+        config::JobStoreConfig::Memory => jobs::JobRegistry::default(),
+        config::JobStoreConfig::Sqlite { path } => {
+            jobs::JobRegistry::with_store(storage::SqliteJobStore::open(path)?)?
+        }
+    };
 
     let client = reqwest::Client::new();
 
@@ -98,7 +103,7 @@ async fn main() -> anyhow::Result<()> {
             cfg.priority_batch_limit,
             cfg.priority_background_limit,
         ),
-        jobs: jobs::JobRegistry::default(),
+        jobs,
         workers: workers::WorkerRegistry::default(),
     };
     let app = build_router(state);

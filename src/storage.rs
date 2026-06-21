@@ -1,11 +1,17 @@
 use anyhow::{Context, Result};
-use rusqlite::Connection;
-use std::path::{Path, PathBuf};
+use rusqlite::{params, Connection};
+use std::{
+    collections::HashMap,
+    path::{Path, PathBuf},
+};
 
+#[cfg(test)]
 use crate::config::JobStoreConfig;
+use crate::jobs::{JobQueues, JobRecord, JobRegistryInner, JobStatus};
 
 const JOB_STORE_SCHEMA_VERSION: i32 = 1;
 
+#[cfg(test)]
 pub fn bootstrap_job_store(config: &JobStoreConfig) -> Result<()> {
     match config {
         JobStoreConfig::Memory => Ok(()),
@@ -32,6 +38,147 @@ impl SqliteJobStore {
             path: path.to_path_buf(),
         })
     }
+
+    pub(crate) fn load_registry_snapshot(&self) -> Result<JobRegistryInner> {
+        let connection = Connection::open(&self.path)
+            .with_context(|| format!("open SQLite job store at {}", self.path.display()))?;
+        bootstrap_schema(&connection)
+            .with_context(|| format!("bootstrap SQLite job store at {}", self.path.display()))?;
+
+        let mut statement = connection.prepare(
+            r#"
+            SELECT id, type, priority, status, payload_json, callback_url, result_json,
+                   error_json, attempts, max_attempts, lease_json, created_at_unix_ms,
+                   updated_at_unix_ms, queue_position
+            FROM jobs
+            ORDER BY order_position ASC, created_at_unix_ms ASC, id ASC
+            "#,
+        )?;
+
+        let mut jobs = HashMap::new();
+        let mut order = Vec::new();
+        let mut queued = Vec::new();
+        let mut next_id = 0;
+
+        let rows = statement.query_map([], |row| {
+            let id: String = row.get(0)?;
+            let kind_json: String = row.get(1)?;
+            let priority_json: String = row.get(2)?;
+            let status_json: String = row.get(3)?;
+            let payload_json: String = row.get(4)?;
+            let result_json: Option<String> = row.get(6)?;
+            let error_json: Option<String> = row.get(7)?;
+            let lease_json: Option<String> = row.get(10)?;
+            let created_at_unix_ms: i64 = row.get(11)?;
+            let updated_at_unix_ms: i64 = row.get(12)?;
+            let queue_position: Option<i64> = row.get(13)?;
+
+            let job = JobRecord {
+                id,
+                kind: serde_json::from_str(&format!("\"{kind_json}\"")).map_err(to_sql_error)?,
+                priority: serde_json::from_str(&format!("\"{priority_json}\""))
+                    .map_err(to_sql_error)?,
+                status: serde_json::from_str(&format!("\"{status_json}\""))
+                    .map_err(to_sql_error)?,
+                payload: serde_json::from_str(&payload_json).map_err(to_sql_error)?,
+                callback_url: row.get(5)?,
+                result: result_json
+                    .map(|raw| serde_json::from_str(&raw).map_err(to_sql_error))
+                    .transpose()?,
+                error: error_json
+                    .map(|raw| serde_json::from_str(&raw).map_err(to_sql_error))
+                    .transpose()?,
+                attempts: row.get::<_, i64>(8)? as u32,
+                max_attempts: row.get::<_, i64>(9)? as u32,
+                lease: lease_json
+                    .map(|raw| serde_json::from_str(&raw).map_err(to_sql_error))
+                    .transpose()?,
+                created_at_unix_ms: created_at_unix_ms as u128,
+                updated_at_unix_ms: updated_at_unix_ms as u128,
+            };
+
+            Ok((job, queue_position))
+        })?;
+
+        for row in rows {
+            let (job, queue_position) = row?;
+            next_id = next_id.max(parse_numeric_job_id(&job.id));
+            if job.status == JobStatus::Queued {
+                queued.push((
+                    job.priority,
+                    queue_position.unwrap_or(i64::MAX),
+                    job.id.clone(),
+                ));
+            }
+            order.push(job.id.clone());
+            jobs.insert(job.id.clone(), job);
+        }
+
+        let mut queues = JobQueues::default();
+        queued.sort_by_key(|(priority, queue_position, id)| {
+            (priority_rank(*priority), *queue_position, id.clone())
+        });
+        for (priority, _queue_position, id) in queued {
+            match priority {
+                crate::config::Priority::Realtime => queues.realtime.push_back(id),
+                crate::config::Priority::Batch => queues.batch.push_back(id),
+                crate::config::Priority::Background => queues.background.push_back(id),
+            }
+        }
+
+        Ok(JobRegistryInner {
+            next_id,
+            jobs,
+            order,
+            queues,
+        })
+    }
+
+    pub(crate) fn replace_registry_snapshot(&self, inner: &JobRegistryInner) -> Result<()> {
+        let mut connection = Connection::open(&self.path)
+            .with_context(|| format!("open SQLite job store at {}", self.path.display()))?;
+        bootstrap_schema(&connection)
+            .with_context(|| format!("bootstrap SQLite job store at {}", self.path.display()))?;
+        let transaction = connection.transaction()?;
+        transaction.execute("DELETE FROM jobs", [])?;
+
+        let queue_positions = queue_positions(&inner.queues);
+        for (order_position, id) in inner.order.iter().enumerate() {
+            let Some(job) = inner.jobs.get(id) else {
+                continue;
+            };
+            transaction.execute(
+                r#"
+                INSERT INTO jobs (
+                    id, type, priority, status, payload_json, callback_url, result_json,
+                    error_json, attempts, max_attempts, lease_json, created_at_unix_ms,
+                    updated_at_unix_ms, queue_position, order_position
+                )
+                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
+                "#,
+                params![
+                    job.id,
+                    job.kind.as_str(),
+                    job.priority.as_str(),
+                    job.status.as_str(),
+                    serde_json::to_string(&job.payload)?,
+                    job.callback_url,
+                    optional_json(&job.result)?,
+                    optional_json(&job.error)?,
+                    i64::from(job.attempts),
+                    i64::from(job.max_attempts),
+                    optional_json(&job.lease)?,
+                    job.created_at_unix_ms as i64,
+                    job.updated_at_unix_ms as i64,
+                    queue_positions.get(&job.id).copied(),
+                    order_position as i64,
+                ],
+            )?;
+        }
+
+        transaction.commit()?;
+        Ok(())
+    }
 }
 
 fn bootstrap_schema(connection: &Connection) -> Result<()> {
@@ -53,7 +200,8 @@ fn bootstrap_schema(connection: &Connection) -> Result<()> {
             lease_json TEXT,
             created_at_unix_ms INTEGER NOT NULL,
             updated_at_unix_ms INTEGER NOT NULL,
-            queue_position INTEGER
+            queue_position INTEGER,
+            order_position INTEGER NOT NULL DEFAULT 0
         );
 
         CREATE INDEX IF NOT EXISTS idx_jobs_queue
@@ -63,8 +211,68 @@ fn bootstrap_schema(connection: &Connection) -> Result<()> {
             ON jobs(status);
         "#,
     )?;
+    ensure_column(
+        connection,
+        "jobs",
+        "order_position",
+        "ALTER TABLE jobs ADD COLUMN order_position INTEGER NOT NULL DEFAULT 0",
+    )?;
     connection.pragma_update(None, "user_version", JOB_STORE_SCHEMA_VERSION)?;
     Ok(())
+}
+
+fn ensure_column(
+    connection: &Connection,
+    table: &str,
+    column: &str,
+    alter_statement: &str,
+) -> Result<()> {
+    let mut statement = connection.prepare(&format!("PRAGMA table_info({table})"))?;
+    let columns = statement.query_map([], |row| row.get::<_, String>(1))?;
+    for existing in columns {
+        if existing? == column {
+            return Ok(());
+        }
+    }
+
+    connection.execute(alter_statement, [])?;
+    Ok(())
+}
+
+fn queue_positions(queues: &JobQueues) -> HashMap<String, i64> {
+    let mut positions = HashMap::new();
+    for queue in [&queues.realtime, &queues.batch, &queues.background] {
+        for (position, id) in queue.iter().enumerate() {
+            positions.insert(id.clone(), position as i64);
+        }
+    }
+    positions
+}
+
+fn optional_json<T: serde::Serialize>(value: &Option<T>) -> Result<Option<String>> {
+    value
+        .as_ref()
+        .map(serde_json::to_string)
+        .transpose()
+        .map_err(Into::into)
+}
+
+fn parse_numeric_job_id(id: &str) -> u64 {
+    id.strip_prefix("job-")
+        .and_then(|suffix| suffix.parse().ok())
+        .unwrap_or_default()
+}
+
+fn priority_rank(priority: crate::config::Priority) -> u8 {
+    match priority {
+        crate::config::Priority::Realtime => 0,
+        crate::config::Priority::Batch => 1,
+        crate::config::Priority::Background => 2,
+    }
+}
+
+fn to_sql_error(error: serde_json::Error) -> rusqlite::Error {
+    rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(error))
 }
 
 #[cfg(test)]
@@ -125,6 +333,46 @@ mod tests {
             )
             .unwrap();
         assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn sqlite_bootstrap_adds_order_position_to_existing_schema() {
+        let path = unique_db_path("migrate");
+        let connection = Connection::open(&path).unwrap();
+        connection
+            .execute_batch(
+                r#"
+                CREATE TABLE jobs (
+                    id TEXT PRIMARY KEY,
+                    type TEXT NOT NULL,
+                    priority TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    payload_json TEXT NOT NULL,
+                    callback_url TEXT,
+                    result_json TEXT,
+                    error_json TEXT,
+                    attempts INTEGER NOT NULL,
+                    max_attempts INTEGER NOT NULL,
+                    lease_json TEXT,
+                    created_at_unix_ms INTEGER NOT NULL,
+                    updated_at_unix_ms INTEGER NOT NULL,
+                    queue_position INTEGER
+                );
+                "#,
+            )
+            .unwrap();
+        drop(connection);
+
+        SqliteJobStore::open(&path).unwrap();
+
+        let connection = Connection::open(&path).unwrap();
+        let has_order_position: bool = connection
+            .prepare("PRAGMA table_info(jobs)")
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(1))
+            .unwrap()
+            .any(|column| column.unwrap() == "order_position");
+        assert!(has_order_position);
     }
 
     #[test]

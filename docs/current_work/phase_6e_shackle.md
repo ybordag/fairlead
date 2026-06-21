@@ -44,10 +44,28 @@ Implemented:
 - Added queue/status indexes for future recovery and claim queries.
 - Added config and storage bootstrap tests.
 
+## Second Slice
+
+Implemented:
+
+- Wired `JOB_STORE=sqlite` startup to create `JobRegistry` from the SQLite
+  store instead of only bootstrapping the schema.
+- Added snapshot loading so Fairlead restores job records when the process
+  restarts.
+- Persisted accepted registry transitions to SQLite: submit, claim, lease
+  renewal, lease expiry sweep, complete, fail/requeue, and cancel.
+- Persisted queue ordering and list ordering separately so queue priority/FIFO
+  behavior and `/v1/jobs` submission order both survive restart.
+- Preserved attempts, max attempts, lease metadata, callback metadata, payload,
+  result/error state, timestamps, and terminal states.
+- Added idempotent schema handling for databases created by the first Shackle
+  slice before the `order_position` column existed.
+- Added restart-style tests for queued job recovery, next ID recovery, running
+  lease recovery, cancelled state, completed state, and schema migration.
+
 Remaining Shackle work:
 
-- Wire `JobRegistry` transitions through the store.
-- Persist queue ordering.
-- Recover queued jobs after registry restart.
-- Resolve running jobs after restart.
-- Add restart/recovery tests around real job transitions.
+- Define the restart policy for already-expired running leases. Today they
+  restore as running and are resolved by the next lease sweep.
+- Add endpoint-level restart tests around SQLite-backed `AppState`.
+- Add e2e restart tests with an actual Fairlead process and SQLite file.
