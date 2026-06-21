@@ -1,3 +1,4 @@
+mod callbacks;
 mod config;
 mod error;
 mod health;
@@ -45,9 +46,9 @@ pub struct AppState {
     pub resource_policy: ResourceRoutingPolicy,
     /// Per-priority synchronous admission limits.
     pub priority_limiter: PriorityLimiter,
-    /// In-memory async job and lease state for Phase 6B/6C job API requests.
+    /// Async job and lease state, optionally backed by SQLite.
     pub jobs: jobs::JobRegistry,
-    /// In-memory worker registry for Phase 6B/6C.
+    /// In-memory worker registry for async worker-pull jobs.
     pub workers: workers::WorkerRegistry,
 }
 

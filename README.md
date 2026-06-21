@@ -7,7 +7,7 @@ health, circuit state, and session affinity.
 
 The name comes from sailing: a fairlead is a fitting that guides lines in exactly the right direction without friction or fouling.
 
-**Status:** Phase 6E is in progress on the `shackle` branch. Fairlead currently
+**Status:** Phase 6F is in progress on the `stay` branch. Fairlead currently
 runs as an Axum HTTP service with `/health`, `/metrics`, `/v1/models`,
 `/v1/resources`, `/v1/resources/report`, `/v1/jobs`, `/v1/jobs/{id}`,
 `/v1/workers`, `/v1/workers/{id}/claim`,

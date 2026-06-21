@@ -17,6 +17,7 @@ struct RoutingMetricsInner {
     requests: HashMap<RequestLabels, RequestAggregate>,
     retries: HashMap<RetryLabels, u64>,
     fallbacks: HashMap<FallbackLabels, u64>,
+    callbacks: HashMap<CallbackLabels, u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -53,6 +54,14 @@ pub struct FallbackLabels {
     pub reason: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct CallbackLabels {
+    pub kind: String,
+    pub status: String,
+    pub outcome: String,
+    pub http_status: u16,
+}
+
 #[derive(Default)]
 struct RequestAggregate {
     count: u64,
@@ -75,6 +84,11 @@ impl RoutingMetrics {
     pub fn record_fallback(&self, labels: FallbackLabels) {
         let mut guard = self.inner.lock().expect("routing metrics mutex poisoned");
         *guard.fallbacks.entry(labels).or_default() += 1;
+    }
+
+    pub fn record_callback(&self, labels: CallbackLabels) {
+        let mut guard = self.inner.lock().expect("routing metrics mutex poisoned");
+        *guard.callbacks.entry(labels).or_default() += 1;
     }
 
     fn render(&self) -> String {
@@ -165,6 +179,22 @@ impl RoutingMetrics {
                 prometheus_escape(&labels.pool),
                 prometheus_escape(&labels.origin_node),
                 prometheus_escape(&labels.reason),
+                count,
+            ));
+        }
+
+        body.push_str(
+            "# HELP fairlead_job_callbacks_total Async job callback deliveries by outcome\n\
+             # TYPE fairlead_job_callbacks_total counter\n",
+        );
+
+        for (labels, count) in &guard.callbacks {
+            body.push_str(&format!(
+                "fairlead_job_callbacks_total{{type=\"{}\",status=\"{}\",outcome=\"{}\",http_status=\"{}\"}} {}\n",
+                prometheus_escape(&labels.kind),
+                prometheus_escape(&labels.status),
+                prometheus_escape(&labels.outcome),
+                labels.http_status,
                 count,
             ));
         }

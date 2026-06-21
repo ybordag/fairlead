@@ -760,10 +760,10 @@ Fairlead the application source of truth.
 Scope: close the async loop for callers that want status pushed back instead of
 polling forever.
 
-- Deliver callbacks for terminal job states when `callback_url` is present.
-- Track callback success/failure separately from compute job status.
+- [x] Deliver callbacks for terminal job states when `callback_url` is present.
+- [x] Track callback success/failure separately from compute job status.
+- [x] Add callback success/failure metrics.
 - Add callback retry and timeout policy.
-- Add callback success/failure metrics.
 - Add final async end-to-end demo and documentation.
 - Document Temporal as deferred unless Rhizome needs durable multi-step workflow
   orchestration beyond compute dispatch.

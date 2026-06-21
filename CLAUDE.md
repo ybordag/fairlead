@@ -55,12 +55,10 @@ cargo watch -x run
 
 ## Current status
 
-**Phase 6D complete** (halyard → main). **Phase 6E is in progress on shackle**:
-durable job state and restart recovery. Shackle keeps `JOB_STORE=memory` as the
-default and adds opt-in `JOB_STORE=sqlite` through `JOB_DB_PATH`. SQLite-backed
-registries now persist job records, queue order, claim/lease state, attempts,
-cancellation, completion, failure, callback metadata, and result/error state.
-Expired running leases are resolved during SQLite registry startup.
+**Phase 6E complete** (shackle → main). **Phase 6F is in progress on stay**:
+callback delivery and async finalization. Stay currently adds asynchronous
+one-shot callbacks for terminal jobs with `callback_url` and records callback
+delivery metrics by job type, terminal status, outcome, and HTTP status.
 
 | Phase | Branch | Status |
 |---|---|---|
@@ -73,8 +71,8 @@ Expired running leases are resolved during SQLite registry startup.
 | 6B — Async API + scheduler preview | tackle → main | ✅ complete |
 | 6C — Worker-pull claims + leases | cleat → main | ✅ complete |
 | 6D — Worker execution + retries | halyard → main | ✅ complete |
-| 6E — Durable job state + recovery | shackle | in progress |
-| 6F — Callback delivery + finalization | — | pending |
+| 6E — Durable job state + recovery | shackle → main | ✅ complete |
+| 6F — Callback delivery + finalization | stay | in progress |
 | 7A — Pool-aware routing + placement | — | pending |
 | 7 — Advanced compute + full metrics | — | pending |
 

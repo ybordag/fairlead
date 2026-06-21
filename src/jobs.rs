@@ -13,7 +13,9 @@ use std::{
 };
 use tokio::sync::RwLock;
 
-use crate::{config::Priority, storage::SqliteJobStore, AppState};
+use crate::{
+    callbacks::dispatch_job_callback, config::Priority, storage::SqliteJobStore, AppState,
+};
 
 pub const ATTEMPT_TIMEOUT_ERROR: &str = "attempt timed out";
 
@@ -158,11 +160,12 @@ pub struct JobDurationSnapshot {
     pub duration_seconds_max: f64,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default)]
 pub struct LeaseExpiryReport {
     pub requeued: usize,
     pub failed: usize,
     pub released_workers: Vec<String>,
+    pub failed_jobs: Vec<JobRecord>,
 }
 
 #[derive(Clone, Default)]
@@ -649,6 +652,7 @@ fn requeue_expired_leases_locked(inner: &mut JobRegistryInner) -> LeaseExpiryRep
             report.requeued += 1;
         } else {
             job.status = JobStatus::Failed;
+            report.failed_jobs.push(job.clone());
             report.failed += 1;
         }
     }
@@ -716,6 +720,7 @@ pub async fn cancel_job(State(state): State<AppState>, Path(id): Path<String>) -
             if let Some(lease) = &job.lease {
                 state.workers.release_slot(&lease.worker_id).await;
             }
+            dispatch_job_callback(state.client.clone(), state.metrics.clone(), job.clone());
             Json(JobResponse { job }).into_response()
         }
         CancelJobResult::AlreadyTerminal(job) => {
@@ -1619,14 +1624,10 @@ mod tests {
             .unwrap();
 
         let report = jobs.requeue_expired_leases().await;
-        assert_eq!(
-            report,
-            LeaseExpiryReport {
-                requeued: 1,
-                failed: 0,
-                released_workers: vec!["worker-a".into()],
-            }
-        );
+        assert_eq!(report.requeued, 1);
+        assert_eq!(report.failed, 0);
+        assert_eq!(report.released_workers, vec!["worker-a"]);
+        assert!(report.failed_jobs.is_empty());
 
         let job = jobs.get("job-1").await.unwrap();
         assert_eq!(job.status, JobStatus::Queued);
@@ -1682,14 +1683,11 @@ mod tests {
             .await
             .unwrap();
         let report = jobs.requeue_expired_leases().await;
-        assert_eq!(
-            report,
-            LeaseExpiryReport {
-                requeued: 0,
-                failed: 1,
-                released_workers: vec!["worker-a".into()],
-            }
-        );
+        assert_eq!(report.requeued, 0);
+        assert_eq!(report.failed, 1);
+        assert_eq!(report.released_workers, vec!["worker-a"]);
+        assert_eq!(report.failed_jobs.len(), 1);
+        assert_eq!(report.failed_jobs[0].id, "job-1");
 
         let job = jobs.get("job-1").await.unwrap();
         assert_eq!(job.status, JobStatus::Failed);
@@ -1734,7 +1732,10 @@ mod tests {
         jobs.cancel("job-2").await;
 
         let report = jobs.requeue_expired_leases().await;
-        assert_eq!(report, LeaseExpiryReport::default());
+        assert_eq!(report.requeued, 0);
+        assert_eq!(report.failed, 0);
+        assert!(report.released_workers.is_empty());
+        assert!(report.failed_jobs.is_empty());
 
         assert_eq!(jobs.get("job-1").await.unwrap().status, JobStatus::Running);
         assert_eq!(

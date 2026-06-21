@@ -18,7 +18,7 @@ detail.
 
 - [`planning/design.md`](planning/design.md) — design horizon and longer-term
   product shape.
-- [`planning/roadmap.md`](planning/roadmap.md) — completed phases, Phase 6E/6F
+- [`planning/roadmap.md`](planning/roadmap.md) — completed phases, Phase 6F
   scope, future phases, acceptance criteria, and deferred work.
 
 ## Implementation And Examples
@@ -32,8 +32,10 @@ detail.
 
 ## Current Work
 
+- [`current_work/phase_6f_stay.md`](current_work/phase_6f_stay.md) — active
+  Phase 6F callback delivery and finalization notes.
 - [`current_work/phase_6e_shackle.md`](current_work/phase_6e_shackle.md) —
-  active Phase 6E durable job state and recovery notes.
+  completed Phase 6E durable job state and recovery notes.
 - [`current_work/phase_6d_halyard.md`](current_work/phase_6d_halyard.md) —
   completed Phase 6D worker execution, retries, and utilization notes.
 - [`current_work/phase_6c_cleat.md`](current_work/phase_6c_cleat.md) — completed
