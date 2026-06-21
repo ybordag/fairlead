@@ -1,3 +1,4 @@
+use axum::{routing::post, Json, Router};
 use reqwest::StatusCode;
 use serde_json::{json, Value};
 use std::{
@@ -7,6 +8,7 @@ use std::{
     process::{Child, Command, Stdio},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
+use tokio::sync::mpsc;
 
 struct FairleadProcess {
     child: Child,
@@ -210,6 +212,51 @@ async fn json_response(response: reqwest::Response) -> (StatusCode, Value) {
     (status, value)
 }
 
+async fn start_callback_target(status: StatusCode) -> (String, mpsc::Receiver<Value>) {
+    let (tx, rx) = mpsc::channel(8);
+    let app = Router::new().route(
+        "/callback",
+        post(move |Json(value): Json<Value>| {
+            let tx = tx.clone();
+            async move {
+                tx.send(value).await.expect("record callback request");
+                status
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind callback target");
+    let addr = listener.local_addr().expect("read callback target address");
+    tokio::spawn(async move {
+        axum::serve(listener, app)
+            .await
+            .expect("serve callback target");
+    });
+    (format!("http://{addr}/callback"), rx)
+}
+
+async fn wait_for_callback_status(
+    fairlead: &FairleadProcess,
+    job_id: &str,
+    expected_status: &str,
+) -> Value {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    loop {
+        let (status, fetched) = fairlead.get_json(&format!("/v1/jobs/{job_id}")).await;
+        assert_eq!(status, StatusCode::OK);
+        if fetched["job"]["callback"]["status"] == expected_status {
+            return fetched;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            panic!(
+                "callback status {expected_status} was not observed for {job_id}; last job: {fetched}"
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+}
+
 #[tokio::test]
 async fn fairlead_process_starts_serves_health_and_shuts_down() {
     let mut fairlead = FairleadProcess::spawn(&[]);
@@ -341,6 +388,85 @@ async fn worker_can_claim_and_complete_job_over_http() {
     assert!(metrics
         .contains("fairlead_worker_in_flight_jobs{worker=\"vision-worker\",node=\"spark-a\"} 0"));
     assert!(metrics.contains("fairlead_job_duration_seconds_count{priority=\"batch\",type=\"vision_analysis\",status=\"complete\"} 1"));
+
+    fairlead.shutdown().await;
+}
+
+#[tokio::test]
+async fn complete_job_delivers_callback_over_real_http() {
+    let (callback_url, mut callbacks) = start_callback_target(StatusCode::OK).await;
+    let mut fairlead = FairleadProcess::spawn(&[
+        ("CALLBACK_MAX_ATTEMPTS", "1"),
+        ("CALLBACK_RETRY_DELAY_MS", "25"),
+        ("CALLBACK_TIMEOUT_SECS", "1"),
+    ]);
+    fairlead.wait_for_health().await;
+
+    let (status, _) = fairlead
+        .register_worker(json!({
+            "id": "callback-worker",
+            "endpoint_url": "http://callback-worker.local",
+            "node_id": "spark-a",
+            "pool": "default",
+            "job_types": ["vision_analysis"],
+            "max_concurrent_jobs": 1,
+            "available_vram_mb": 4096
+        }))
+        .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, submitted) = fairlead
+        .submit_job(json!({
+            "type": "vision_analysis",
+            "priority": "batch",
+            "payload": { "image": "rose.jpg" },
+            "callback_url": callback_url
+        }))
+        .await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+    assert_eq!(submitted["job"]["id"], "job-1");
+    assert_eq!(submitted["job"]["callback_url"], callback_url);
+
+    let (status, claim) = fairlead.claim_worker_job("callback-worker").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(claim["job"]["id"], "job-1");
+
+    let (status, completed) = fairlead
+        .complete_worker_job(
+            "callback-worker",
+            "job-1",
+            json!({
+                "attempt": 1,
+                "result": { "classification": "healthy" }
+            }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(completed["job"]["status"], "complete");
+    assert_eq!(completed["job"]["callback"]["status"], "pending");
+
+    let callback = tokio::time::timeout(Duration::from_secs(2), callbacks.recv())
+        .await
+        .expect("callback was delivered")
+        .expect("callback receiver stayed open");
+    assert_eq!(callback["job"]["id"], "job-1");
+    assert_eq!(callback["job"]["type"], "vision_analysis");
+    assert_eq!(callback["job"]["status"], "complete");
+    assert_eq!(
+        callback["job"]["result"],
+        json!({ "classification": "healthy" })
+    );
+    assert_eq!(callback["job"]["callback"]["status"], "pending");
+    assert_eq!(callback["job"]["callback"]["attempts"], 1);
+
+    let fetched = wait_for_callback_status(&fairlead, "job-1", "delivered").await;
+    assert_eq!(fetched["job"]["callback"]["attempts"], 1);
+    assert_eq!(fetched["job"]["callback"]["last_http_status"], 200);
+    assert!(fetched["job"]["callback"]["last_error"].is_null());
+
+    let (status, metrics) = fairlead.get_text("/metrics").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(metrics.contains("fairlead_job_callbacks_total{type=\"vision_analysis\",status=\"complete\",outcome=\"success\",http_status=\"200\"} 1"));
 
     fairlead.shutdown().await;
 }

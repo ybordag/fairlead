@@ -29,11 +29,15 @@ behavior that in-process Rust tests cannot cover.
 - Added `worker_can_claim_and_complete_job_over_http`, which exercises the real
   process HTTP flow for submit -> register worker -> claim -> complete -> fetch
   final job -> scrape metrics.
+- Added an in-test callback receiver and
+  `complete_job_delivers_callback_over_real_http`, which exercises submit with
+  `callback_url` -> worker claim -> completion -> callback delivery -> callback
+  state polling -> callback metrics through real HTTP boundaries.
 
 ## Next Slices
 
-- Add a callback receiver process or in-test HTTP server for callback e2e
-  cases.
 - Add helpers for worker renew/fail/drain/reactivate/deregister and prune
   endpoints.
+- Add process-level restart coverage for pending callbacks and callback retry
+  recovery.
 - Move deferred Phase 8 local-process cases into concrete tests incrementally.

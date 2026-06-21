@@ -889,6 +889,8 @@ workload protocols.
   - [x] Add JSON request helpers and a SQLite-backed job restart smoke test.
   - [x] Add process-level worker registration, claim, completion, and metrics
     smoke coverage.
+  - [x] Add process-level callback receiver coverage for successful terminal
+    callback delivery and callback metrics.
   - Add process-level restart e2e harnesses for jobs, leases, callbacks, and
     metrics.
 - Keep Temporal deferred unless application workflows need durable multi-step

@@ -345,7 +345,8 @@ full scheduler-hardening harness.
 Remaining harness requirements:
 
 - restart Fairlead with changed environment
-- start fake async workers and callback receivers
+- start fake async workers and richer callback receivers for retry, timeout, and
+  crash-injection cases
 - poll `/health`, `/metrics`, `/v1/jobs`, and `/v1/workers`
 - add typed helpers for worker renew/fail/drain/reactivate/deregister,
   pruning, and richer metrics assertions
@@ -533,8 +534,6 @@ in-flight callback de-duplication. Remaining deferred tests:
 - Callback retry recovery across a full Fairlead OS-process restart.
 - Duplicate callback behavior when Fairlead crashes after the receiver handles
   the callback but before Fairlead records delivery success.
-- Process-level e2e callback delivery with an actual Fairlead process and
-  callback receiver.
 - Deployment-level callback delivery on Thor/Loki.
 
 **Why deferred:** These need a larger process/deployment harness or controlled
