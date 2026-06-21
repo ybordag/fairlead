@@ -266,15 +266,15 @@ Goal: create a portfolio-ready demonstration of Fairlead's routing behavior.
 
 Scope:
 
-- [ ] Add a local demo with two mock OpenAI-compatible backends named spark-a and
+- [x] Add a local demo with two mock OpenAI-compatible backends named spark-a and
   spark-b.
-- [ ] Simulate healthy, circuit-open, failed-then-retried, and recovered backend
+- [x] Simulate healthy, circuit-open, failed-then-retried, and recovered backend
   states.
-- [ ] Show same-node preference, peer-node fallback, same-request retry, and
+- [x] Show same-node preference, peer-node fallback, same-request retry, and
   metrics output.
 - [x] Document manual two-node DGX Spark deployment commands and expected
   observations.
-- [ ] Add a repeatable local mock demo that does not require GPUs.
+- [x] Add a repeatable local mock demo that does not require GPUs.
 
 Acceptance criteria:
 

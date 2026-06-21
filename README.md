@@ -168,6 +168,19 @@ curl http://localhost:7000/v1/chat/completions \
   -d '{"model":"local-model","messages":[{"role":"user","content":"hello"}]}'
 ```
 
+## Bluewater Demo
+
+Run the GPU-free local demo to see locality, fallback, same-request retry,
+recovery, metrics, and structured traces:
+
+```bash
+./demo/run_bluewater_demo.sh
+```
+
+The demo starts two mock OpenAI-compatible backends named `spark-a` and
+`spark-b`, starts Fairlead, then asserts the expected routing behavior. See
+[`demo/README.md`](demo/README.md) for details.
+
 ## Local Inference: vLLM
 
 Fairlead routes to **vLLM** instances on local GPU nodes. vLLM's
@@ -216,6 +229,7 @@ what the model result means.
   deployment notes for two DGX Spark nodes connected over InfiniBand.
 - [`docs/fixture_examples.md`](docs/fixture_examples.md) — conventions for
   sanitized test fixtures and ignored local deployment config.
+- [`demo/README.md`](demo/README.md) — GPU-free Bluewater routing demo.
 - [`docs/deferred_tests.md`](docs/deferred_tests.md) — known test gaps.
 
 ---
