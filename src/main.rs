@@ -14,7 +14,7 @@ mod storage;
 mod workers;
 
 use axum::{
-    routing::{get, post},
+    routing::{delete, get, post},
     Router,
 };
 use std::{net::SocketAddr, time::Duration};
@@ -176,6 +176,12 @@ pub(crate) fn build_router(state: AppState) -> Router {
         )
         .route("/v1/workers", get(workers::list_workers))
         .route("/v1/workers/register", post(workers::register_worker))
+        .route("/v1/workers/:id", delete(workers::deregister_worker))
+        .route("/v1/workers/:id/drain", post(workers::drain_worker))
+        .route(
+            "/v1/workers/:id/reactivate",
+            post(workers::reactivate_worker),
+        )
         .route(
             "/v1/workers/:id/claim",
             post(scheduler::claim_worker_job_handler),

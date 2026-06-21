@@ -26,7 +26,7 @@ Halyard does not include:
 
 - Durable job persistence.
 - Callback delivery.
-- Worker deregistration or graceful drain semantics.
+- Worker lifecycle controls, which were deferred to Phase 8A.
 - Background lease expiry loop beyond the claim/renew/result-time sweeps.
 
 ## First Slice

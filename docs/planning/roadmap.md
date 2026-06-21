@@ -848,13 +848,26 @@ async workers.
 Goal: make the async job manager more operationally complete without adding new
 workload protocols.
 
-- Add worker deregistration API and graceful drain semantics.
-- Add completed-job pruning policy.
-- Add stronger idempotency semantics for submit, complete, fail, cancel, and
-  callback handling where needed.
-- Add background expiry/recovery loops if claim-time sweeps are not enough.
-- Add process-level restart e2e harnesses for jobs, leases, callbacks, and
-  metrics.
+- **8A Bowline: Worker Lifecycle**
+  - [x] Add worker drain/reactivate endpoints.
+  - [x] Add worker deregistration API.
+  - [x] Idle deregistration removes workers immediately.
+  - [x] Busy deregistration marks workers draining so held leases can finish.
+  - [x] Preview and claim skip draining workers for new work.
+  - Add final 8A test/doc audit before PR.
+- **8B Stopper: Retention And Pruning**
+  - Add completed-job pruning policy.
+  - Add configurable retention limits.
+  - Add SQLite pruning behavior and metrics.
+- **8C Splice: Idempotency**
+  - Add stronger idempotency semantics for submit, complete, fail, cancel, and
+    callback handling where needed.
+- **8D Clove: Background Maintenance Loops**
+  - Add background expiry/recovery loops if claim-time sweeps are not enough.
+  - Add optional background pruning loop if 8B needs it.
+- **8E Reef: Process-Level E2E Harness**
+  - Add process-level restart e2e harnesses for jobs, leases, callbacks, and
+    metrics.
 - Keep Temporal deferred unless application workflows need durable multi-step
   orchestration beyond bounded compute jobs.
 

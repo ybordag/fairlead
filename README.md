@@ -7,12 +7,13 @@ health, circuit state, and session affinity.
 
 The name comes from sailing: a fairlead is a fitting that guides lines in exactly the right direction without friction or fouling.
 
-**Status:** Phase 7C is complete on `tactician`. Phase 7 adds pool-aware
-placement: first the shared pool/workload policy model, then synchronous backend
-routing, then async worker placement.
+**Status:** Phase 8A is active on `bowline`. Phase 8 hardens the async scheduler
+after the completed Phase 7 pool-aware placement work.
 Fairlead currently runs as an Axum HTTP service with `/health`, `/metrics`,
 `/v1/models`, `/v1/resources`, `/v1/resources/report`, `/v1/jobs`,
-`/v1/jobs/{id}`, `/v1/workers`, `/v1/workers/{id}/claim`,
+`/v1/jobs/{id}`, `/v1/workers`, `/v1/workers/{id}`,
+`/v1/workers/{id}/drain`, `/v1/workers/{id}/reactivate`,
+`/v1/workers/{id}/claim`,
 `/v1/workers/{worker_id}/jobs/{job_id}/renew`,
 `/v1/workers/{worker_id}/jobs/{job_id}/complete`,
 `/v1/workers/{worker_id}/jobs/{job_id}/fail`, `/v1/scheduler/preview`,

@@ -325,6 +325,9 @@ DELETE /v1/jobs/{id} — cancel queued or running work when supported
 GET  /v1/scheduler/preview    — preview next job/worker match without mutation
 POST /v1/workers/register       — register or update worker capabilities
 POST /v1/workers/{id}/heartbeat — refresh worker liveness
+POST /v1/workers/{id}/drain     — stop assigning new jobs to a worker
+POST /v1/workers/{id}/reactivate — let a drained worker accept new jobs again
+DELETE /v1/workers/{id}         — remove idle workers or drain busy workers
 POST /v1/workers/{id}/claim     — lease a compatible queued job to a worker
 POST /v1/workers/{worker_id}/jobs/{job_id}/renew — renew a held lease
 POST /v1/workers/{worker_id}/jobs/{job_id}/complete — complete a held job
@@ -407,6 +410,12 @@ job submitted
 - `POST /v1/workers/register` — workers announce capabilities, endpoint, node
   metadata, and pool metadata
 - `POST /v1/workers/{id}/heartbeat` — workers refresh liveness
+- `POST /v1/workers/{id}/drain` — workers remain registered but stop receiving
+  new claims
+- `POST /v1/workers/{id}/reactivate` — drained workers can receive new claims
+  again
+- `DELETE /v1/workers/{id}` — idle workers are removed; busy workers are marked
+  draining so held leases can finish
 - `GET /v1/workers` — current in-memory worker registry
 - `POST /v1/workers/{id}/claim` — worker-pull claim endpoint
 - `POST /v1/workers/{worker_id}/jobs/{job_id}/renew` — lease renewal

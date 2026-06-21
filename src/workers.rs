@@ -44,6 +44,7 @@ pub struct WorkerSnapshot {
     pub last_seen_unix_ms: u128,
     pub age_seconds: f64,
     pub stale: bool,
+    pub draining: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -75,7 +76,14 @@ pub struct WorkerUtilizationSnapshot {
 pub enum AcquireWorkerSlotResult {
     Acquired(WorkerSnapshot),
     AtCapacity(WorkerSnapshot),
+    Draining(WorkerSnapshot),
     Stale(WorkerSnapshot),
+    NotFound,
+}
+
+pub enum DeregisterWorkerResult {
+    Removed,
+    Draining(Box<WorkerSnapshot>),
     NotFound,
 }
 
@@ -100,6 +108,7 @@ struct WorkerEntry {
     max_concurrent_jobs: Option<usize>,
     available_vram_mb: Option<u64>,
     in_flight_jobs: usize,
+    draining: bool,
     registered_at: SystemTime,
     last_seen_at: SystemTime,
     observed_at: Instant,
@@ -134,10 +143,16 @@ impl WorkerRegistry {
             .get(&entry.id)
             .map(|existing| existing.in_flight_jobs)
             .unwrap_or_default();
+        let draining = guard
+            .workers
+            .get(&entry.id)
+            .map(|existing| existing.draining)
+            .unwrap_or_default();
 
         let entry = WorkerEntry {
             registered_at,
             in_flight_jobs,
+            draining,
             last_seen_at: now,
             observed_at: Instant::now(),
             ..entry
@@ -173,6 +188,9 @@ impl WorkerRegistry {
         if snapshot.stale {
             return AcquireWorkerSlotResult::Stale(snapshot);
         }
+        if worker.draining {
+            return AcquireWorkerSlotResult::Draining(snapshot);
+        }
         if worker
             .max_concurrent_jobs
             .is_some_and(|max| worker.in_flight_jobs >= max)
@@ -191,6 +209,39 @@ impl WorkerRegistry {
         Some(snapshot_from_entry(worker, self.stale_after))
     }
 
+    pub async fn drain(&self, id: &str) -> Option<WorkerSnapshot> {
+        let mut guard = self.inner.write().await;
+        let worker = guard.workers.get_mut(id)?;
+        worker.draining = true;
+        Some(snapshot_from_entry(worker, self.stale_after))
+    }
+
+    pub async fn reactivate(&self, id: &str) -> Option<WorkerSnapshot> {
+        let mut guard = self.inner.write().await;
+        let worker = guard.workers.get_mut(id)?;
+        worker.draining = false;
+        worker.last_seen_at = SystemTime::now();
+        worker.observed_at = Instant::now();
+        Some(snapshot_from_entry(worker, self.stale_after))
+    }
+
+    pub async fn deregister(&self, id: &str) -> DeregisterWorkerResult {
+        let mut guard = self.inner.write().await;
+        let Some(worker) = guard.workers.get_mut(id) else {
+            return DeregisterWorkerResult::NotFound;
+        };
+        if worker.in_flight_jobs > 0 {
+            worker.draining = true;
+            return DeregisterWorkerResult::Draining(Box::new(snapshot_from_entry(
+                worker,
+                self.stale_after,
+            )));
+        }
+
+        guard.workers.remove(id);
+        DeregisterWorkerResult::Removed
+    }
+
     pub async fn list(&self) -> Vec<WorkerSnapshot> {
         let guard = self.inner.read().await;
         let mut workers: Vec<_> = guard
@@ -207,7 +258,7 @@ impl WorkerRegistry {
         let mut snapshots: Vec<WorkerAvailabilitySnapshot> = Vec::new();
 
         for worker in workers {
-            let status = if worker.stale { "stale" } else { "available" };
+            let status = worker.availability_status();
             for job_type in worker.job_types {
                 if let Some(snapshot) = snapshots.iter_mut().find(|snapshot| {
                     snapshot.job_type == job_type.as_str() && snapshot.status == status
@@ -279,6 +330,34 @@ pub async fn heartbeat_worker(State(state): State<AppState>, Path(id): Path<Stri
     }
 }
 
+pub async fn drain_worker(State(state): State<AppState>, Path(id): Path<String>) -> Response {
+    match state.workers.drain(&id).await {
+        Some(worker) => Json(WorkerResponse { worker }).into_response(),
+        None => (StatusCode::NOT_FOUND, "worker not found").into_response(),
+    }
+}
+
+pub async fn reactivate_worker(State(state): State<AppState>, Path(id): Path<String>) -> Response {
+    match state.workers.reactivate(&id).await {
+        Some(worker) => Json(WorkerResponse { worker }).into_response(),
+        None => (StatusCode::NOT_FOUND, "worker not found").into_response(),
+    }
+}
+
+pub async fn deregister_worker(State(state): State<AppState>, Path(id): Path<String>) -> Response {
+    match state.workers.deregister(&id).await {
+        DeregisterWorkerResult::Removed => StatusCode::NO_CONTENT.into_response(),
+        DeregisterWorkerResult::Draining(worker) => (
+            StatusCode::ACCEPTED,
+            Json(WorkerResponse { worker: *worker }),
+        )
+            .into_response(),
+        DeregisterWorkerResult::NotFound => {
+            (StatusCode::NOT_FOUND, "worker not found").into_response()
+        }
+    }
+}
+
 pub async fn list_workers(State(state): State<AppState>) -> Json<WorkerListResponse> {
     Json(WorkerListResponse {
         workers: state.workers.list().await,
@@ -325,6 +404,7 @@ fn validate_worker(request: RegisterWorkerRequest) -> Result<WorkerEntry, String
         max_concurrent_jobs: request.max_concurrent_jobs,
         available_vram_mb: request.available_vram_mb,
         in_flight_jobs: 0,
+        draining: false,
         registered_at: SystemTime::now(),
         last_seen_at: SystemTime::now(),
         observed_at: Instant::now(),
@@ -333,9 +413,13 @@ fn validate_worker(request: RegisterWorkerRequest) -> Result<WorkerEntry, String
 
 fn snapshot_from_entry(entry: &WorkerEntry, stale_after: Duration) -> WorkerSnapshot {
     let age = entry.observed_at.elapsed();
-    let available_job_slots = entry
-        .max_concurrent_jobs
-        .map(|max| max.saturating_sub(entry.in_flight_jobs));
+    let available_job_slots = if entry.draining {
+        entry.max_concurrent_jobs.map(|_| 0)
+    } else {
+        entry
+            .max_concurrent_jobs
+            .map(|max| max.saturating_sub(entry.in_flight_jobs))
+    };
     WorkerSnapshot {
         id: entry.id.clone(),
         endpoint_url: entry.endpoint_url.clone(),
@@ -350,6 +434,23 @@ fn snapshot_from_entry(entry: &WorkerEntry, stale_after: Duration) -> WorkerSnap
         last_seen_unix_ms: unix_ms(entry.last_seen_at),
         age_seconds: age.as_secs_f64(),
         stale: age >= stale_after,
+        draining: entry.draining,
+    }
+}
+
+impl WorkerSnapshot {
+    pub fn can_accept_work(&self) -> bool {
+        !self.stale && !self.draining
+    }
+
+    fn availability_status(&self) -> &'static str {
+        if self.stale {
+            "stale"
+        } else if self.draining {
+            "draining"
+        } else {
+            "available"
+        }
     }
 }
 
@@ -376,8 +477,9 @@ fn job_type_rank(job_type: &str) -> u8 {
 fn status_rank(status: &str) -> u8 {
     match status {
         "available" => 0,
-        "stale" => 1,
-        _ => 2,
+        "draining" => 1,
+        "stale" => 2,
+        _ => 3,
     }
 }
 
@@ -745,6 +847,146 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn drain_and_reactivate_toggle_worker_claim_eligibility() {
+        let workers = WorkerRegistry::default();
+        workers
+            .register(RegisterWorkerRequest {
+                id: "worker-a".into(),
+                endpoint_url: "http://worker-a:9000".into(),
+                node_id: None,
+                pool: "default".into(),
+                job_types: vec![JobKind::VisionAnalysis],
+                max_concurrent_jobs: Some(1),
+                available_vram_mb: None,
+            })
+            .await
+            .unwrap();
+
+        let drained = workers.drain("worker-a").await.unwrap();
+        assert!(drained.draining);
+        assert_eq!(drained.available_job_slots, Some(0));
+        assert!(matches!(
+            workers.try_acquire_slot("worker-a").await,
+            AcquireWorkerSlotResult::Draining(_)
+        ));
+
+        let reactivated = workers.reactivate("worker-a").await.unwrap();
+        assert!(!reactivated.draining);
+        assert_eq!(reactivated.available_job_slots, Some(1));
+        assert!(matches!(
+            workers.try_acquire_slot("worker-a").await,
+            AcquireWorkerSlotResult::Acquired(_)
+        ));
+    }
+
+    #[tokio::test]
+    async fn deregister_removes_idle_worker() {
+        let workers = WorkerRegistry::default();
+        workers
+            .register(RegisterWorkerRequest {
+                id: "worker-a".into(),
+                endpoint_url: "http://worker-a:9000".into(),
+                node_id: None,
+                pool: "default".into(),
+                job_types: vec![JobKind::Cluster],
+                max_concurrent_jobs: None,
+                available_vram_mb: None,
+            })
+            .await
+            .unwrap();
+
+        assert!(matches!(
+            workers.deregister("worker-a").await,
+            DeregisterWorkerResult::Removed
+        ));
+        assert!(workers.get("worker-a").await.is_none());
+    }
+
+    #[tokio::test]
+    async fn deregister_drains_busy_worker_without_removing_it() {
+        let workers = WorkerRegistry::default();
+        workers
+            .register(RegisterWorkerRequest {
+                id: "worker-a".into(),
+                endpoint_url: "http://worker-a:9000".into(),
+                node_id: None,
+                pool: "default".into(),
+                job_types: vec![JobKind::Cluster],
+                max_concurrent_jobs: Some(1),
+                available_vram_mb: None,
+            })
+            .await
+            .unwrap();
+        assert!(matches!(
+            workers.try_acquire_slot("worker-a").await,
+            AcquireWorkerSlotResult::Acquired(_)
+        ));
+
+        let DeregisterWorkerResult::Draining(draining) = workers.deregister("worker-a").await
+        else {
+            panic!("expected busy worker to drain");
+        };
+        assert!(draining.draining);
+        assert_eq!(draining.in_flight_jobs, 1);
+        assert!(workers.get("worker-a").await.unwrap().draining);
+    }
+
+    #[tokio::test]
+    async fn worker_lifecycle_endpoints_drain_reactivate_and_deregister() {
+        let workers = WorkerRegistry::default();
+        workers
+            .register(RegisterWorkerRequest {
+                id: "worker-a".into(),
+                endpoint_url: "http://worker-a:9000".into(),
+                node_id: None,
+                pool: "default".into(),
+                job_types: vec![JobKind::VisionAnalysis],
+                max_concurrent_jobs: Some(1),
+                available_vram_mb: None,
+            })
+            .await
+            .unwrap();
+        let app = build_router(test_state(workers.clone()));
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::post("/v1/workers/worker-a/drain")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let value = response_json(response).await;
+        assert_eq!(value["worker"]["draining"], true);
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::post("/v1/workers/worker-a/reactivate")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let value = response_json(response).await;
+        assert_eq!(value["worker"]["draining"], false);
+
+        let response = app
+            .oneshot(
+                Request::delete("/v1/workers/worker-a")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        assert!(workers.get("worker-a").await.is_none());
+    }
+
+    #[tokio::test]
     async fn heartbeat_refreshes_registered_worker() {
         let workers = WorkerRegistry::new(Duration::ZERO);
         workers
@@ -916,6 +1158,7 @@ mod tests {
             .await
             .unwrap();
         workers.try_acquire_slot("vision-a").await;
+        workers.drain("vision-a").await;
 
         let response = app
             .oneshot(Request::get("/metrics").body(Body::empty()).unwrap())
@@ -924,14 +1167,14 @@ mod tests {
 
         let metrics = response_text(response).await;
         assert!(
-            metrics.contains("fairlead_workers{type=\"vision_analysis\",status=\"available\"} 1")
+            metrics.contains("fairlead_workers{type=\"vision_analysis\",status=\"draining\"} 1")
         );
-        assert!(metrics.contains("fairlead_workers{type=\"embed_batch\",status=\"available\"} 1"));
+        assert!(metrics.contains("fairlead_workers{type=\"embed_batch\",status=\"draining\"} 1"));
         assert!(metrics.contains("fairlead_worker_in_flight_jobs{worker=\"vision-a\",node=\"\"} 1"));
         assert!(metrics
             .contains("fairlead_worker_max_concurrent_jobs{worker=\"vision-a\",node=\"\"} 2"));
         assert!(metrics
-            .contains("fairlead_worker_available_job_slots{worker=\"vision-a\",node=\"\"} 1"));
+            .contains("fairlead_worker_available_job_slots{worker=\"vision-a\",node=\"\"} 0"));
     }
 
     async fn response_json(response: axum::response::Response) -> serde_json::Value {

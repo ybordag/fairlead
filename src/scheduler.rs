@@ -59,6 +59,9 @@ pub async fn claim_worker_job_handler(
         AcquireWorkerSlotResult::AtCapacity(_) => {
             return (StatusCode::CONFLICT, "worker is at capacity").into_response();
         }
+        AcquireWorkerSlotResult::Draining(_) => {
+            return (StatusCode::CONFLICT, "worker is draining").into_response();
+        }
         AcquireWorkerSlotResult::Stale(_) => {
             return (StatusCode::CONFLICT, "worker is stale").into_response();
         }
@@ -256,7 +259,7 @@ fn preview_from_snapshots(
 ) -> Option<SchedulerPreview> {
     for job in queued_jobs {
         if let Some(worker) = workers.iter().find(|worker| {
-            !worker.stale
+            worker.can_accept_work()
                 && worker.job_types.contains(&job.kind)
                 && workload_pools.allows(job.kind.as_str(), &worker.pool)
         }) {
@@ -343,7 +346,7 @@ fn count_candidate_workers_for_job(
     workers
         .iter()
         .filter(|worker| {
-            !worker.stale
+            worker.can_accept_work()
                 && worker.job_types.contains(&job.kind)
                 && workload_pools.allows(job.kind.as_str(), &worker.pool)
         })
@@ -758,6 +761,36 @@ mod tests {
             })
             .await
             .unwrap();
+
+        assert!(preview_next_assignment(&jobs, &workers).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn preview_ignores_draining_workers() {
+        let jobs = JobRegistry::default();
+        let workers = WorkerRegistry::default();
+
+        jobs.submit(SubmitJobRequest {
+            kind: JobKind::Cluster,
+            priority: Priority::Batch,
+            payload: Value::Null,
+            callback_url: None,
+        })
+        .await
+        .unwrap();
+        workers
+            .register(RegisterWorkerRequest {
+                id: "draining-worker".into(),
+                endpoint_url: "http://draining-worker:9000".into(),
+                node_id: None,
+                pool: "default".into(),
+                job_types: vec![JobKind::Cluster],
+                max_concurrent_jobs: None,
+                available_vram_mb: None,
+            })
+            .await
+            .unwrap();
+        workers.drain("draining-worker").await;
 
         assert!(preview_next_assignment(&jobs, &workers).await.is_none());
     }
@@ -1234,6 +1267,126 @@ mod tests {
         let worker = workers.get("vision-worker").await.unwrap();
         assert_eq!(worker.in_flight_jobs, 1);
         assert_eq!(worker.available_job_slots, Some(0));
+    }
+
+    #[tokio::test]
+    async fn worker_claim_endpoint_rejects_draining_worker() {
+        let jobs = JobRegistry::default();
+        let workers = WorkerRegistry::default();
+
+        jobs.submit(SubmitJobRequest {
+            kind: JobKind::VisionAnalysis,
+            priority: Priority::Batch,
+            payload: Value::Null,
+            callback_url: None,
+        })
+        .await
+        .unwrap();
+        workers
+            .register(RegisterWorkerRequest {
+                id: "draining-worker".into(),
+                endpoint_url: "http://draining-worker:9000".into(),
+                node_id: None,
+                pool: "default".into(),
+                job_types: vec![JobKind::VisionAnalysis],
+                max_concurrent_jobs: Some(1),
+                available_vram_mb: None,
+            })
+            .await
+            .unwrap();
+        workers.drain("draining-worker").await;
+
+        let app = build_router(test_state(jobs.clone(), workers.clone()));
+        let response = app
+            .oneshot(
+                Request::post("/v1/workers/draining-worker/claim")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        assert_eq!(response_text(response).await, "worker is draining");
+        assert_eq!(
+            jobs.get("job-1").await.unwrap().status,
+            crate::jobs::JobStatus::Queued
+        );
+        assert_eq!(
+            workers.get("draining-worker").await.unwrap().in_flight_jobs,
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn busy_deregistered_worker_can_complete_held_job_while_draining() {
+        let jobs = JobRegistry::default();
+        let workers = WorkerRegistry::default();
+
+        jobs.submit(SubmitJobRequest {
+            kind: JobKind::VisionAnalysis,
+            priority: Priority::Batch,
+            payload: Value::Null,
+            callback_url: None,
+        })
+        .await
+        .unwrap();
+        workers
+            .register(RegisterWorkerRequest {
+                id: "vision-worker".into(),
+                endpoint_url: "http://vision-worker:9000".into(),
+                node_id: None,
+                pool: "default".into(),
+                job_types: vec![JobKind::VisionAnalysis],
+                max_concurrent_jobs: Some(1),
+                available_vram_mb: None,
+            })
+            .await
+            .unwrap();
+
+        let app = build_router(test_state(jobs.clone(), workers.clone()));
+        let claim = app
+            .clone()
+            .oneshot(
+                Request::post("/v1/workers/vision-worker/claim")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(claim.status(), StatusCode::OK);
+
+        let deregister = app
+            .clone()
+            .oneshot(
+                Request::delete("/v1/workers/vision-worker")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(deregister.status(), StatusCode::ACCEPTED);
+        let value: serde_json::Value =
+            serde_json::from_str(&response_text(deregister).await).unwrap();
+        assert_eq!(value["worker"]["draining"], true);
+
+        let complete = app
+            .oneshot(
+                Request::post("/v1/workers/vision-worker/jobs/job-1/complete")
+                    .header("content-type", "application/json")
+                    .body(Body::from(json!({"result": {"ok": true}}).to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(complete.status(), StatusCode::OK);
+        assert_eq!(
+            jobs.get("job-1").await.unwrap().status,
+            crate::jobs::JobStatus::Complete
+        );
+        let worker = workers.get("vision-worker").await.unwrap();
+        assert!(worker.draining);
+        assert_eq!(worker.in_flight_jobs, 0);
     }
 
     #[tokio::test]

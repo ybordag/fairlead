@@ -313,6 +313,27 @@ future phase, add e2e coverage for mixed local/peer/cloud placement:
 registration, cost/rate-limit policy, or a CI-safe cloud test fixture. This
 belongs with the future cloud overflow phase rather than Phase 7D.
 
+### `phase_8a_worker_lifecycle_process_e2e`
+
+Add an opt-in process-level e2e for worker drain, reactivation, and
+deregistration:
+
+- start Fairlead with local fake workers and SQLite job storage
+- register two workers for the same job type
+- drain one worker and verify preview/claim uses the other worker
+- reactivate the drained worker and verify it can claim new work again
+- delete an idle worker and verify it disappears from `GET /v1/workers`
+- claim a job, delete the busy worker, verify delete returns `202 Accepted`,
+  then complete the held job successfully while the worker is draining
+- restart Fairlead after worker lifecycle operations and verify documented
+  in-memory worker registry behavior remains clear
+- scrape `/metrics` and verify worker availability includes
+  `status="draining"` while drained workers are registered
+
+**Why deferred:** The in-process tests cover the registry and endpoint behavior.
+This e2e needs process lifecycle management, port allocation, fake worker
+scripts, SQLite job storage, and restart assertions.
+
 ### `phase_6c_worker_claims_and_leases`
 
 When later phases build on Phase 6C/6D worker-pull claims, leases, and result

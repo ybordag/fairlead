@@ -25,7 +25,7 @@ Shackle does not include:
 - Callback delivery.
 - Multi-instance Fairlead coordination.
 - Postgres support.
-- Complete worker deregistration or graceful drain semantics.
+- Worker lifecycle controls, which were deferred to Phase 8A.
 
 ## First Slice
 
