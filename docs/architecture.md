@@ -109,10 +109,11 @@ on workers and model servers reporting capacity, or on future node probes that
 publish capacity into Fairlead's registry. This is why the resource registry is a
 scheduler input, not the source of truth for GPU execution.
 
-The current code implements only the gateway part: backend selection, circuit
-breaking, health probing, soft affinity, streaming proxying, and basic metrics.
-VRAM accounting, priority queues, worker registration, and async job dispatch are
-planned later phases.
+The current code implements the synchronous gateway path: backend selection,
+circuit breaking, health probing, soft affinity, streaming proxying, resource
+reporting, resource-aware backend eligibility, priority admission, and basic
+metrics. Durable priority queues, worker registration, and async job dispatch
+are planned later phases.
 
 ### Rhizome example: spark-a and spark-b
 
@@ -291,9 +292,10 @@ scheduling remain future scheduler work.
 | 2 | OpenAI proxy, single backend, streaming | Rhizome can call Fairlead instead of cloud |
 | 3 | Circuit breaker, health checks, basic /metrics | Automatic failover when vLLM crashes |
 | 4 | Fallback chain, session affinity, cloud providers | Full resilience across local + cloud |
-| 5 | Resource registry, VRAM accounting, priority queue | Vision sidecar coexists without OOM; background work yields to users |
-| 6 | Async job API, worker registration, leases, callbacks | Vision and embedding jobs go through Fairlead |
-| 7 | Index/cluster job types, FAISS/GPU, full metrics | Advanced RAG indexing, complete observability |
+| 5 | Resource registry, VRAM accounting, priority admission | Synchronous inference avoids oversubscribed local GPUs and fails fast by priority |
+| 6A | Synchronous surface cleanup: workload metadata, backend pools, header policy, `/v1/models` | More synchronous workloads can share the proxy cleanly |
+| 6B | Async job API, durable priority queues, worker registration, leases, callbacks | Vision and embedding jobs go through Fairlead |
+| 7 | Adapter boundaries, index/cluster job types, FAISS/GPU, cloud fallback, full metrics | Advanced RAG indexing, external overflow, complete observability |
 
 Phases 1–3 give you a working proxy in a few days. Phases 4–5 give you
 production resilience. Phases 6–7 complete the async compute platform.

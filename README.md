@@ -7,9 +7,10 @@ health, circuit state, and session affinity.
 
 The name comes from sailing: a fairlead is a fitting that guides lines in exactly the right direction without friction or fouling.
 
-**Status:** Phase 5 in progress on the `trim` branch. Fairlead currently runs
-as an Axum HTTP service with `/health`, `/metrics`, `/v1/resources`,
-`/v1/resources/report`, `/v1/chat/completions`, and `/v1/embeddings`.
+**Status:** Phase 5 is scoped and ready for PR on the `trim` branch. Fairlead
+currently runs as an Axum HTTP service with `/health`, `/metrics`,
+`/v1/resources`, `/v1/resources/report`, `/v1/chat/completions`, and
+`/v1/embeddings`.
 
 ---
 
@@ -51,7 +52,7 @@ those model servers.
 Bluewater is the effort to make Fairlead a general-purpose local/edge compute
 router rather than a Rhizome-specific proxy.
 
-Planned work includes:
+Implemented generalization work includes:
 
 - **Workload abstraction** for chat, embeddings, rerank, vision, batch jobs, and
   future non-OpenAI-compatible adapters.
@@ -63,10 +64,14 @@ Planned work includes:
   other GPU consumers.
 - **Richer retry policy and observability** for retry reasons, retry counts, and
   backend-level outcomes.
-- **Priority queues and async jobs** for background work that should yield to
-  realtime user requests.
+- **Priority admission limits** for synchronous requests that should fail fast
+  instead of overloading a saturated priority bucket.
 - **Workload-aware observability** for selected backend, fallback reason,
-  latency, queue depth, and resource state.
+  latency, priority admission, and resource state.
+
+Future phases add durable priority queues, async jobs, worker registration,
+backend pools, `/v1/models`, adapter boundaries, queue wait-time metrics, and
+cloud fallback.
 
 See [`docs/bluewater_generalization.md`](docs/bluewater_generalization.md) for
 the implementation plan and acceptance criteria.

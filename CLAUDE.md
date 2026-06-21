@@ -49,7 +49,8 @@ cargo watch -x run
 
 ## Current status
 
-**Phase 4 complete** (spinnaker → main). **Phase 5 in progress** (trim branch).
+**Phase 4 complete** (spinnaker → main). **Phase 5 scoped on trim**: resource-aware
+synchronous routing plus priority admission, without durable queues or async jobs.
 
 | Phase | Branch | Status |
 |---|---|---|
@@ -57,13 +58,14 @@ cargo watch -x run
 | 2 — Transparent proxy | telltale → main | ✅ complete |
 | 3 — Circuit breaker + health | batten → main | ✅ complete |
 | 4 — Fallback chain + session affinity | spinnaker → main | ✅ complete |
-| 5 — VRAM accounting + priority queues | trim | 🔨 in progress |
-| 6 — Async job dispatch | — | pending |
+| 5 — VRAM accounting + priority admission | trim | ready for PR |
+| 6A — Synchronous surface cleanup | — | pending |
+| 6B — Async job dispatch | — | pending |
 | 7 — Advanced compute + full metrics | — | pending |
 
 ## Project layout
 
-**What exists now (Phases 1–5 in progress):**
+**What exists now (Phases 1–5):**
 
 ```
 src/
@@ -85,7 +87,7 @@ src/
     types.rs        — OpenAI-compatible request/response serde structs
 ```
 
-**Planned layout (Phases 5–7):**
+**Planned layout (Phases 6–7):**
 
 ```
 src/
@@ -93,8 +95,6 @@ src/
 
   router/
     ...  (circuit.rs, backend.rs, fallback.rs, affinity.rs as above)
-    priority.rs        — priority-aware request scheduling (realtime/batch/background)
-
   jobs/
     mod.rs             — async job API: submit, query, dispatch
     queue.rs           — three-tier priority queue (realtime > batch > background)
@@ -116,6 +116,11 @@ src/
 ```
 POST /v1/chat/completions    — OpenAI-compatible, streaming supported
 POST /v1/embeddings          — OpenAI-compatible embedding generation
+```
+
+Planned for Phase 6A:
+
+```text
 GET  /v1/models              — list available backends/models
 ```
 
@@ -278,10 +283,26 @@ LOG_LEVEL                    — tracing level: error, warn, info, debug, trace 
 - Test: backend with insufficient VRAM is skipped; a full batch bucket does not
   block realtime admission
 
-### Phase 6 — Async job dispatch
+### Phase 6A — Synchronous surface cleanup
+
+- Move route-specific behavior into workload metadata.
+- Add route metadata: path, method, streaming behavior, retry policy, backend
+  pool, and metric labels.
+- Split backend configuration by pool so different synchronous workloads can
+  target different backend sets.
+- Decide whether session affinity is global, per workload, or per backend pool.
+- Add provider/header forwarding policy for content type, authorization,
+  organization/project headers, and provider-specific opt-in headers.
+- Add `GET /v1/models` backed by configured workloads and backend metadata.
+- Keep cloud-provider fallback and provider credentials deferred unless a demo or
+  deployment path needs external overflow capacity.
+
+### Phase 6B — Async job dispatch
 
 - Job API: `POST /v1/jobs`, `GET /v1/jobs/{id}`, `DELETE /v1/jobs/{id}`
+- Durable priority queues with queue depth and queue wait-time metrics
 - Worker registration API: `POST /v1/workers/register`, heartbeat, deregister
+- Worker availability and utilization metrics
 - Workers declare: job types they handle, VRAM cost per job, endpoint URL
 - Scheduler: match job type → registered workers; pick based on VRAM headroom and load
 - Job manager: bounded attempts, leases, timeouts, retry limits, cancellation,
@@ -289,6 +310,7 @@ LOG_LEVEL                    — tracing level: error, warn, info, debug, trace 
 - Persistence path: in-memory for focused tests, SQLite first for local durable
   state, Postgres later for multiple Fairlead instances
 - Callback delivery: on completion, POST to `callback_url` with result payload; retry on failure
+- Job duration and callback success/failure metrics
 - Built-in job types: `vision_analysis`, `embed_batch`
 - Test: submit vision job → dispatched to registered worker → callback fires with result
 
@@ -300,7 +322,13 @@ multi-step workflows with long waits, fanout/fanin, or compensation logic.
 
 - `index_build` job type: pgvector (CPU) and FAISS (GPU) backends
 - `cluster` job type: k-means and HDBSCAN via registered compute worker
+- Adapter boundaries for non-OpenAI-compatible synchronous and async endpoints,
+  such as rerank, image generation, and vision analysis
 - GPU-aware job scheduling: prefer GPU worker for index/cluster; fall back to CPU worker
+- Richer resource dimensions beyond coarse VRAM/load when needed: CPU slots, GPU
+  slots, model residency, disk bandwidth, or custom worker capacity
+- Cloud-provider fallback and credential policy if local/edge deployment needs
+  external overflow capacity
 - Full Prometheus `/metrics`: requests_total, queue_depth per priority, job_duration,
   worker_utilization, vram_used per node, circuit_state per backend
 - Test: index_build job completes and callback fires; metrics reflect job throughput

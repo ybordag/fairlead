@@ -20,11 +20,11 @@ request or job
 OpenAI-compatible chat and embeddings are the first implemented workload types.
 They should remain first-class, but they should not define the whole system.
 
-## Bluewater Scope Boundary
+## Completed Bluewater Scope Boundary
 
-Bluewater should finish the generalized synchronous inference proxy. It should
-make today's request path resilient, explainable, and demonstrable without
-starting the future scheduler or async job system.
+Bluewater finished the generalized synchronous inference proxy. It made today's
+request path resilient, explainable, and demonstrable without starting the future
+scheduler or async job system.
 
 Bluewater includes:
 
@@ -42,7 +42,7 @@ Bluewater does not include:
 
 - Resource registry or VRAM-aware scheduling.
 - Resource-aware backend selection.
-- Priority queues.
+- Durable priority queues.
 - Async job submission, status, cancellation, worker registration, or callbacks.
 - Cloud-provider fallback and provider credential policy.
 - Full adapter implementations for non-OpenAI-compatible protocols.
@@ -50,12 +50,46 @@ Bluewater does not include:
 Those deferred items belong to later branches/phases so this branch stays a
 coherent synchronous-router milestone.
 
+## Trim Scope Boundary
+
+Trim is the follow-on Phase 5 branch. It should finish resource-aware synchronous
+routing and priority admission without implementing the async compute scheduler.
+
+Trim includes:
+
+- Cooperative resource reports through `POST /v1/resources/report`.
+- Resource snapshots through `GET /v1/resources`.
+- Stale-report handling.
+- Resource-aware backend eligibility when `RESOURCE_AWARE_ROUTING=true`.
+- Load/headroom ranking among eligible backends.
+- Priority parsing for synchronous proxy requests.
+- Per-priority synchronous in-flight limits.
+- `429 Too Many Requests` when a synchronous priority bucket is full.
+- Priority limit and in-flight metrics.
+
+Trim does not include:
+
+- Durable priority queues.
+- Queue depth or queue wait-time metrics.
+- Worker registration, worker heartbeat, or worker utilization metrics.
+- Async job submission, status, cancellation, leases, retries, or callbacks.
+- Job duration metrics.
+- Backend pool splitting by workload.
+- Provider/header forwarding policy.
+- `/v1/models`.
+- Adapter boundaries for non-OpenAI-compatible protocols.
+- Cloud-provider fallback and credential policy.
+
+Those items are explicitly assigned to future phases below.
+
 ## Current Baseline
 
 Fairlead currently provides:
 
 - Axum HTTP service with `/health`, `/metrics`, `/v1/chat/completions`, and
   `/v1/embeddings`.
+- Resource reporting and resource snapshots through `/v1/resources/report` and
+  `/v1/resources`.
 - Ordered backend selection from `BACKENDS`.
 - Per-backend circuit breakers with background health probes.
 - Health probes use derived or configured health URLs instead of probing the
@@ -64,8 +98,11 @@ Fairlead currently provides:
 - Origin-node locality through `X-Fairlead-Origin-Node`.
 - Streaming proxy support for Server-Sent Events.
 - Prometheus circuit-state, request, retry, fallback, and latency metrics.
+- Prometheus resource metrics and priority admission metrics.
 - Node-aware backend metadata through `BACKENDS_JSON`.
 - `WorkloadKind` metadata for chat completions and embeddings.
+- Resource-aware routing when enabled.
+- Per-priority synchronous admission limits.
 - Documentation for a manual two-node DGX Spark deployment.
 - Sanitized fixture conventions and ignore rules for private local config.
 
@@ -74,7 +111,7 @@ It does not yet provide:
 - Workload-aware route selection.
 - Separate backend pools by workload type.
 - Provider-specific auth/header policies.
-- VRAM or CPU resource accounting.
+- CPU resource accounting and richer resource dimensions beyond coarse VRAM/load.
 - Durable priority queues.
 - Async job submission, status, cancellation, worker registration, or callbacks.
 
@@ -565,43 +602,73 @@ Docker, or the provider accounts themselves.
 
 ### Bluewater 1: Generalized Synchronous Proxy
 
-- Complete the easy tasks.
-- Introduce `WorkloadKind`.
-- Add route/workload metadata.
-- Add backend pools.
-- Add provider/header policy.
-- Add `/v1/models`.
-- Clean up backend health probe targets.
-- Add basic same-request retry for safe synchronous upstream failures.
-- Add workload-aware routing metrics and retry/fallback counters.
-- Add a repeatable local mock demo.
+- [x] Complete the easy tasks that support the synchronous proxy.
+- [x] Introduce `WorkloadKind`.
+- [x] Clean up backend health probe targets.
+- [x] Add basic same-request retry for safe synchronous upstream failures.
+- [x] Add workload-aware routing metrics and retry/fallback counters.
+- [x] Add a repeatable local mock demo.
+- [ ] Move route-specific behavior into workload metadata. Deferred to
+  **Phase 6A: Synchronous Surface Cleanup**.
+- [ ] Add backend pools. Deferred to **Phase 6A: Synchronous Surface Cleanup**.
+- [ ] Add provider/header policy. Deferred to **Phase 6A: Synchronous Surface
+  Cleanup**.
+- [ ] Add `/v1/models`. Deferred to **Phase 6A: Synchronous Surface Cleanup**.
 
 ### Bluewater 2: Resource-Aware Routing
 
-- Add resource registry.
-- Add resource-aware backend eligibility.
-- Add conservative behavior for unknown capacity.
-- Add resource metrics.
-- Add per-priority synchronous admission limits.
-- Return 429 instead of queueing when a synchronous priority bucket is full.
+- [x] Add resource registry.
+- [x] Add resource-aware backend eligibility.
+- [x] Add conservative behavior for unknown capacity.
+- [x] Add resource metrics.
+- [x] Add per-priority synchronous admission limits.
+- [x] Return 429 instead of queueing when a synchronous priority bucket is full.
+
+### Phase 6A: Synchronous Surface Cleanup
+
+This phase keeps the synchronous proxy surface clean before adding async jobs.
+It should not introduce queues, workers, or job state.
+
+- Move route-specific behavior out of `forward(state, path, headers, body)` and
+  into workload metadata.
+- Add route metadata for path, method, streaming behavior, retry policy, backend
+  pool, and metric labels.
+- Split backend configuration by pool so different synchronous workloads can
+  target different backend sets.
+- Decide whether session affinity is global, per workload, or per backend pool.
+- Add provider/header forwarding policy for content type, authorization,
+  organization/project headers, and provider-specific opt-in headers.
+- Add `GET /v1/models` backed by configured workloads and backend metadata.
+- Keep cloud-provider fallback and provider credentials deferred unless a clear
+  demo need appears.
 
 ### Bluewater 3: Async Compute Router
 
-- Add job API.
-- Add priority queues.
+- Add job API: submit, status, and cancellation.
+- Add durable priority queues.
+- Add queue depth and queue wait-time metrics by priority and workload.
 - Add worker registration and heartbeat.
+- Add worker availability and utilization metrics.
 - Add bounded job attempts with timeouts, leases, retry limits, and cancellation.
 - Add durable-enough job state, starting with in-memory state for tests and
   SQLite as the first persistent backend.
 - Add callback delivery.
+- Add job duration and callback success/failure metrics.
 - Add async workload metrics.
 - Document Temporal as deferred unless Rhizome needs durable multi-step workflow
   orchestration beyond compute dispatch.
 
 ### Bluewater 4: Advanced Workloads
 
-- Add adapters for rerank, image, vision, batch embeddings, index builds, and
-  clustering.
+- Add adapter boundaries for non-OpenAI-compatible synchronous and async
+  endpoints, such as `/v1/rerank`, image generation, and vision analysis.
+- Add concrete adapters for rerank, image, vision, batch embeddings, index
+  builds, and clustering.
 - Add cancellation and idempotency.
 - Add richer retry policies.
+- Add richer resource dimensions beyond coarse VRAM/load where workloads need
+  CPU slots, GPU slots, model residency, disk bandwidth, or custom worker
+  capacity.
+- Add cloud-provider fallback and provider credential policy if local/edge
+  deployment needs external overflow capacity.
 - Add deployment documentation for multiple applications sharing Fairlead.
