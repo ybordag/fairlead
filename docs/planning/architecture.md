@@ -295,10 +295,56 @@ job submitted
   node metadata
 - `POST /v1/workers/{id}/heartbeat` — workers refresh liveness
 - `GET /v1/workers` — current in-memory worker registry
+- `POST /v1/workers/{id}/claim` — Phase 6C worker-pull claim endpoint
 - `POST /v1/resources/report` — GPU consumers and workers report capacity
 - `GET /v1/resources` — current resource control-plane state
 - `GET /metrics` — Prometheus: queue depth/wait, circuit states, VRAM per node
 - Persistent job state for running attempts, retries, callbacks, and pruning.
+
+### Worker-pull claim decision
+
+Phase 6C should use a worker-scoped claim endpoint:
+
+```text
+POST /v1/workers/{id}/claim
+```
+
+This is a worker-pull API shape, but it does not make workers the scheduler.
+Workers only announce readiness by asking for work. Fairlead remains the central
+controller: it validates the worker, checks freshness and capabilities, scans
+queued jobs by priority/FIFO order, applies lease/resource policy, and either
+returns a leased job or returns no work.
+
+The alternative would be a job-scoped claim endpoint such as:
+
+```text
+POST /v1/jobs/claim
+{ "worker_id": "vision-a" }
+```
+
+That can work, but it treats claiming as a generic queue operation and pushes
+worker authority into the request body. The worker-scoped route makes the actor
+explicit and keeps the lifecycle clear:
+
+```text
+register -> heartbeat -> claim -> execute -> complete/fail
+```
+
+This choice has useful downstream consequences:
+
+- Worker identity, freshness, auth, and draining all attach naturally to the
+  route.
+- Fairlead can enforce that only the worker holding a lease may renew,
+  complete, or fail that job.
+- Worker utilization metrics can count claims and in-flight leases per worker.
+- Backpressure remains simple: a worker asks only when ready, while Fairlead
+  still controls assignment.
+- Workers do not need to expose externally reachable HTTP dispatch endpoints for
+  Fairlead to push jobs.
+
+The internal implementation may still live in scheduler/job modules and must
+mutate job state atomically. The route shape describes the actor; it does not
+weaken Fairlead's central scheduling authority.
 
 ### Scheduler boundaries
 
