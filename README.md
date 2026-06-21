@@ -44,8 +44,8 @@ The current service provides:
   overloading the service.
 - **Prometheus-style metrics** for backend circuit state, request outcomes,
   latency, fallback reasons, retry reasons, priority limits/in-flight counts,
-  reported resource state, async queue depth/wait, worker utilization, and
-  terminal job duration, and callback delivery outcomes.
+  reported resource state, async queue depth/wait, worker utilization, async
+  worker pool placement, terminal job duration, and callback delivery outcomes.
 
 Fairlead does **not** run inference itself. It routes requests to model servers
 such as vLLM. vLLM owns model loading, GPU execution, KV cache management, and
@@ -100,9 +100,9 @@ Implemented generalization work includes:
 - **Terminal job callbacks** with bounded retry/timeout policy,
   success/failure metrics, and SQLite-backed at-least-once restart recovery.
 
-Remaining Phase 7 work adds async worker pool observability and shared pool
-demos. Future phases add scheduler hardening, adapter boundaries, richer
-resource policy, external scale/overflow, and transport/SDK hardening.
+Remaining Phase 7 work adds shared pool demos and the final partial-vs-strict
+policy decision. Future phases add scheduler hardening, adapter boundaries,
+richer resource policy, external scale/overflow, and transport/SDK hardening.
 
 See [`docs/planning/roadmap.md`](docs/planning/roadmap.md) for the
 implementation plan and acceptance criteria.

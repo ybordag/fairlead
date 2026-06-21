@@ -211,9 +211,10 @@ report resource state through `/v1/resources/report`. When
 fresh report that satisfies the workload's coarse VRAM estimate, applies pool
 policy, locality, and affinity precedence, then ranks remaining eligible
 candidates by lower reported load, higher available VRAM, and configured order
-inside the selected pool stage. It does not yet implement per-pool async
-placement metrics, durable starvation policy beyond current queue ordering, or
-cloud fallback.
+inside the selected pool stage. Async worker-pull claims emit per-pool placement
+metrics for selected workers, compatible worker counts, and jobs skipped because
+the claiming worker's pool was not allowed. Fairlead does not yet implement
+durable starvation policy beyond current queue ordering or cloud fallback.
 
 ### Pool Policy Model
 
@@ -413,8 +414,8 @@ job submitted
 - `POST /v1/resources/report` — GPU consumers and workers report capacity
 - `GET /v1/resources` — current resource control-plane state
 - `GET /metrics` — Prometheus: queue depth/wait, circuit states, VRAM per node,
-  worker availability, worker in-flight capacity, job duration, and callback
-  delivery outcomes
+  worker availability, worker in-flight capacity, async worker pool placement,
+  job duration, and callback delivery outcomes
 - Persistent callback-attempt state and pending callback recovery are
   implemented for SQLite-backed job state.
 - Future completed-job pruning.
@@ -439,6 +440,12 @@ clients. Scheduler preview and worker claims only match a queued job when the
 worker supports the job type and the workload policy allows the worker's pool.
 If a worker asks for work but every queued job is outside that worker's allowed
 pool, Fairlead releases the worker slot and returns `204 No Content`.
+
+The claim path emits async pool placement counters:
+
+- `fairlead_async_pool_selections_total`
+- `fairlead_async_pool_candidate_workers_total`
+- `fairlead_async_pool_no_compatible_jobs_total`
 
 The alternative would be a job-scoped claim endpoint such as:
 

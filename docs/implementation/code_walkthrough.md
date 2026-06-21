@@ -1306,6 +1306,20 @@ fairlead_worker_available_job_slots{worker="vision-a",node="spark-a"} 1
 claiming compatible jobs, and Fairlead omits the max/available-slot gauges for
 that worker.
 
+Phase 7C adds async worker-pool placement counters for worker-pull claims:
+
+```text
+fairlead_async_pool_selections_total{type="vision_analysis",priority="batch",pool="vision",worker="vision-a",node="spark-a",outcome="selected"} 1
+fairlead_async_pool_candidate_workers_total{type="vision_analysis",priority="batch",pool="vision",worker="vision-a",node="spark-a",outcome="selected"} 1
+fairlead_async_pool_no_compatible_jobs_total{type="vision_analysis",priority="batch",pool="peer",worker="peer-worker",node="",outcome="no_compatible_job"} 1
+```
+
+These counters record actual claim decisions, not non-mutating scheduler
+previews. A selected claim records the selected worker, pool, job type, priority,
+and compatible worker count. A no-compatible-job claim records how many queued
+jobs were skipped because the claiming worker supports their job type but its
+pool is not allowed by workload policy.
+
 `GET /v1/scheduler/preview` asks the scheduler to inspect the in-memory queues
 and registered workers:
 
@@ -1457,8 +1471,7 @@ The current code does not:
 - Reserve GPU memory for a request; resource reports are cooperative control-plane
   hints, not allocator-level reservations.
 
-Push dispatch, per-pool async placement metrics, completed-job pruning, and
-process-level restart harnesses are future roadmap phases, not current
-behavior. Synchronous backend pool routing, async worker pool eligibility,
-durable job state, and terminal callbacks are current behavior when the relevant
-configuration is enabled.
+Push dispatch, completed-job pruning, and process-level restart harnesses are
+future roadmap phases, not current behavior. Synchronous backend pool routing,
+async worker pool eligibility and metrics, durable job state, and terminal
+callbacks are current behavior when the relevant configuration is enabled.

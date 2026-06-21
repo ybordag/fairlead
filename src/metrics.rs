@@ -18,6 +18,7 @@ struct RoutingMetricsInner {
     retries: HashMap<RetryLabels, u64>,
     fallbacks: HashMap<FallbackLabels, u64>,
     pool_decisions: HashMap<PoolDecisionLabels, PoolDecisionAggregate>,
+    async_pool_decisions: HashMap<AsyncPoolDecisionLabels, AsyncPoolDecisionAggregate>,
     callbacks: HashMap<CallbackLabels, u64>,
 }
 
@@ -67,6 +68,16 @@ pub struct PoolDecisionLabels {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct AsyncPoolDecisionLabels {
+    pub kind: String,
+    pub priority: String,
+    pub pool: String,
+    pub worker: String,
+    pub node: String,
+    pub outcome: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct CallbackLabels {
     pub kind: String,
     pub status: String,
@@ -85,6 +96,13 @@ struct PoolDecisionAggregate {
     decisions: u64,
     candidate_backends: u64,
     resource_ineligible_backends: u64,
+}
+
+#[derive(Default)]
+struct AsyncPoolDecisionAggregate {
+    decisions: u64,
+    candidate_workers: u64,
+    no_compatible_jobs: u64,
 }
 
 impl RoutingMetrics {
@@ -116,6 +134,19 @@ impl RoutingMetrics {
         aggregate.decisions += 1;
         aggregate.candidate_backends += candidate_backends as u64;
         aggregate.resource_ineligible_backends += resource_ineligible_backends as u64;
+    }
+
+    pub fn record_async_pool_decision(
+        &self,
+        labels: AsyncPoolDecisionLabels,
+        candidate_workers: usize,
+        no_compatible_jobs: usize,
+    ) {
+        let mut guard = self.inner.lock().expect("routing metrics mutex poisoned");
+        let aggregate = guard.async_pool_decisions.entry(labels).or_default();
+        aggregate.decisions += 1;
+        aggregate.candidate_workers += candidate_workers as u64;
+        aggregate.no_compatible_jobs += no_compatible_jobs as u64;
     }
 
     pub fn record_callback(&self, labels: CallbackLabels) {
@@ -257,6 +288,48 @@ impl RoutingMetrics {
                 prometheus_escape(&labels.origin_node),
                 prometheus_escape(&labels.outcome),
                 aggregate.resource_ineligible_backends,
+            ));
+        }
+
+        body.push_str(
+            "# HELP fairlead_async_pool_selections_total Async worker-pull pool placement decisions by pool and outcome\n\
+             # TYPE fairlead_async_pool_selections_total counter\n\
+             # HELP fairlead_async_pool_candidate_workers_total Total compatible workers observed during async pool placement decisions\n\
+             # TYPE fairlead_async_pool_candidate_workers_total counter\n\
+             # HELP fairlead_async_pool_no_compatible_jobs_total Total queued jobs skipped because the claiming worker pool was not allowed\n\
+             # TYPE fairlead_async_pool_no_compatible_jobs_total counter\n",
+        );
+
+        for (labels, aggregate) in &guard.async_pool_decisions {
+            body.push_str(&format!(
+                "fairlead_async_pool_selections_total{{type=\"{}\",priority=\"{}\",pool=\"{}\",worker=\"{}\",node=\"{}\",outcome=\"{}\"}} {}\n",
+                prometheus_escape(&labels.kind),
+                prometheus_escape(&labels.priority),
+                prometheus_escape(&labels.pool),
+                prometheus_escape(&labels.worker),
+                prometheus_escape(&labels.node),
+                prometheus_escape(&labels.outcome),
+                aggregate.decisions,
+            ));
+            body.push_str(&format!(
+                "fairlead_async_pool_candidate_workers_total{{type=\"{}\",priority=\"{}\",pool=\"{}\",worker=\"{}\",node=\"{}\",outcome=\"{}\"}} {}\n",
+                prometheus_escape(&labels.kind),
+                prometheus_escape(&labels.priority),
+                prometheus_escape(&labels.pool),
+                prometheus_escape(&labels.worker),
+                prometheus_escape(&labels.node),
+                prometheus_escape(&labels.outcome),
+                aggregate.candidate_workers,
+            ));
+            body.push_str(&format!(
+                "fairlead_async_pool_no_compatible_jobs_total{{type=\"{}\",priority=\"{}\",pool=\"{}\",worker=\"{}\",node=\"{}\",outcome=\"{}\"}} {}\n",
+                prometheus_escape(&labels.kind),
+                prometheus_escape(&labels.priority),
+                prometheus_escape(&labels.pool),
+                prometheus_escape(&labels.worker),
+                prometheus_escape(&labels.node),
+                prometheus_escape(&labels.outcome),
+                aggregate.no_compatible_jobs,
             ));
         }
 

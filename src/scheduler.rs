@@ -11,6 +11,7 @@ use crate::{
         CompleteJobRequest, FailJobRequest, FinishJobResult, JobFailure, JobRecord, JobRegistry,
         RenewJobLeaseResult,
     },
+    metrics::AsyncPoolDecisionLabels,
     workers::{AcquireWorkerSlotResult, WorkerRegistry, WorkerSnapshot},
     AppState,
 };
@@ -77,9 +78,13 @@ pub async fn claim_worker_job_handler(
         )
         .await
     {
-        Some(job) => Json(JobClaimResponse { job }).into_response(),
+        Some(job) => {
+            record_async_pool_selected(&state, &worker, &job).await;
+            Json(JobClaimResponse { job }).into_response()
+        }
         None => {
             state.workers.release_slot(&worker.id).await;
+            record_async_pool_no_compatible_job(&state, &worker).await;
             StatusCode::NO_CONTENT.into_response()
         }
     }
@@ -263,6 +268,86 @@ fn preview_from_snapshots(
     }
 
     None
+}
+
+async fn record_async_pool_selected(state: &AppState, worker: &WorkerSnapshot, job: &JobRecord) {
+    let workers = state.workers.list().await;
+    let candidate_workers = count_candidate_workers_for_job(&workers, job, &state.workload_pools);
+    state.metrics.record_async_pool_decision(
+        AsyncPoolDecisionLabels {
+            kind: job.kind.as_str().to_string(),
+            priority: job.priority.as_str().to_string(),
+            pool: worker.pool.clone(),
+            worker: worker.id.clone(),
+            node: worker.node_id.clone().unwrap_or_default(),
+            outcome: "selected".into(),
+        },
+        candidate_workers,
+        0,
+    );
+}
+
+async fn record_async_pool_no_compatible_job(state: &AppState, worker: &WorkerSnapshot) {
+    let queued_jobs = state.jobs.queued_jobs_by_priority().await;
+    let mut blocked_by_kind_priority = std::collections::BTreeMap::new();
+    for job in queued_jobs {
+        if worker.job_types.contains(&job.kind)
+            && !state.workload_pools.allows(job.kind.as_str(), &worker.pool)
+        {
+            *blocked_by_kind_priority
+                .entry((
+                    job.kind.as_str().to_string(),
+                    job.priority.as_str().to_string(),
+                ))
+                .or_insert(0) += 1;
+        }
+    }
+
+    if blocked_by_kind_priority.is_empty() {
+        state.metrics.record_async_pool_decision(
+            AsyncPoolDecisionLabels {
+                kind: String::new(),
+                priority: String::new(),
+                pool: worker.pool.clone(),
+                worker: worker.id.clone(),
+                node: worker.node_id.clone().unwrap_or_default(),
+                outcome: "no_compatible_job".into(),
+            },
+            0,
+            0,
+        );
+        return;
+    }
+
+    for ((kind, priority), no_compatible_jobs) in blocked_by_kind_priority {
+        state.metrics.record_async_pool_decision(
+            AsyncPoolDecisionLabels {
+                kind,
+                priority,
+                pool: worker.pool.clone(),
+                worker: worker.id.clone(),
+                node: worker.node_id.clone().unwrap_or_default(),
+                outcome: "no_compatible_job".into(),
+            },
+            0,
+            no_compatible_jobs,
+        );
+    }
+}
+
+fn count_candidate_workers_for_job(
+    workers: &[WorkerSnapshot],
+    job: &JobRecord,
+    workload_pools: &crate::config::WorkloadPoolPolicy,
+) -> usize {
+    workers
+        .iter()
+        .filter(|worker| {
+            !worker.stale
+                && worker.job_types.contains(&job.kind)
+                && workload_pools.allows(job.kind.as_str(), &worker.pool)
+        })
+        .count()
 }
 
 #[cfg(test)]
@@ -792,6 +877,7 @@ mod tests {
 
         let app = build_router(test_state(jobs.clone(), workers));
         let response = app
+            .clone()
             .oneshot(
                 Request::post("/v1/workers/vision-worker/claim")
                     .body(Body::empty())
@@ -810,6 +896,21 @@ mod tests {
         assert_eq!(value["job"]["attempts"], 1);
         assert_eq!(value["job"]["lease"]["worker_id"], "vision-worker");
         assert_eq!(jobs.queue_snapshots().await, vec![]);
+
+        let metrics = app
+            .oneshot(Request::get("/metrics").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let metrics = response_text(metrics).await;
+        assert!(metrics.contains(
+            "fairlead_async_pool_selections_total{type=\"vision_analysis\",priority=\"batch\",pool=\"default\",worker=\"vision-worker\",node=\"node-a\",outcome=\"selected\"} 1"
+        ));
+        assert!(metrics.contains(
+            "fairlead_async_pool_candidate_workers_total{type=\"vision_analysis\",priority=\"batch\",pool=\"default\",worker=\"vision-worker\",node=\"node-a\",outcome=\"selected\"} 1"
+        ));
+        assert!(metrics.contains(
+            "fairlead_async_pool_no_compatible_jobs_total{type=\"vision_analysis\",priority=\"batch\",pool=\"default\",worker=\"vision-worker\",node=\"node-a\",outcome=\"selected\"} 0"
+        ));
     }
 
     #[tokio::test]
@@ -917,6 +1018,7 @@ mod tests {
             workload_pools,
         ));
         let response = app
+            .clone()
             .oneshot(
                 Request::post("/v1/workers/peer-worker/claim")
                     .body(Body::empty())
@@ -931,6 +1033,21 @@ mod tests {
             crate::jobs::JobStatus::Queued
         );
         assert_eq!(workers.get("peer-worker").await.unwrap().in_flight_jobs, 0);
+
+        let metrics = app
+            .oneshot(Request::get("/metrics").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let metrics = response_text(metrics).await;
+        assert!(metrics.contains(
+            "fairlead_async_pool_selections_total{type=\"vision_analysis\",priority=\"batch\",pool=\"peer\",worker=\"peer-worker\",node=\"\",outcome=\"no_compatible_job\"} 1"
+        ));
+        assert!(metrics.contains(
+            "fairlead_async_pool_candidate_workers_total{type=\"vision_analysis\",priority=\"batch\",pool=\"peer\",worker=\"peer-worker\",node=\"\",outcome=\"no_compatible_job\"} 0"
+        ));
+        assert!(metrics.contains(
+            "fairlead_async_pool_no_compatible_jobs_total{type=\"vision_analysis\",priority=\"batch\",pool=\"peer\",worker=\"peer-worker\",node=\"\",outcome=\"no_compatible_job\"} 1"
+        ));
     }
 
     #[tokio::test]

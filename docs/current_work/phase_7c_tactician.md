@@ -16,6 +16,9 @@ Goal: apply the shared Phase 7 pool policy to async worker placement.
   allows that worker's pool.
 - Preserved existing priority/FIFO behavior among jobs that are eligible for the
   claiming worker's pool.
+- Added per-pool async placement counters for selected claim decisions,
+  compatible worker counts, and queued jobs skipped because the claiming
+  worker's pool is not allowed.
 
 ## Test Coverage
 
@@ -30,10 +33,10 @@ Immediate coverage includes:
   the next eligible job
 - worker claims return `204 No Content` and release capacity when no queued job
   is eligible for the worker's pool
+- selected worker claims emit async pool selection and candidate-worker metrics
+- no-compatible-pool worker claims emit skipped-job metrics
 
 ## Remaining 7C Work
 
-- Add per-pool async metrics for candidate workers, selected worker, and
-  no-compatible-pool cases.
 - Review whether worker registration should validate pools against configured
   `POOLS_JSON` once the shared demo shape is clearer.
