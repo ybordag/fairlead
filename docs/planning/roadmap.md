@@ -134,7 +134,8 @@ These should be achievable without changing the core architecture.
   observations.
 - [x] Add fixture/local-config hygiene docs and `.gitignore` rules for private
   local deployment files.
-- [x] Add the deferred low-risk tests listed in `docs/deferred_tests.md`.
+- [x] Add the deferred low-risk tests listed in
+  `docs/current_work/deferred_tests.md`.
 - [x] Run and require the current quality gate:
   `cargo fmt --check`, `cargo clippy --all -- -D warnings`, and `cargo test`.
 
@@ -509,8 +510,8 @@ Early implementation scope:
 - Defer Temporal until product workflows need durable multi-step orchestration,
   fanout/fanin, long waits, or compensation logic.
 
-See `docs/architecture.md` for the scheduler boundary, persistence rationale,
-and Temporal deferral rule.
+See `docs/planning/architecture.md` for the scheduler boundary, persistence
+rationale, and Temporal deferral rule.
 
 ### Worker Registration
 

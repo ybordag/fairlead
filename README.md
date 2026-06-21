@@ -73,8 +73,8 @@ Future phases add durable priority queues, async jobs, worker registration,
 backend pools, `/v1/models`, adapter boundaries, queue wait-time metrics, and
 cloud fallback.
 
-See [`docs/roadmap.md`](docs/roadmap.md) for the implementation plan and
-acceptance criteria.
+See [`docs/planning/roadmap.md`](docs/planning/roadmap.md) for the
+implementation plan and acceptance criteria.
 
 ---
 
@@ -249,8 +249,8 @@ DGX Spark node
         API: http://<node-hostname>:8000/v1
 ```
 
-See [`docs/dgx_spark_deployment.md`](docs/dgx_spark_deployment.md) for the
-manual two-node deployment notes using vLLM, `uv`, and Fairlead.
+See [`docs/implementation/dgx_spark_deployment.md`](docs/implementation/dgx_spark_deployment.md)
+for the manual two-node deployment notes using vLLM, `uv`, and Fairlead.
 
 ---
 
@@ -273,20 +273,22 @@ what the model result means.
 
 Start with [`docs/README.md`](docs/README.md) for the full documentation map.
 
-- [`docs/architecture.md`](docs/architecture.md) — system architecture,
-  vLLM/Fairlead responsibilities, and the spark-a/spark-b routing example.
-- [`docs/code_walkthrough.md`](docs/code_walkthrough.md) — Rust code walkthrough
-  from process startup to proxied response.
-- [`docs/design.md`](docs/design.md) — design horizon and longer-term product
-  shape.
-- [`docs/roadmap.md`](docs/roadmap.md) — generalization plan, feature epics, and
-  acceptance criteria.
-- [`docs/dgx_spark_deployment.md`](docs/dgx_spark_deployment.md) — manual
-  deployment notes for two DGX Spark nodes connected over InfiniBand.
-- [`docs/fixture_examples.md`](docs/fixture_examples.md) — conventions for
-  sanitized test fixtures and ignored local deployment config.
+- [`docs/planning/architecture.md`](docs/planning/architecture.md) — system
+  architecture, vLLM/Fairlead responsibilities, and the spark-a/spark-b routing
+  example.
+- [`docs/implementation/code_walkthrough.md`](docs/implementation/code_walkthrough.md)
+  — Rust code walkthrough from process startup to proxied response.
+- [`docs/planning/design.md`](docs/planning/design.md) — design horizon and
+  longer-term product shape.
+- [`docs/planning/roadmap.md`](docs/planning/roadmap.md) — generalization plan,
+  feature epics, and acceptance criteria.
+- [`docs/implementation/dgx_spark_deployment.md`](docs/implementation/dgx_spark_deployment.md)
+  — manual deployment notes for two DGX Spark nodes connected over InfiniBand.
+- [`docs/implementation/fixture_examples.md`](docs/implementation/fixture_examples.md)
+  — conventions for sanitized test fixtures and ignored local deployment config.
 - [`demo/README.md`](demo/README.md) — GPU-free routing demo.
-- [`docs/deferred_tests.md`](docs/deferred_tests.md) — known test gaps.
+- [`docs/current_work/deferred_tests.md`](docs/current_work/deferred_tests.md) —
+  known test gaps.
 
 ---
 

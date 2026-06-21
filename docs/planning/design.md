@@ -1,8 +1,8 @@
 # Fairlead — Design Document
 
 **Status:** Design horizon; current implementation is documented in
-[`../README.md`](../README.md), [`architecture.md`](architecture.md), and
-[`code_walkthrough.md`](code_walkthrough.md).
+[`../../README.md`](../../README.md), [`architecture.md`](architecture.md), and
+[`../implementation/code_walkthrough.md`](../implementation/code_walkthrough.md).
 **Version:** 0.1
 
 ---

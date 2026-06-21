@@ -8,35 +8,40 @@ detail.
 
 - [`../README.md`](../README.md) — project overview, current capabilities, local
   run commands, and the documentation index.
-- [`architecture.md`](architecture.md) — how Fairlead fits with Rhizome, vLLM,
-  GPU nodes, resource reporting, priority admission, and future async jobs.
-- [`code_walkthrough.md`](code_walkthrough.md) — end-to-end Rust walkthrough from
-  process startup to proxied response.
+- [`planning/architecture.md`](planning/architecture.md) — how Fairlead fits
+  with Rhizome, vLLM, GPU nodes, resource reporting, priority admission, and
+  future async jobs.
+- [`implementation/code_walkthrough.md`](implementation/code_walkthrough.md) —
+  end-to-end Rust walkthrough from process startup to proxied response.
 
 ## Planning And Design
 
-- [`design.md`](design.md) — design horizon and longer-term product shape.
-- [`roadmap.md`](roadmap.md) — completed phases, current Trim scope, future
-  phases, acceptance criteria, and deferred work.
+- [`planning/design.md`](planning/design.md) — design horizon and longer-term
+  product shape.
+- [`planning/roadmap.md`](planning/roadmap.md) — completed phases, current Trim
+  scope, future phases, acceptance criteria, and deferred work.
 
-## Running And Demonstrating
+## Implementation And Examples
 
 - [`../demo/README.md`](../demo/README.md) — local GPU-free routing demo with two
-  mock OpenAI-compatible backends.
-- [`dgx_spark_deployment.md`](dgx_spark_deployment.md) — manual two-node DGX
-  Spark deployment notes using vLLM and Fairlead.
+  mock OpenAI-compatible backends. The executable demo remains at the repo root.
+- [`implementation/dgx_spark_deployment.md`](implementation/dgx_spark_deployment.md)
+  — manual two-node DGX Spark deployment notes using vLLM and Fairlead.
+- [`implementation/fixture_examples.md`](implementation/fixture_examples.md) —
+  sanitized fixture and local config conventions.
 
-## Development Hygiene
+## Current Work
 
-- [`fixture_examples.md`](fixture_examples.md) — sanitized fixture and local
-  config conventions.
-- [`deferred_tests.md`](deferred_tests.md) — useful tests intentionally deferred
-  until there is a CI-friendly integration harness.
+- [`current_work/deferred_tests.md`](current_work/deferred_tests.md) — useful
+  tests intentionally deferred until there is a CI-friendly integration harness.
+- Current phase notes should live in `current_work/` while a phase is active.
+  Trim is finished, so there is no active phase note right now.
 
 ## Maintenance Rule
 
-Keep current behavior in `README.md`, `architecture.md`, and
-`code_walkthrough.md`. Keep future product direction in `design.md` and
-`roadmap.md`; keep architectural boundaries for future systems in
-`architecture.md`. If a feature graduates from planned to implemented, update
-both the implementation docs and the roadmap in the same change.
+Keep current behavior in `README.md`, `planning/architecture.md`, and
+`implementation/code_walkthrough.md`. Keep future product direction in
+`planning/design.md` and `planning/roadmap.md`; keep current phase notes and
+deferred work in `current_work/`. If a feature graduates from planned to
+implemented, update both the implementation docs and the roadmap in the same
+change.
