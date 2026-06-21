@@ -60,6 +60,11 @@ behavior that in-process Rust tests cannot cover.
 - Added `prune_endpoint_removes_only_eligible_terminal_jobs_over_real_http`,
   which verifies manual pruning removes eligible terminal jobs and delivered
   callback jobs while preserving pending-callback, running, and queued jobs.
+- Added `background_pruning_removes_only_eligible_terminal_jobs_over_real_http`,
+  which enables SQLite-backed background pruning and verifies the maintenance
+  loop removes only eligible terminal jobs while preserving pending-callback,
+  running, and queued jobs. The test also verifies prune metrics and that a
+  manual prune after the background sweep reports no remaining eligible jobs.
 
 ## Next Slices
 
