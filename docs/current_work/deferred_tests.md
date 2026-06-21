@@ -190,8 +190,9 @@ Phase 6F now covers successful terminal callbacks, transient callback retry,
 terminal callback failure metrics, callback timeout handling, callback
 success/failure metrics, cancellation callbacks, no callback on retryable job
 requeue, SQLite-backed pending callback delivery after registry restart, and
-SQLite-backed failed callback attempt retry after registry restart. Remaining
-deferred tests:
+SQLite-backed failed callback attempt retry after registry restart. It also
+covers recovery-loop delivery of pending SQLite callbacks and in-process
+in-flight callback de-duplication. Remaining deferred tests:
 
 - Callback retry recovery across a full Fairlead OS-process restart.
 - Duplicate callback behavior when Fairlead crashes after the receiver handles

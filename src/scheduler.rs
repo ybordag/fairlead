@@ -1322,6 +1322,115 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn callback_recovery_loop_delivers_pending_sqlite_callback() {
+        let (callback_url, mut callbacks) = start_callback_target(StatusCode::OK).await;
+        let path = unique_db_path("callback-recovery-loop");
+        let jobs =
+            JobRegistry::with_store(crate::storage::SqliteJobStore::open(&path).unwrap()).unwrap();
+        let submitted = jobs
+            .submit(SubmitJobRequest {
+                kind: JobKind::VisionAnalysis,
+                priority: Priority::Batch,
+                payload: Value::Null,
+                callback_url: Some(callback_url),
+            })
+            .await
+            .unwrap();
+        jobs.claim_next_for_worker("vision-worker", &[submitted.kind], 30_000)
+            .await
+            .unwrap();
+        jobs.complete_lease(&submitted.id, "vision-worker", json!({"ok": true}))
+            .await;
+
+        let restored =
+            JobRegistry::with_store(crate::storage::SqliteJobStore::open(&path).unwrap()).unwrap();
+        crate::callbacks::spawn_callback_recovery_loop(
+            crate::callbacks::CallbackDispatcher::default(),
+            reqwest::Client::new(),
+            RoutingMetrics::default(),
+            crate::callbacks::CallbackPolicy {
+                max_attempts: 1,
+                timeout: Duration::from_secs(1),
+                retry_delay: Duration::from_millis(10),
+            },
+            restored.clone(),
+        );
+
+        let callback = tokio::time::timeout(Duration::from_secs(2), callbacks.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(callback["job"]["id"], submitted.id);
+        wait_for_callback_status(
+            &restored,
+            &submitted.id,
+            crate::jobs::JobCallbackStatus::Delivered,
+            1,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn callback_dispatcher_deduplicates_in_flight_job_delivery() {
+        let (callback_url, mut callbacks) =
+            start_delayed_callback_target(Duration::from_millis(150), StatusCode::OK).await;
+        let jobs = JobRegistry::default();
+        let submitted = jobs
+            .submit(SubmitJobRequest {
+                kind: JobKind::Cluster,
+                priority: Priority::Background,
+                payload: Value::Null,
+                callback_url: Some(callback_url),
+            })
+            .await
+            .unwrap();
+        jobs.claim_next_for_worker("cluster-worker", &[submitted.kind], 30_000)
+            .await
+            .unwrap();
+        jobs.complete_lease(&submitted.id, "cluster-worker", json!({"ok": true}))
+            .await;
+
+        let dispatcher = crate::callbacks::CallbackDispatcher::default();
+        let policy = crate::callbacks::CallbackPolicy {
+            max_attempts: 1,
+            timeout: Duration::from_secs(1),
+            retry_delay: Duration::from_millis(0),
+        };
+        dispatcher.dispatch(
+            reqwest::Client::new(),
+            RoutingMetrics::default(),
+            policy,
+            jobs.clone(),
+            submitted.id.clone(),
+        );
+        dispatcher.dispatch(
+            reqwest::Client::new(),
+            RoutingMetrics::default(),
+            policy,
+            jobs.clone(),
+            submitted.id.clone(),
+        );
+
+        let callback = tokio::time::timeout(Duration::from_secs(2), callbacks.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(callback["job"]["id"], submitted.id);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), callbacks.recv())
+                .await
+                .is_err()
+        );
+        wait_for_callback_status(
+            &jobs,
+            &submitted.id,
+            crate::jobs::JobCallbackStatus::Delivered,
+            1,
+        )
+        .await;
+    }
+
+    #[tokio::test]
     async fn retryable_worker_failure_does_not_deliver_callback() {
         let (callback_url, mut callbacks) = start_callback_target(StatusCode::OK).await;
         let jobs = JobRegistry::default();
