@@ -106,3 +106,21 @@ Remaining Halyard work:
 
 - None. Durable persistence, callback delivery, configurable per-workload
   timeout policy, and background expiry loops remain future phases.
+
+## Coverage Sweep
+
+Implemented after the final feature slice:
+
+- Added endpoint tests for unknown and stale workers reporting completion.
+- Added endpoint tests for unknown and stale workers reporting failure.
+- Added duplicate result-report coverage: a second completion or late failure
+  after terminal completion returns `409` and does not change the terminal job
+  result or worker capacity accounting.
+
+Deferred:
+
+- Multi-process e2e with fake workers and Fairlead running as a real server.
+- Opt-in DGX Spark e2e with fake async workers on both connected nodes.
+- Concurrency stress around many workers claiming jobs against limited worker
+  capacity.
+- Configurable per-workload timeout policy, if that policy is added later.

@@ -132,7 +132,16 @@ After Phase 6D, add tests for:
   timeout durations by job type
 - concurrent claims racing against `max_concurrent_jobs` once the scheduler runs
   under a heavier multi-worker harness
-- duplicate result reports after a worker slot has already been released
+- local multi-process e2e: start Fairlead, register fake workers, submit jobs,
+  claim work, complete/fail work, verify terminal state, retry behavior, worker
+  capacity release, timeout state, duration metrics, and utilization metrics
+- opt-in DGX Spark e2e with fake async workers on the two connected nodes:
+  register node-local workers, claim/renew/complete jobs from each node, verify
+  capacity metrics and timeout/retry state, and keep real model execution out of
+  the test unless a later workload-specific smoke test needs it
+- concurrency stress: many workers claim against the same queue and limited
+  `max_concurrent_jobs` values, asserting no duplicate running job leases and no
+  worker exceeds configured capacity
 
 **Why deferred:** Halyard's first slice covers completion, retryable failure
 requeue, non-retryable failure, retry exhaustion, and endpoint ownership checks.
@@ -140,8 +149,9 @@ The current Halyard branch also covers in-flight accounting, capacity release on
 completion/failure/cancellation/expiry, capacity rejection, and utilization
 metric output. It also covers terminal job duration snapshots and metrics. The
 current Halyard branch also covers explicit timeout error state for expired
-leases. The remaining tests need configurable timeout policy or a heavier
-concurrency/e2e harness.
+leases, unknown/stale workers on result endpoints, and duplicate result reports
+after terminal state. The remaining tests need configurable timeout policy or a
+heavier concurrency/e2e harness.
 
 ### `phase_6e_job_persistence_and_recovery`
 

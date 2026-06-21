@@ -1038,6 +1038,147 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn worker_complete_endpoint_rejects_unknown_and_stale_workers() {
+        let jobs = JobRegistry::default();
+        let stale_workers = WorkerRegistry::new(Duration::ZERO);
+
+        jobs.submit(SubmitJobRequest {
+            kind: JobKind::VisionAnalysis,
+            priority: Priority::Batch,
+            payload: Value::Null,
+            callback_url: None,
+        })
+        .await
+        .unwrap();
+        jobs.claim_next_for_worker("worker-a", &[JobKind::VisionAnalysis], 30_000)
+            .await
+            .unwrap();
+        stale_workers
+            .register(RegisterWorkerRequest {
+                id: "worker-a".into(),
+                endpoint_url: "http://worker-a:9000".into(),
+                node_id: None,
+                job_types: vec![JobKind::VisionAnalysis],
+                max_concurrent_jobs: None,
+                available_vram_mb: None,
+            })
+            .await
+            .unwrap();
+
+        let unknown_app = build_router(test_state(jobs.clone(), WorkerRegistry::default()));
+        let unknown = unknown_app
+            .oneshot(
+                Request::post("/v1/workers/worker-a/jobs/job-1/complete")
+                    .header("content-type", "application/json")
+                    .body(Body::from(json!({"result": null}).to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(unknown.status(), StatusCode::NOT_FOUND);
+
+        let stale_app = build_router(test_state(jobs, stale_workers));
+        let stale = stale_app
+            .oneshot(
+                Request::post("/v1/workers/worker-a/jobs/job-1/complete")
+                    .header("content-type", "application/json")
+                    .body(Body::from(json!({"result": null}).to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(stale.status(), StatusCode::CONFLICT);
+    }
+
+    #[tokio::test]
+    async fn duplicate_worker_result_reports_do_not_change_terminal_job() {
+        let jobs = JobRegistry::default();
+        let workers = WorkerRegistry::default();
+
+        jobs.submit(SubmitJobRequest {
+            kind: JobKind::VisionAnalysis,
+            priority: Priority::Batch,
+            payload: Value::Null,
+            callback_url: None,
+        })
+        .await
+        .unwrap();
+        workers
+            .register(RegisterWorkerRequest {
+                id: "vision-worker".into(),
+                endpoint_url: "http://vision-worker:9000".into(),
+                node_id: None,
+                job_types: vec![JobKind::VisionAnalysis],
+                max_concurrent_jobs: Some(1),
+                available_vram_mb: None,
+            })
+            .await
+            .unwrap();
+
+        let app = build_router(test_state(jobs.clone(), workers.clone()));
+        let claim = app
+            .clone()
+            .oneshot(
+                Request::post("/v1/workers/vision-worker/claim")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(claim.status(), StatusCode::OK);
+
+        let complete = app
+            .clone()
+            .oneshot(
+                Request::post("/v1/workers/vision-worker/jobs/job-1/complete")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({"result": {"label": "healthy"}}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(complete.status(), StatusCode::OK);
+
+        let duplicate_complete = app
+            .clone()
+            .oneshot(
+                Request::post("/v1/workers/vision-worker/jobs/job-1/complete")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({"result": {"label": "changed"}}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(duplicate_complete.status(), StatusCode::CONFLICT);
+
+        let late_fail = app
+            .oneshot(
+                Request::post("/v1/workers/vision-worker/jobs/job-1/fail")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({"error": "late failure", "retryable": true}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(late_fail.status(), StatusCode::CONFLICT);
+
+        let job = jobs.get("job-1").await.unwrap();
+        assert_eq!(job.status, crate::jobs::JobStatus::Complete);
+        assert_eq!(job.result, Some(json!({"label": "healthy"})));
+        assert!(job.error.is_none());
+        assert_eq!(
+            workers.get("vision-worker").await.unwrap().in_flight_jobs,
+            0
+        );
+    }
+
+    #[tokio::test]
     async fn worker_fail_endpoint_requeues_retryable_failure() {
         let jobs = JobRegistry::default();
         let workers = WorkerRegistry::default();
@@ -1178,6 +1319,63 @@ mod tests {
             .unwrap();
 
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn worker_fail_endpoint_rejects_unknown_and_stale_workers() {
+        let jobs = JobRegistry::default();
+        let stale_workers = WorkerRegistry::new(Duration::ZERO);
+
+        jobs.submit(SubmitJobRequest {
+            kind: JobKind::Cluster,
+            priority: Priority::Background,
+            payload: Value::Null,
+            callback_url: None,
+        })
+        .await
+        .unwrap();
+        jobs.claim_next_for_worker("worker-a", &[JobKind::Cluster], 30_000)
+            .await
+            .unwrap();
+        stale_workers
+            .register(RegisterWorkerRequest {
+                id: "worker-a".into(),
+                endpoint_url: "http://worker-a:9000".into(),
+                node_id: None,
+                job_types: vec![JobKind::Cluster],
+                max_concurrent_jobs: None,
+                available_vram_mb: None,
+            })
+            .await
+            .unwrap();
+
+        let unknown_app = build_router(test_state(jobs.clone(), WorkerRegistry::default()));
+        let unknown = unknown_app
+            .oneshot(
+                Request::post("/v1/workers/worker-a/jobs/job-1/fail")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({"error": "worker failed", "retryable": true}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(unknown.status(), StatusCode::NOT_FOUND);
+
+        let stale_app = build_router(test_state(jobs, stale_workers));
+        let stale = stale_app
+            .oneshot(
+                Request::post("/v1/workers/worker-a/jobs/job-1/fail")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({"error": "worker failed", "retryable": true}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(stale.status(), StatusCode::CONFLICT);
     }
 
     #[tokio::test]
