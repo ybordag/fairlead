@@ -807,6 +807,8 @@ async workers.
 - [x] Keep cloud overflow as a future pool target, not an implemented provider path.
 - [x] Add per-pool synchronous metrics for candidate counts, selected pool/backend,
   fallback reason, and capacity pressure.
+- [x] Keep explicit workload pool policy permissive for omitted workloads until
+  the Phase 7D closeout decision.
 
 #### Phase 7C: Async Worker Pool Placement
 
@@ -822,6 +824,8 @@ async workers.
 - Document local DGX pools, peer-node pools, and shared Fairlead deployments.
 - Add local demo config that shows sync and async workloads using the same pool
   vocabulary.
+- Decide whether explicit `WORKLOAD_POOLS_JSON` should stay a partial override
+  or become strict after both sync and async placement paths are implemented.
 - Update deferred e2e plans for future cloud overflow pools.
 
 ### Phase 8: Scheduler Hardening

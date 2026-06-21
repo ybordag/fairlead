@@ -215,7 +215,9 @@ all configured pools. Phase 7B applies this policy to synchronous chat and
 embedding backend eligibility and treats each workload's pool list as an ordered
 fallback chain. If a workload is omitted from an explicit partial policy, it
 remains permissive for now. Phase 7C applies the same vocabulary to async worker
-placement.
+placement. Fairlead will keep partial policy permissive through Phase 7C; Phase
+7D will decide whether explicit workload pool policy should become strict before
+the pool model is considered complete.
 
 Async job state is in-memory by default. During Phase 6E, SQLite can be enabled
 explicitly for durable job state across ordinary Fairlead restarts:

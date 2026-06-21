@@ -245,6 +245,12 @@ policy omits a workload, that workload remains permissive for now. If every
 backend is outside the workload's allowed pools, Fairlead returns `503` without
 contacting an upstream backend.
 
+Fairlead intentionally keeps omitted workloads permissive through Phase 7C while
+the same pool vocabulary is applied to async workers. Phase 7D will review the
+shared demos and decide whether explicit `WORKLOAD_POOLS_JSON` should become
+strict, meaning configured policy would need to mention every supported workload
+instead of acting as a partial override.
+
 For synchronous routing, the workload's pool list is ordered. Fairlead tries the
 first pool's eligible backends, then falls back to the next pool only when no
 backend in the earlier pool can be selected. Within each pool, the existing

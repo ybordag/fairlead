@@ -514,7 +514,10 @@ select it. The pool list is ordered, so Fairlead tries earlier pools before
 later pools; inside each pool it still uses origin locality, affinity, resource
 rank, circuit state, and configured backend order. If the pool list is omitted,
 Fairlead derives pools from backend metadata and keeps the `default` pool for
-compatibility with simple `BACKENDS` setup.
+compatibility with simple `BACKENDS` setup. If a workload is omitted from an
+explicit `WORKLOAD_POOLS_JSON`, it remains permissive through Phase 7C. Phase 7D
+will decide whether explicit policy should become strict after the sync and
+async paths share the same pool vocabulary.
 
 ### 5. Initialize Tracing
 

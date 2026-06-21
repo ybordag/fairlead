@@ -21,6 +21,8 @@ Goal: apply the validated Phase 7 pool policy to synchronous backend routing.
   stages, candidate backend counts, and resource-ineligible backend counts.
 - Preserved permissive behavior for workloads omitted from an explicit partial
   policy.
+- Scoped the strict-policy decision to Phase 7D, after async worker placement
+  and shared demos use the same pool vocabulary.
 - Added proxy tests for:
   - skipping a backend outside the workload's allowed pools
   - returning `503` without touching upstreams when no backend is pool-eligible
@@ -33,8 +35,6 @@ Goal: apply the validated Phase 7 pool policy to synchronous backend routing.
 
 ## Remaining 7B Work
 
-- Decide whether `WORKLOAD_POOLS_JSON` should remain a partial override or become
-  strict before Phase 7 ends.
 - Audit docs and tests before opening the `trimmer` PR.
 
 ## Deferrals
