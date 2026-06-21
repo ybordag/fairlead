@@ -790,9 +790,22 @@ mod tests {
             })
             .await
             .unwrap();
+        workers
+            .register(RegisterWorkerRequest {
+                id: "available-worker".into(),
+                endpoint_url: "http://available-worker:9000".into(),
+                node_id: None,
+                pool: "default".into(),
+                job_types: vec![JobKind::Cluster],
+                max_concurrent_jobs: None,
+                available_vram_mb: None,
+            })
+            .await
+            .unwrap();
         workers.drain("draining-worker").await;
 
-        assert!(preview_next_assignment(&jobs, &workers).await.is_none());
+        let preview = preview_next_assignment(&jobs, &workers).await.unwrap();
+        assert_eq!(preview.worker.id, "available-worker");
     }
 
     #[tokio::test]
@@ -1371,6 +1384,7 @@ mod tests {
         assert_eq!(value["worker"]["draining"], true);
 
         let complete = app
+            .clone()
             .oneshot(
                 Request::post("/v1/workers/vision-worker/jobs/job-1/complete")
                     .header("content-type", "application/json")
@@ -1387,6 +1401,186 @@ mod tests {
         let worker = workers.get("vision-worker").await.unwrap();
         assert!(worker.draining);
         assert_eq!(worker.in_flight_jobs, 0);
+
+        let remove = app
+            .oneshot(
+                Request::delete("/v1/workers/vision-worker")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(remove.status(), StatusCode::NO_CONTENT);
+        assert!(workers.get("vision-worker").await.is_none());
+    }
+
+    #[tokio::test]
+    async fn busy_deregistered_worker_can_renew_held_job_while_draining() {
+        let jobs = JobRegistry::default();
+        let workers = WorkerRegistry::default();
+
+        jobs.submit(SubmitJobRequest {
+            kind: JobKind::VisionAnalysis,
+            priority: Priority::Batch,
+            payload: Value::Null,
+            callback_url: None,
+        })
+        .await
+        .unwrap();
+        workers
+            .register(RegisterWorkerRequest {
+                id: "vision-worker".into(),
+                endpoint_url: "http://vision-worker:9000".into(),
+                node_id: None,
+                pool: "default".into(),
+                job_types: vec![JobKind::VisionAnalysis],
+                max_concurrent_jobs: Some(1),
+                available_vram_mb: None,
+            })
+            .await
+            .unwrap();
+
+        let app = build_router(test_state(jobs.clone(), workers.clone()));
+        let claim = app
+            .clone()
+            .oneshot(
+                Request::post("/v1/workers/vision-worker/claim")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(claim.status(), StatusCode::OK);
+
+        let deregister = app
+            .clone()
+            .oneshot(
+                Request::delete("/v1/workers/vision-worker")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(deregister.status(), StatusCode::ACCEPTED);
+
+        let renew = app
+            .oneshot(
+                Request::post("/v1/workers/vision-worker/jobs/job-1/renew")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(renew.status(), StatusCode::OK);
+        let value: serde_json::Value = serde_json::from_str(&response_text(renew).await).unwrap();
+        assert_eq!(value["job"]["lease"]["worker_id"], "vision-worker");
+
+        let worker = workers.get("vision-worker").await.unwrap();
+        assert!(worker.draining);
+        assert_eq!(worker.in_flight_jobs, 1);
+        assert_eq!(
+            jobs.get("job-1").await.unwrap().status,
+            crate::jobs::JobStatus::Running
+        );
+    }
+
+    #[tokio::test]
+    async fn busy_deregistered_worker_can_fail_retryable_job_while_draining() {
+        let jobs = JobRegistry::default();
+        let workers = WorkerRegistry::default();
+
+        jobs.submit(SubmitJobRequest {
+            kind: JobKind::VisionAnalysis,
+            priority: Priority::Batch,
+            payload: Value::Null,
+            callback_url: None,
+        })
+        .await
+        .unwrap();
+        for id in ["vision-worker", "backup-worker"] {
+            workers
+                .register(RegisterWorkerRequest {
+                    id: id.into(),
+                    endpoint_url: format!("http://{id}:9000"),
+                    node_id: None,
+                    pool: "default".into(),
+                    job_types: vec![JobKind::VisionAnalysis],
+                    max_concurrent_jobs: Some(1),
+                    available_vram_mb: None,
+                })
+                .await
+                .unwrap();
+        }
+
+        let app = build_router(test_state(jobs.clone(), workers.clone()));
+        let claim = app
+            .clone()
+            .oneshot(
+                Request::post("/v1/workers/vision-worker/claim")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(claim.status(), StatusCode::OK);
+
+        let deregister = app
+            .clone()
+            .oneshot(
+                Request::delete("/v1/workers/vision-worker")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(deregister.status(), StatusCode::ACCEPTED);
+
+        let fail = app
+            .clone()
+            .oneshot(
+                Request::post("/v1/workers/vision-worker/jobs/job-1/fail")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({"error": "temporary failure", "retryable": true}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(fail.status(), StatusCode::OK);
+        assert_eq!(
+            jobs.get("job-1").await.unwrap().status,
+            crate::jobs::JobStatus::Queued
+        );
+        let drained = workers.get("vision-worker").await.unwrap();
+        assert!(drained.draining);
+        assert_eq!(drained.in_flight_jobs, 0);
+
+        let draining_claim = app
+            .clone()
+            .oneshot(
+                Request::post("/v1/workers/vision-worker/claim")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(draining_claim.status(), StatusCode::CONFLICT);
+        assert_eq!(response_text(draining_claim).await, "worker is draining");
+
+        let backup_claim = app
+            .oneshot(
+                Request::post("/v1/workers/backup-worker/claim")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(backup_claim.status(), StatusCode::OK);
+        let value: serde_json::Value =
+            serde_json::from_str(&response_text(backup_claim).await).unwrap();
+        assert_eq!(value["job"]["id"], "job-1");
+        assert_eq!(value["job"]["lease"]["worker_id"], "backup-worker");
     }
 
     #[tokio::test]

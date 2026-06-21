@@ -16,10 +16,19 @@ reactivate, and deregister async workers without dropping held jobs.
   keeping the worker registered so held leases can renew, complete, or fail.
 - Scheduler preview and worker claims skip draining workers for new work.
 - Worker availability metrics now report `status="draining"`.
+- Completed the 8A test audit:
+  - added edge coverage for registration upserts and heartbeats preserving
+    draining state
+  - added stale-plus-draining precedence coverage
+  - added unknown-worker lifecycle endpoint coverage
+  - added lease renew, completion cleanup, and retryable failure coverage while
+    a worker is draining
+  - expanded deferred e2e notes for process restart, concurrent polling,
+    retry reassignment, metrics, and DGX peer-drain smoke tests
 
 ## Remaining
 
-- Run the final validation gate before PR.
+- Run one final docs/readiness pass before PR.
 
 ## Semantics
 

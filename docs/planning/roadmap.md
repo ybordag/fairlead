@@ -854,7 +854,8 @@ workload protocols.
   - [x] Idle deregistration removes workers immediately.
   - [x] Busy deregistration marks workers draining so held leases can finish.
   - [x] Preview and claim skip draining workers for new work.
-  - Add final 8A test/doc audit before PR.
+  - [x] Audit worker lifecycle edge tests and deferred e2e coverage.
+  - Add final 8A docs/readiness pass before PR.
 - **8B Stopper: Retention And Pruning**
   - Add completed-job pruning policy.
   - Add configurable retention limits.

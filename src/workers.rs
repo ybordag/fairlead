@@ -847,6 +847,49 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn worker_registration_and_heartbeat_preserve_draining_state() {
+        let workers = WorkerRegistry::default();
+        workers
+            .register(RegisterWorkerRequest {
+                id: "worker-a".into(),
+                endpoint_url: "http://worker-a:9000".into(),
+                node_id: None,
+                pool: "default".into(),
+                job_types: vec![JobKind::EmbedBatch],
+                max_concurrent_jobs: Some(2),
+                available_vram_mb: None,
+            })
+            .await
+            .unwrap();
+        workers.drain("worker-a").await.unwrap();
+
+        let updated = workers
+            .register(RegisterWorkerRequest {
+                id: "worker-a".into(),
+                endpoint_url: "http://worker-a:9001".into(),
+                node_id: Some("node-a".into()),
+                pool: "vision".into(),
+                job_types: vec![JobKind::EmbedBatch, JobKind::Cluster],
+                max_concurrent_jobs: Some(3),
+                available_vram_mb: Some(8192),
+            })
+            .await
+            .unwrap();
+        assert_eq!(updated.endpoint_url, "http://worker-a:9001");
+        assert_eq!(updated.pool, "vision");
+        assert!(updated.draining);
+        assert_eq!(updated.available_job_slots, Some(0));
+
+        let heartbeat = workers.heartbeat("worker-a").await.unwrap();
+        assert!(heartbeat.draining);
+        assert_eq!(heartbeat.available_job_slots, Some(0));
+        assert!(matches!(
+            workers.try_acquire_slot("worker-a").await,
+            AcquireWorkerSlotResult::Draining(_)
+        ));
+    }
+
+    #[tokio::test]
     async fn drain_and_reactivate_toggle_worker_claim_eligibility() {
         let workers = WorkerRegistry::default();
         workers
@@ -877,6 +920,40 @@ mod tests {
             workers.try_acquire_slot("worker-a").await,
             AcquireWorkerSlotResult::Acquired(_)
         ));
+    }
+
+    #[tokio::test]
+    async fn stale_draining_worker_is_treated_as_stale_first() {
+        let workers = WorkerRegistry::new(Duration::ZERO);
+        workers
+            .register(RegisterWorkerRequest {
+                id: "worker-a".into(),
+                endpoint_url: "http://worker-a:9000".into(),
+                node_id: None,
+                pool: "default".into(),
+                job_types: vec![JobKind::VisionAnalysis],
+                max_concurrent_jobs: Some(1),
+                available_vram_mb: None,
+            })
+            .await
+            .unwrap();
+
+        let drained = workers.drain("worker-a").await.unwrap();
+        assert!(drained.draining);
+        assert!(drained.stale);
+        assert!(!drained.can_accept_work());
+        assert!(matches!(
+            workers.try_acquire_slot("worker-a").await,
+            AcquireWorkerSlotResult::Stale(_)
+        ));
+        assert_eq!(
+            workers.availability_snapshots().await,
+            vec![WorkerAvailabilitySnapshot {
+                job_type: "vision_analysis",
+                status: "stale",
+                count: 1,
+            }]
+        );
     }
 
     #[tokio::test]
@@ -984,6 +1061,46 @@ mod tests {
             .unwrap();
         assert_eq!(response.status(), StatusCode::NO_CONTENT);
         assert!(workers.get("worker-a").await.is_none());
+    }
+
+    #[tokio::test]
+    async fn worker_lifecycle_endpoints_return_not_found_for_unknown_worker() {
+        let app = build_router(test_state(WorkerRegistry::default()));
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::post("/v1/workers/missing/drain")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        assert_eq!(response_text(response).await, "worker not found");
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::post("/v1/workers/missing/reactivate")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        assert_eq!(response_text(response).await, "worker not found");
+
+        let response = app
+            .oneshot(
+                Request::delete("/v1/workers/missing")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        assert_eq!(response_text(response).await, "worker not found");
     }
 
     #[tokio::test]
