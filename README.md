@@ -109,9 +109,10 @@ Implemented generalization work includes:
   pools, and `STRICT_WORKLOAD_POOLS=true` requires explicit policy for every
   known workload.
 
-Remaining Phase 7D work is focused on shared pool demos and final deployment
-notes. Future phases add scheduler hardening, adapter boundaries, richer
-resource policy, external scale/overflow, and transport/SDK hardening.
+Phase 7D closes the shared pool model with strict validation flags, shared local
+demos, and DGX/shared deployment notes. Future phases add scheduler hardening,
+adapter boundaries, richer resource policy, external scale/overflow, and
+transport/SDK hardening.
 
 See [`docs/planning/roadmap.md`](docs/planning/roadmap.md) for the
 implementation plan and acceptance criteria.

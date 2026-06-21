@@ -24,9 +24,11 @@ decisions.
 - Updated deferred e2e plans for strict workload startup, strict worker
   registration, DGX Spark smoke tests, and future cloud overflow pools.
 
-## Remaining
+## Merge Readiness
 
-- Do a final docs/demo consistency pass before opening the Phase 7D PR.
+- Docs and demos have been updated for the finalized strict pool model.
+- Local routing and async job demos pass with the shared strict pool policy.
+- The Rust validation gate passes with 299 tests.
 
 ## Decisions
 
