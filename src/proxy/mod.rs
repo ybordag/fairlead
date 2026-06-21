@@ -892,6 +892,7 @@ mod tests {
             resource_policy: crate::resources::ResourceRoutingPolicy::default(),
             priority_limiter: crate::priority::PriorityLimiter::default(),
             jobs: crate::jobs::JobRegistry::default(),
+            workers: crate::workers::WorkerRegistry::default(),
         };
         start_fairlead_with_state(state).await
     }
@@ -1200,6 +1201,7 @@ mod tests {
             resource_policy: crate::resources::ResourceRoutingPolicy::default(),
             priority_limiter: crate::priority::PriorityLimiter::new(1, 1, 1),
             jobs: crate::jobs::JobRegistry::default(),
+            workers: crate::workers::WorkerRegistry::default(),
         };
         let fairlead = start_fairlead_with_state(state).await;
 
@@ -1276,6 +1278,7 @@ mod tests {
             resource_policy: crate::resources::ResourceRoutingPolicy::default(),
             priority_limiter: crate::priority::PriorityLimiter::new(1, 1, 1),
             jobs: crate::jobs::JobRegistry::default(),
+            workers: crate::workers::WorkerRegistry::default(),
         };
         let fairlead = start_fairlead_with_state(state).await;
 
@@ -1334,6 +1337,7 @@ mod tests {
             resource_policy: crate::resources::ResourceRoutingPolicy::default(),
             priority_limiter: crate::priority::PriorityLimiter::new(1, 1, 1),
             jobs: crate::jobs::JobRegistry::default(),
+            workers: crate::workers::WorkerRegistry::default(),
         };
         let fairlead = start_fairlead_with_state(state).await;
 
@@ -2359,6 +2363,7 @@ mod tests {
             },
             priority_limiter: crate::priority::PriorityLimiter::default(),
             jobs: crate::jobs::JobRegistry::default(),
+            workers: crate::workers::WorkerRegistry::default(),
         };
         let fairlead = start_fairlead_with_state(state).await;
 
@@ -2439,6 +2444,7 @@ mod tests {
             },
             priority_limiter: crate::priority::PriorityLimiter::default(),
             jobs: crate::jobs::JobRegistry::default(),
+            workers: crate::workers::WorkerRegistry::default(),
         };
         let fairlead = start_fairlead_with_state(state).await;
 
@@ -2506,6 +2512,7 @@ mod tests {
             },
             priority_limiter: crate::priority::PriorityLimiter::default(),
             jobs: crate::jobs::JobRegistry::default(),
+            workers: crate::workers::WorkerRegistry::default(),
         };
         let fairlead = start_fairlead_with_state(state).await;
 
@@ -2555,6 +2562,7 @@ mod tests {
             },
             priority_limiter: crate::priority::PriorityLimiter::default(),
             jobs: crate::jobs::JobRegistry::default(),
+            workers: crate::workers::WorkerRegistry::default(),
         };
         let fairlead = start_fairlead_with_state(state).await;
 
@@ -2595,6 +2603,7 @@ mod tests {
             resource_policy: crate::resources::ResourceRoutingPolicy::default(),
             priority_limiter: crate::priority::PriorityLimiter::default(),
             jobs: crate::jobs::JobRegistry::default(),
+            workers: crate::workers::WorkerRegistry::default(),
         };
         let app = build_router(state);
 
@@ -2836,6 +2845,7 @@ mod tests {
             resource_policy: crate::resources::ResourceRoutingPolicy::default(),
             priority_limiter: crate::priority::PriorityLimiter::default(),
             jobs: crate::jobs::JobRegistry::default(),
+            workers: crate::workers::WorkerRegistry::default(),
         };
         let fairlead = start_fairlead_with_state(state).await;
 

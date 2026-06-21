@@ -653,10 +653,12 @@ It should not introduce queues, workers, or job state.
 - [x] Add first-slice in-memory job API: submit, status, and cancellation.
 - [x] Add in-memory priority queue state and job listing.
 - [x] Add queue depth metrics by priority and workload.
+- [x] Add non-dispatching worker registration and heartbeat.
+- [x] Add worker availability metrics.
 - Add durable priority queues.
 - Add queue wait-time metrics by priority and workload.
-- Add worker registration and heartbeat.
-- Add worker availability and utilization metrics.
+- Add worker deregistration and graceful shutdown semantics.
+- Add worker utilization metrics.
 - Add bounded job attempts with timeouts, leases, retry limits, and cancellation.
 - Add durable-enough job state, starting with in-memory state for tests and
   SQLite as the first persistent backend.

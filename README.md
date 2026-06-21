@@ -71,10 +71,12 @@ Implemented generalization work includes:
 - **Initial async job API** with in-memory submission, listing, polling,
   cancellation, per-priority queue tracking, queue depth metrics, job type,
   priority, payload, and callback metadata.
+- **Non-dispatching worker registration** with heartbeat, stale detection,
+  capability metadata, and worker availability metrics.
 
-Future phases add durable priority queues, worker registration, complete
-pool-aware routing, adapter boundaries, queue wait-time metrics, callback
-delivery, and cloud fallback.
+Future phases add durable priority queues, worker dispatch, complete pool-aware
+routing, adapter boundaries, queue wait-time metrics, callback delivery, and
+cloud fallback.
 
 See [`docs/planning/roadmap.md`](docs/planning/roadmap.md) for the
 implementation plan and acceptance criteria.

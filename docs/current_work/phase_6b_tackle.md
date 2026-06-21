@@ -20,8 +20,9 @@ Tackle includes:
 - Job type, priority, payload, callback URL, attempt, and state metadata.
 - In-memory job state first.
 - Per-priority queue state and queue depth metrics.
+- Worker registration, heartbeat, stale detection, and availability metrics.
 - Durable-enough persistence later, with SQLite as the first likely backend.
-- Durable queues, scheduler loop, worker registration, leases, retries,
+- Durable queues, scheduler loop, worker deregistration, leases, retries,
   callbacks, queue wait-time metrics, and broader metrics in later slices.
 
 Tackle does not include:
@@ -57,7 +58,23 @@ Implemented:
 - Added `fairlead_job_queue_depth{priority,type}` Prometheus metrics.
 - Kept worker dispatch, durable queues, leases, and callbacks out of scope.
 
+## Third Slice
+
+Implemented:
+
+- Added `WorkerRegistry` as in-memory shared state.
+- Added `POST /v1/workers/register` for non-dispatching worker registration and
+  upsert.
+- Added `POST /v1/workers/{id}/heartbeat` to refresh worker liveness.
+- Added `GET /v1/workers` to list registered workers.
+- Store worker endpoint URL, optional node ID, supported job types, optional
+  concurrency, and optional available VRAM metadata.
+- Mark workers stale after the registry's heartbeat timeout.
+- Added `fairlead_workers{type,status}` Prometheus metrics.
+- Kept scheduling, dispatch, leases, deregistration, callbacks, and durable
+  persistence out of scope.
+
 Next likely slice:
 
-- Add worker registration data structures and endpoints, or add queue wait-time
-  metrics before introducing workers.
+- Add queue wait-time metrics, or add a non-dispatching scheduler claim
+  primitive that selects queued jobs without calling workers yet.

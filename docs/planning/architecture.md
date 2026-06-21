@@ -115,8 +115,9 @@ scheduler input, not the source of truth for GPU execution.
 The current code implements the synchronous gateway path: backend selection,
 circuit breaking, health probing, soft affinity, streaming proxying, resource
 reporting, resource-aware backend eligibility, priority admission, and basic
-metrics. Durable priority queues, worker registration, and async job dispatch
-are planned later phases.
+metrics. The early async path implements in-memory job records and
+non-dispatching worker registration. Durable priority queues, worker dispatch,
+leases, callbacks, and durable job recovery are planned later phases.
 
 ### Rhizome example: spark-a and spark-b
 
@@ -233,17 +234,21 @@ request arrives
 
 ### Surface 2: Async job dispatch
 
-The first Phase 6B slice implements the HTTP job surface with in-memory state.
-Scheduler dispatch, worker registration, leases, persistence, callback delivery,
-and queue wait-time metrics are still future Phase 6B slices. The design belongs
-in the architecture because it defines Fairlead's boundary: Fairlead should be a
-compute control plane, not a general-purpose workflow engine.
+The first Phase 6B slices implement the HTTP job surface and non-dispatching
+worker registration with in-memory state. Scheduler dispatch, leases,
+persistence, callback delivery, and queue wait-time metrics are still future
+Phase 6B slices. The design belongs in the architecture because it defines
+Fairlead's boundary: Fairlead should be a compute control plane, not a
+general-purpose workflow engine.
 
 ```
 POST /v1/jobs        — submit, get job_id immediately
 GET  /v1/jobs        — list in-memory job records
 GET  /v1/jobs/{id}   — poll status
 DELETE /v1/jobs/{id} — cancel queued or running work when supported
+POST /v1/workers/register       — register or update worker capabilities
+POST /v1/workers/{id}/heartbeat — refresh worker liveness
+GET  /v1/workers                — list registered workers
 ```
 
 Current early Phase 6B behavior:
@@ -255,7 +260,10 @@ Current early Phase 6B behavior:
 - job state is in memory and is lost on process restart
 - cancellation marks queued jobs `cancelled`
 - cancellation removes queued jobs from queue depth accounting
+- registered workers are listed with stale status
+- `/metrics` exposes `fairlead_workers{type,status}`
 - no worker is selected yet
+- no job is dispatched to a worker yet
 - no callback is delivered yet
 - no durable queue or scheduler loop exists yet
 
@@ -276,7 +284,10 @@ job submitted
 - `cluster` — k-means or HDBSCAN over an embedding space
 
 **Supporting infrastructure:**
-- `POST /v1/workers/register` — workers announce capabilities and VRAM cost
+- `POST /v1/workers/register` — workers announce capabilities, endpoint, and
+  node metadata
+- `POST /v1/workers/{id}/heartbeat` — workers refresh liveness
+- `GET /v1/workers` — current in-memory worker registry
 - `POST /v1/resources/report` — GPU consumers and workers report capacity
 - `GET /v1/resources` — current resource control-plane state
 - `GET /metrics` — Prometheus: queue depth, circuit states, VRAM per node
@@ -511,7 +522,7 @@ and background task:
 - `Arc<RwLock<BackendMap>>` — backend states and circuit breakers
 - `Arc<RwLock<ResourceRegistry>>` — cooperative resource reports per node/backend
 - `Arc<RwLock<AffinityMap>>` — workload-scoped thread ID → preferred backend
-- `Arc<RwLock<WorkerRegistry>>` — registered job workers
+- `WorkerRegistry` wrapping `Arc<RwLock<...>>` — registered job workers
 
 ### 2. The async model requires structure, not just `async fn`
 

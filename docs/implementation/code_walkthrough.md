@@ -107,6 +107,7 @@ mod priority;
 mod proxy;
 mod resources;
 mod router;
+mod workers;
 ```
 
 These lines tell the Rust compiler to compile files or directories with those
@@ -118,6 +119,7 @@ names:
 - `mod proxy;` loads `src/proxy/mod.rs`.
 - `mod resources;` loads `src/resources.rs`.
 - `mod router;` loads `src/router/mod.rs`.
+- `mod workers;` loads `src/workers.rs`.
 
 This is closer to declaring compilation units than to copying source text into
 the current file. The compiler still understands these modules as part of one
@@ -301,6 +303,7 @@ pub struct AppState {
     pub resource_policy: ResourceRoutingPolicy,
     pub priority_limiter: PriorityLimiter,
     pub jobs: JobRegistry,
+    pub workers: WorkerRegistry,
 }
 ```
 
@@ -386,6 +389,7 @@ mod priority;
 mod proxy;
 mod resources;
 mod router;
+mod workers;
 ```
 
 These make the rest of the source tree available to `main.rs`.
@@ -416,6 +420,7 @@ pub struct AppState {
 - `resource_policy` controls whether resource-aware eligibility is active.
 - `priority_limiter` stores per-priority synchronous admission limits.
 - `jobs` stores first-slice in-memory async job records.
+- `workers` stores non-dispatching worker registration and heartbeat state.
 
 `#[derive(Clone)]` asks Rust to generate a `clone()` implementation. Axum clones
 state handles into request handlers. This is cheap here because the expensive
@@ -624,6 +629,9 @@ Router::new()
     .route("/v1/resources/report", post(resources::report_resources))
     .route("/v1/jobs", get(jobs::list_jobs).post(jobs::submit_job))
     .route("/v1/jobs/:id", get(jobs::get_job).delete(jobs::cancel_job))
+    .route("/v1/workers", get(workers::list_workers))
+    .route("/v1/workers/register", post(workers::register_worker))
+    .route("/v1/workers/:id/heartbeat", post(workers::heartbeat_worker))
     .route("/v1/chat/completions", post(proxy::chat_completions))
     .route("/v1/embeddings", post(proxy::embeddings))
     .with_state(state)
@@ -640,6 +648,9 @@ This means:
 - `GET /v1/jobs` calls `jobs::list_jobs`.
 - `GET /v1/jobs/{id}` calls `jobs::get_job`.
 - `DELETE /v1/jobs/{id}` calls `jobs::cancel_job`.
+- `GET /v1/workers` calls `workers::list_workers`.
+- `POST /v1/workers/register` calls `workers::register_worker`.
+- `POST /v1/workers/{id}/heartbeat` calls `workers::heartbeat_worker`.
 - `POST /v1/chat/completions` calls `proxy::chat_completions`.
 - `POST /v1/embeddings` calls `proxy::embeddings`.
 
@@ -1246,7 +1257,7 @@ The current code does not:
 - Estimate token count or memory use.
 - Manage CUDA memory.
 - Enforce complete pool-aware routing and placement policies.
-- Implement job queues or worker registration.
+- Dispatch jobs to workers, enforce leases, or deliver callbacks.
 - Reserve GPU memory for a request; resource reports are cooperative control-plane
   hints, not allocator-level reservations.
 

@@ -137,9 +137,9 @@ DELETE /v1/jobs/{id}         — cancel a queued job
 ```
 
 The first Phase 6B slices store job records in memory only and track explicit
-per-priority queued job IDs. Worker dispatch, durable queues, leases, callback
-delivery, queue wait-time metrics, and SQLite-backed persistence are still
-planned.
+per-priority queued job IDs. Worker registration is non-dispatching for now.
+Worker dispatch, deregistration, durable queues, leases, callback delivery,
+queue wait-time metrics, and SQLite-backed persistence are still planned.
 
 Job request body:
 ```json
@@ -151,12 +151,12 @@ Job request body:
 }
 ```
 
-### Planned worker registration
+### Worker registration
 
 ```
-POST   /v1/workers/register     — worker announces: job types, VRAM cost, endpoint
-DELETE /v1/workers/{id}         — deregister (graceful shutdown)
-GET    /v1/workers              — list registered workers and their status
+POST   /v1/workers/register        — worker announces: job types, endpoint, node
+POST   /v1/workers/{id}/heartbeat  — refresh worker liveness
+GET    /v1/workers                 — list registered workers and their status
 ```
 
 ### VRAM accounting
@@ -324,9 +324,11 @@ WORKER_HEARTBEAT_SECS        — interval before a worker is considered stale
   `GET /v1/jobs/{id}`, `DELETE /v1/jobs/{id}`
 - [x] Queue visibility: `GET /v1/jobs`, per-priority queue state, and queue
   depth metrics
+- [x] Non-dispatching worker registration, heartbeat, stale status, and
+  availability metrics
 - Durable priority queues with queue depth and queue wait-time metrics
-- Worker registration API: `POST /v1/workers/register`, heartbeat, deregister
-- Worker availability and utilization metrics
+- Worker deregistration API and graceful shutdown semantics
+- Worker utilization metrics
 - Workers declare: job types they handle, VRAM cost per job, endpoint URL
 - Scheduler: match job type → registered workers; pick based on VRAM headroom and load
 - Job manager: bounded attempts, leases, timeouts, retry limits, cancellation,
