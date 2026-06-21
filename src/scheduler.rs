@@ -129,6 +129,43 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn preview_preserves_fifo_order_within_same_priority() {
+        let jobs = JobRegistry::default();
+        let workers = WorkerRegistry::default();
+
+        jobs.submit(SubmitJobRequest {
+            kind: JobKind::VisionAnalysis,
+            priority: Priority::Batch,
+            payload: Value::Null,
+            callback_url: None,
+        })
+        .await
+        .unwrap();
+        jobs.submit(SubmitJobRequest {
+            kind: JobKind::VisionAnalysis,
+            priority: Priority::Batch,
+            payload: Value::Null,
+            callback_url: None,
+        })
+        .await
+        .unwrap();
+        workers
+            .register(RegisterWorkerRequest {
+                id: "vision-worker".into(),
+                endpoint_url: "http://vision-worker:9000".into(),
+                node_id: None,
+                job_types: vec![JobKind::VisionAnalysis],
+                max_concurrent_jobs: None,
+                available_vram_mb: None,
+            })
+            .await
+            .unwrap();
+
+        let preview = preview_next_assignment(&jobs, &workers).await.unwrap();
+        assert_eq!(preview.job.id, "job-1");
+    }
+
+    #[tokio::test]
     async fn preview_skips_jobs_without_matching_available_workers() {
         let jobs = JobRegistry::default();
         let workers = WorkerRegistry::default();
@@ -260,5 +297,24 @@ mod tests {
             jobs.get("job-1").await.unwrap().status,
             crate::jobs::JobStatus::Queued
         );
+    }
+
+    #[tokio::test]
+    async fn preview_endpoint_returns_no_content_when_no_assignment_exists() {
+        let app = build_router(test_state(
+            JobRegistry::default(),
+            WorkerRegistry::default(),
+        ));
+
+        let response = app
+            .oneshot(
+                Request::get("/v1/scheduler/preview")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
     }
 }

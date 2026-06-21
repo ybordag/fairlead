@@ -879,6 +879,35 @@ mod tests {
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     }
 
+    #[tokio::test]
+    async fn invalid_submit_job_payloads_return_client_errors() {
+        let app = build_router(test_state());
+
+        for body in [
+            json!({"priority": "batch"}).to_string(),
+            json!({"type": "unknown"}).to_string(),
+            json!({"type": "vision_analysis", "priority": "urgent"}).to_string(),
+            "{not-json".to_string(),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::post("/v1/jobs")
+                        .header("content-type", "application/json")
+                        .body(Body::from(body))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+
+            assert!(
+                response.status().is_client_error(),
+                "expected client error, got {}",
+                response.status()
+            );
+        }
+    }
+
     async fn response_json(response: axum::response::Response) -> serde_json::Value {
         let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
             .await

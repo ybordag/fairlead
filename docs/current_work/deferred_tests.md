@@ -97,15 +97,61 @@ When Phase 7A implements complete pool-aware routing, add tests for:
 pool-aware placement is deferred to Phase 7A so the design can cover both
 synchronous and async compute.
 
-### `phase_6b_async_scheduler_recovery`
+### `phase_6c_worker_claims_and_leases`
 
-When Phase 6B implements async jobs, add tests for:
+When Phase 6C implements worker-pull claims and leases, add tests for:
+
+- cancellation of queued and running jobs
+- duplicate-claim prevention when two workers ask for the same job
+- lease timeout and retry
+- lease heartbeat or renewal behavior, if implemented
+- stale worker exclusion during claim
+- unsupported job types returning no claim
+- priority ordering across realtime, batch, and background queues at claim time
+- FIFO ordering within a priority at claim time
+
+**Why deferred:** Phase 6B now has the in-memory job API, worker registry, queue
+metrics, and non-mutating scheduler preview. These tests require mutating claims,
+lease metadata, running-job state, and timeout behavior, which are Phase 6C
+scope.
+
+### `phase_6d_worker_execution_and_utilization`
+
+When Phase 6D implements worker completion/failure reporting, add tests for:
+
+- successful completion of a leased job
+- retryable worker failure requeueing a job when attempts remain
+- retry exhaustion marking a job permanently failed
+- per-attempt timeout handling
+- worker in-flight and capacity accounting
+- worker utilization metrics
+- job duration metrics
+
+**Why deferred:** These need worker execution endpoints, bounded attempts,
+timeout policy, and utilization counters, which are deliberately outside 6B.
+
+### `phase_6e_job_persistence_and_recovery`
+
+When Phase 6E implements durable job state, add tests for:
 
 - queue persistence or recovery behavior after Fairlead restart
-- worker lease timeout and retry
-- callback retry and terminal failure
-- cancellation of queued and running jobs
-- priority ordering across realtime, batch, and background queues
+- recovery of queued jobs in original priority/FIFO order
+- recovery or requeueing of running jobs with expired leases
+- preservation of attempts, timestamps, callback metadata, and terminal states
+- SQLite migration/bootstrap behavior
 
-**Why deferred:** These require the async job API, scheduler, worker registry,
-leases, and job state, which do not exist yet.
+**Why deferred:** These need a persistent job store and restart harness. Phase 6B
+is intentionally in-memory only.
+
+### `phase_6f_callback_delivery`
+
+When Phase 6F implements callback delivery, add tests for:
+
+- callback delivery on successful terminal job state
+- callback retry after transient callback failure
+- terminal callback failure tracking after retry exhaustion
+- callback timeout handling
+- callback success/failure metrics
+
+**Why deferred:** Callback delivery requires worker execution and terminal job
+state, so it belongs after claims, leases, and completion/failure reporting.
