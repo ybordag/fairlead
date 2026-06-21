@@ -264,9 +264,17 @@ LOG_LEVEL                    — tracing level: error, warn, info, debug, trace 
 - Worker registration API: `POST /v1/workers/register`, heartbeat, deregister
 - Workers declare: job types they handle, VRAM cost per job, endpoint URL
 - Scheduler: match job type → registered workers; pick based on VRAM headroom and load
+- Job manager: bounded attempts, leases, timeouts, retry limits, cancellation,
+  and completed-job pruning
+- Persistence path: in-memory for focused tests, SQLite first for local durable
+  state, Postgres later for multiple Fairlead instances
 - Callback delivery: on completion, POST to `callback_url` with result payload; retry on failure
 - Built-in job types: `vision_analysis`, `embed_batch`
 - Test: submit vision job → dispatched to registered worker → callback fires with result
+
+Temporal is deferred. Fairlead owns compute job orchestration; Rhizome owns
+domain workflow state. Add Temporal only if Rhizome starts needing durable
+multi-step workflows with long waits, fanout/fanin, or compensation logic.
 
 ### Phase 7 — Advanced compute jobs and full metrics
 

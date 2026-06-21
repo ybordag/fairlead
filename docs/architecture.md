@@ -234,7 +234,9 @@ GET  /v1/jobs/{id}   — poll status
 job submitted
   → queued by priority (realtime > batch > background)
   → scheduler selects a registered worker with matching job type + VRAM headroom
+  → Fairlead records a bounded lease for the running attempt
   → worker processes async
+  → worker completes or heartbeats before the lease expires
   → callback fires to caller on completion
 ```
 
@@ -248,6 +250,7 @@ job submitted
 - `POST /v1/workers/register` — workers announce capabilities and VRAM cost
 - `POST /v1/vram/register` — GPU consumers report allocation
 - `GET /metrics` — Prometheus: queue depth, circuit states, VRAM per node
+- Persistent job state for running attempts, retries, callbacks, and pruning.
 
 ---
 
@@ -275,11 +278,17 @@ chat response at 9am. This is enforced structurally, not by policy.
 | 3 | Circuit breaker, health checks, basic /metrics | Automatic failover when vLLM crashes |
 | 4 | Fallback chain, session affinity, cloud providers | Full resilience across local + cloud |
 | 5 | VRAM accounting, priority queue | Vision sidecar coexists without OOM; background work yields to users |
-| 6 | Async job API, worker registration, callbacks | Vision and embedding jobs go through Fairlead |
+| 6 | Async job API, worker registration, leases, callbacks | Vision and embedding jobs go through Fairlead |
 | 7 | Index/cluster job types, FAISS/GPU, full metrics | Advanced RAG indexing, complete observability |
 
 Phases 1–3 give you a working proxy in a few days. Phases 4–5 give you
 production resilience. Phases 6–7 complete the async compute platform.
+
+Temporal is intentionally deferred. Fairlead's scheduler should handle bounded
+compute jobs with leases, retries, cancellation, callbacks, and recoverable job
+state. Temporal becomes useful later only if Rhizome needs durable multi-step
+business workflows with long waits, fanout/fanin, or compensation logic. See
+[`job_scheduler_and_temporal.md`](job_scheduler_and_temporal.md).
 
 ---
 

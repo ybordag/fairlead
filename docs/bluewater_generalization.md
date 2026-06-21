@@ -429,16 +429,33 @@ Needed concepts:
 - Priority.
 - Payload.
 - Status: queued, running, complete, failed, cancelled.
+- Attempt count and retry limit.
+- Per-job timeout and worker lease expiration.
 - Callback URL and callback delivery state.
+- Resource reservation and release for running attempts.
 - Retry policy.
 - Expiration and cleanup.
 
 Open questions:
 
-- Is job state in memory first, or backed by a lightweight database?
+- Does the first implementation use in-memory state only, or SQLite-backed state?
 - Are completed results stored, or only status plus callback outcome?
 - How are duplicate submissions made idempotent?
 - How are cancellations propagated to workers?
+
+Early implementation scope:
+
+- Start with bounded compute jobs, not arbitrary long-running workflows.
+- Treat a multi-minute image-processing attempt as timed out unless the workload
+  opts into a longer timeout.
+- Use leases so Fairlead can recover from worker loss without holding an open
+  process relationship indefinitely.
+- Keep Rhizome as the source of truth for domain objects such as `VisionJob`.
+- Defer Temporal until product workflows need durable multi-step orchestration,
+  fanout/fanin, long waits, or compensation logic.
+
+See `docs/job_scheduler_and_temporal.md` for the scheduler boundary and
+persistence rationale.
 
 ### Worker Registration
 
@@ -554,8 +571,13 @@ Docker, or the provider accounts themselves.
 - Add job API.
 - Add priority queues.
 - Add worker registration and heartbeat.
+- Add bounded job attempts with timeouts, leases, retry limits, and cancellation.
+- Add durable-enough job state, starting with in-memory state for tests and
+  SQLite as the first persistent backend.
 - Add callback delivery.
 - Add async workload metrics.
+- Document Temporal as deferred unless Rhizome needs durable multi-step workflow
+  orchestration beyond compute dispatch.
 
 ### Bluewater 4: Advanced Workloads
 
