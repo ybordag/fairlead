@@ -194,8 +194,8 @@ cargo run
 
 With `JOB_STORE=sqlite`, Fairlead persists submitted jobs, queue order, claim and
 lease state, attempts, cancellation, completion, failure, payloads, callback
-metadata, and result/error state. Already-expired running leases are still
-resolved by the next lease sweep after restart.
+metadata, and result/error state. On startup, already-expired running leases are
+requeued when attempts remain and failed when attempts are exhausted.
 
 Health:
 

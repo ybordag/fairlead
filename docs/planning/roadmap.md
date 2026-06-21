@@ -750,9 +750,10 @@ Fairlead the application source of truth.
   restart.
 - [x] Add restart/recovery tests for queued, running, cancelled, and complete
   job state.
-- Resolve stale running leases after restart.
-- Keep Rhizome or other callers as the source of truth for domain objects.
-- Add endpoint-level and process-level restart/recovery tests.
+- [x] Resolve stale running leases after restart.
+- [x] Add endpoint-level SQLite restart/recovery tests.
+- [x] Keep Rhizome or other callers as the source of truth for domain objects.
+- Add process-level restart/recovery tests.
 
 ### Phase 6F: Callback Delivery and Async Finalization
 

@@ -158,11 +158,10 @@ heavier concurrency/e2e harness.
 
 Phase 6E now has unit-level restart tests for queue recovery, priority/FIFO
 ordering, next ID recovery, running lease preservation, cancelled state,
-completed state, callback metadata, terminal result state, and SQLite bootstrap
-migration. Remaining deferred tests:
+completed state, callback metadata, terminal result state, expired running lease
+startup recovery, SQLite bootstrap migration, and endpoint-level AppState
+recovery. Remaining deferred tests:
 
-- recovery or requeueing of running jobs with expired leases
-- endpoint-level restart tests using SQLite-backed `AppState`
 - process-level e2e restart test with an actual Fairlead process and DB file
 - corrupted or incompatible SQLite file behavior
 - Thor/Loki e2e recovery with jobs submitted before and after Fairlead restart

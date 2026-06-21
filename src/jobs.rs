@@ -214,7 +214,11 @@ impl JobQueues {
 
 impl JobRegistry {
     pub fn with_store(store: SqliteJobStore) -> anyhow::Result<Self> {
-        let inner = store.load_registry_snapshot()?;
+        let mut inner = store.load_registry_snapshot()?;
+        let recovery_report = requeue_expired_leases_locked(&mut inner);
+        if recovery_report.requeued > 0 || recovery_report.failed > 0 {
+            store.replace_registry_snapshot(&inner)?;
+        }
         Ok(Self {
             inner: Arc::new(RwLock::new(inner)),
             store: Some(store),
@@ -439,51 +443,7 @@ impl JobRegistry {
 
     pub async fn requeue_expired_leases(&self) -> LeaseExpiryReport {
         let mut guard = self.inner.write().await;
-        let now = unix_ms();
-        let mut report = LeaseExpiryReport::default();
-        let mut requeued_jobs = Vec::new();
-
-        for id in guard.order.clone() {
-            let Some(job) = guard.jobs.get_mut(&id) else {
-                continue;
-            };
-            if job.status != JobStatus::Running {
-                continue;
-            }
-            let Some(lease) = &job.lease else {
-                continue;
-            };
-            if lease.expires_at_unix_ms > now {
-                continue;
-            }
-
-            report.released_workers.push(lease.worker_id.clone());
-            let retryable = job.attempts < job.max_attempts;
-            job.result = None;
-            job.error = Some(JobFailure {
-                message: ATTEMPT_TIMEOUT_ERROR.into(),
-                retryable,
-            });
-            job.lease = None;
-            job.updated_at_unix_ms = now;
-
-            if retryable {
-                job.status = JobStatus::Queued;
-                requeued_jobs.push((job.priority, id));
-                report.requeued += 1;
-            } else {
-                job.status = JobStatus::Failed;
-                report.failed += 1;
-            }
-        }
-
-        for (priority, id) in requeued_jobs {
-            let queue = guard.queues.for_priority_mut(priority);
-            if !queue.iter().any(|queued_id| queued_id == &id) {
-                queue.push_back(id);
-            }
-        }
-
+        let report = requeue_expired_leases_locked(&mut guard);
         self.persist_locked(&guard).ok();
         report
     }
@@ -654,6 +614,55 @@ impl JobRegistry {
     }
 }
 
+fn requeue_expired_leases_locked(inner: &mut JobRegistryInner) -> LeaseExpiryReport {
+    let now = unix_ms();
+    let mut report = LeaseExpiryReport::default();
+    let mut requeued_jobs = Vec::new();
+
+    for id in inner.order.clone() {
+        let Some(job) = inner.jobs.get_mut(&id) else {
+            continue;
+        };
+        if job.status != JobStatus::Running {
+            continue;
+        }
+        let Some(lease) = &job.lease else {
+            continue;
+        };
+        if lease.expires_at_unix_ms > now {
+            continue;
+        }
+
+        report.released_workers.push(lease.worker_id.clone());
+        let retryable = job.attempts < job.max_attempts;
+        job.result = None;
+        job.error = Some(JobFailure {
+            message: ATTEMPT_TIMEOUT_ERROR.into(),
+            retryable,
+        });
+        job.lease = None;
+        job.updated_at_unix_ms = now;
+
+        if retryable {
+            job.status = JobStatus::Queued;
+            requeued_jobs.push((job.priority, id));
+            report.requeued += 1;
+        } else {
+            job.status = JobStatus::Failed;
+            report.failed += 1;
+        }
+    }
+
+    for (priority, id) in requeued_jobs {
+        let queue = inner.queues.for_priority_mut(priority);
+        if !queue.iter().any(|queued_id| queued_id == &id) {
+            queue.push_back(id);
+        }
+    }
+
+    report
+}
+
 pub enum CancelJobResult {
     Cancelled(JobRecord),
     AlreadyTerminal(JobRecord),
@@ -788,6 +797,10 @@ mod tests {
     use tower::ServiceExt;
 
     fn test_state() -> AppState {
+        test_state_with_jobs(JobRegistry::default())
+    }
+
+    fn test_state_with_jobs(jobs: JobRegistry) -> AppState {
         AppState {
             client: reqwest::Client::new(),
             backends: vec![],
@@ -796,7 +809,7 @@ mod tests {
             resources: ResourceRegistry::default(),
             resource_policy: ResourceRoutingPolicy::default(),
             priority_limiter: PriorityLimiter::default(),
-            jobs: JobRegistry::default(),
+            jobs,
             workers: crate::workers::WorkerRegistry::default(),
         }
     }
@@ -890,7 +903,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn sqlite_registry_recovers_running_cancelled_and_complete_jobs() {
+    async fn sqlite_registry_recovers_fresh_running_cancelled_and_complete_jobs() {
         let path = unique_db_path("states");
         let jobs =
             JobRegistry::with_store(crate::storage::SqliteJobStore::open(&path).unwrap()).unwrap();
@@ -950,6 +963,130 @@ mod tests {
         assert_eq!(complete.status, JobStatus::Complete);
         assert_eq!(complete.result, Some(json!({"ok": true})));
         assert!(complete.lease.is_none());
+    }
+
+    #[tokio::test]
+    async fn sqlite_registry_requeues_expired_running_job_on_startup() {
+        let path = unique_db_path("expired-requeue");
+        let jobs =
+            JobRegistry::with_store(crate::storage::SqliteJobStore::open(&path).unwrap()).unwrap();
+        let submitted = jobs
+            .submit(SubmitJobRequest {
+                kind: JobKind::VisionAnalysis,
+                priority: Priority::Batch,
+                payload: Value::Null,
+                callback_url: None,
+            })
+            .await
+            .unwrap();
+        jobs.claim_next_for_worker("worker-a", &[submitted.kind], 0)
+            .await
+            .unwrap();
+
+        let restored =
+            JobRegistry::with_store(crate::storage::SqliteJobStore::open(&path).unwrap()).unwrap();
+        let job = restored.get(&submitted.id).await.unwrap();
+        assert_eq!(job.status, JobStatus::Queued);
+        assert_eq!(job.attempts, 1);
+        assert!(job.lease.is_none());
+        assert_eq!(
+            job.error,
+            Some(JobFailure {
+                message: ATTEMPT_TIMEOUT_ERROR.into(),
+                retryable: true,
+            })
+        );
+        assert_eq!(restored.queued_jobs_by_priority().await[0].id, submitted.id);
+
+        let persisted =
+            JobRegistry::with_store(crate::storage::SqliteJobStore::open(&path).unwrap()).unwrap();
+        assert_eq!(
+            persisted.get(&submitted.id).await.unwrap().status,
+            JobStatus::Queued
+        );
+    }
+
+    #[tokio::test]
+    async fn sqlite_registry_fails_exhausted_expired_running_job_on_startup() {
+        let path = unique_db_path("expired-fail");
+        let jobs =
+            JobRegistry::with_store(crate::storage::SqliteJobStore::open(&path).unwrap()).unwrap();
+        let submitted = jobs
+            .submit(SubmitJobRequest {
+                kind: JobKind::Cluster,
+                priority: Priority::Background,
+                payload: Value::Null,
+                callback_url: None,
+            })
+            .await
+            .unwrap();
+
+        for _ in 0..2 {
+            jobs.claim_next_for_worker("worker-a", &[submitted.kind], 0)
+                .await
+                .unwrap();
+            jobs.requeue_expired_leases().await;
+        }
+        jobs.claim_next_for_worker("worker-a", &[submitted.kind], 0)
+            .await
+            .unwrap();
+
+        let restored =
+            JobRegistry::with_store(crate::storage::SqliteJobStore::open(&path).unwrap()).unwrap();
+        let job = restored.get(&submitted.id).await.unwrap();
+        assert_eq!(job.status, JobStatus::Failed);
+        assert_eq!(job.attempts, 3);
+        assert!(job.lease.is_none());
+        assert_eq!(
+            job.error,
+            Some(JobFailure {
+                message: ATTEMPT_TIMEOUT_ERROR.into(),
+                retryable: false,
+            })
+        );
+        assert!(restored.queued_jobs_by_priority().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn sqlite_backed_endpoints_recover_jobs_after_app_rebuild() {
+        let path = unique_db_path("endpoint");
+        let jobs =
+            JobRegistry::with_store(crate::storage::SqliteJobStore::open(&path).unwrap()).unwrap();
+        let app = build_router(test_state_with_jobs(jobs));
+
+        let submit = app
+            .oneshot(
+                Request::post("/v1/jobs")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({
+                            "type": "embed_batch",
+                            "priority": "batch",
+                            "payload": {"texts": ["seed"]},
+                            "callback_url": "http://rhizome/jobs/job-1"
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(submit.status(), StatusCode::ACCEPTED);
+
+        let restored_jobs =
+            JobRegistry::with_store(crate::storage::SqliteJobStore::open(&path).unwrap()).unwrap();
+        let restored_app = build_router(test_state_with_jobs(restored_jobs));
+        let response = restored_app
+            .oneshot(Request::get("/v1/jobs/job-1").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let value = response_json(response).await;
+        assert_eq!(value["job"]["id"], "job-1");
+        assert_eq!(value["job"]["status"], "queued");
+        assert_eq!(value["job"]["payload"], json!({"texts": ["seed"]}));
+        assert_eq!(value["job"]["callback_url"], "http://rhizome/jobs/job-1");
     }
 
     #[tokio::test]

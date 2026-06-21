@@ -3,16 +3,15 @@
 ## Goal
 
 Make async job state survive ordinary Fairlead restarts without making Fairlead
-the application source of truth. Shackle starts with SQLite-backed durable state
-for the job scheduler while keeping the current in-memory behavior as the
-default until the persistence path is fully wired and tested.
+the application source of truth. Shackle adds SQLite-backed durable state for
+the job scheduler while keeping the current in-memory behavior as the default.
 
 ## Scope
 
 Shackle includes:
 
 - A configurable job store backend.
-- `JOB_STORE=memory` as the default during the implementation phase.
+- `JOB_STORE=memory` as the default.
 - `JOB_STORE=sqlite` as an opt-in durable backend.
 - `JOB_DB_PATH` for the SQLite database path.
 - SQLite schema bootstrap and migration/version tracking.
@@ -63,9 +62,23 @@ Implemented:
 - Added restart-style tests for queued job recovery, next ID recovery, running
   lease recovery, cancelled state, completed state, and schema migration.
 
-Remaining Shackle work:
+## Final Slice
 
-- Define the restart policy for already-expired running leases. Today they
-  restore as running and are resolved by the next lease sweep.
-- Add endpoint-level restart tests around SQLite-backed `AppState`.
+Implemented:
+
+- Defined startup recovery behavior for expired running leases loaded from
+  SQLite.
+- Requeued expired running jobs when attempts remain.
+- Failed expired running jobs when retry attempts are exhausted.
+- Persisted startup lease recovery back to SQLite immediately, so the same
+  expired job is not repeatedly recovered on every process start.
+- Added endpoint-level restart coverage by rebuilding an `AppState` from the
+  same SQLite file and fetching a previously submitted job through `/v1/jobs`.
+- Updated deferred tests so only process-level, deployment-level, and corrupted
+  database cases remain outside Shackle.
+
+Remaining deferred work:
+
 - Add e2e restart tests with an actual Fairlead process and SQLite file.
+- Add deployment-level restart tests on Thor/Loki.
+- Add corrupted or incompatible SQLite file behavior tests.

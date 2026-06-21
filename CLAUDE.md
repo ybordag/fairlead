@@ -60,6 +60,7 @@ durable job state and restart recovery. Shackle keeps `JOB_STORE=memory` as the
 default and adds opt-in `JOB_STORE=sqlite` through `JOB_DB_PATH`. SQLite-backed
 registries now persist job records, queue order, claim/lease state, attempts,
 cancellation, completion, failure, callback metadata, and result/error state.
+Expired running leases are resolved during SQLite registry startup.
 
 | Phase | Branch | Status |
 |---|---|---|
@@ -164,8 +165,9 @@ non-retryable or exhausted failures become terminal. Expired leases record
 exhausted. Worker utilization and terminal job duration metrics are
 implemented. Phase 6E adds opt-in SQLite persistence for job records, queue
 order, claim/lease state, attempts, callback metadata, and terminal state.
-Worker deregistration, callback delivery, completed-job pruning, and
-process-level restart e2e tests are still planned.
+Expired running leases loaded from SQLite are requeued when attempts remain and
+failed when attempts are exhausted. Worker deregistration, callback delivery,
+completed-job pruning, and process-level restart e2e tests are still planned.
 
 Job request body:
 ```json
