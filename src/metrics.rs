@@ -198,6 +198,7 @@ pub async fn metrics(State(state): State<AppState>) -> Response<String> {
         ));
     }
     body.push_str(&state.metrics.render());
+    body.push_str(&render_priority_metrics(&state));
     body.push_str(&render_resource_metrics(&state).await);
 
     Response::builder()
@@ -205,6 +206,29 @@ pub async fn metrics(State(state): State<AppState>) -> Response<String> {
         .header("content-type", "text/plain; version=0.0.4; charset=utf-8")
         .body(body)
         .unwrap()
+}
+
+fn render_priority_metrics(state: &AppState) -> String {
+    let mut body = String::from(
+        "# HELP fairlead_priority_in_flight Current admitted proxy requests by priority\n\
+         # TYPE fairlead_priority_in_flight gauge\n\
+         # HELP fairlead_priority_limit Configured synchronous admission limit by priority\n\
+         # TYPE fairlead_priority_limit gauge\n",
+    );
+
+    for snapshot in state.priority_limiter.snapshots() {
+        let priority = snapshot.priority.as_str();
+        body.push_str(&format!(
+            "fairlead_priority_in_flight{{priority=\"{priority}\"}} {}\n",
+            snapshot.in_flight
+        ));
+        body.push_str(&format!(
+            "fairlead_priority_limit{{priority=\"{priority}\"}} {}\n",
+            snapshot.limit
+        ));
+    }
+
+    body
 }
 
 async fn render_resource_metrics(state: &AppState) -> String {
@@ -273,6 +297,7 @@ mod tests {
             metrics: RoutingMetrics::default(),
             resources: crate::resources::ResourceRegistry::default(),
             resource_policy: crate::resources::ResourceRoutingPolicy::default(),
+            priority_limiter: crate::priority::PriorityLimiter::default(),
         };
         router_with_state(state)
     }
@@ -487,6 +512,40 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn metrics_reports_priority_limits_and_in_flight_counts() {
+        let priority_limiter = crate::priority::PriorityLimiter::new(9, 5, 1);
+        let _batch_permit = priority_limiter
+            .try_acquire(crate::config::Priority::Batch)
+            .unwrap();
+        let state = AppState {
+            client: reqwest::Client::new(),
+            backends: vec![],
+            affinity: crate::router::SessionAffinity::default(),
+            metrics: RoutingMetrics::default(),
+            resources: crate::resources::ResourceRegistry::default(),
+            resource_policy: crate::resources::ResourceRoutingPolicy::default(),
+            priority_limiter,
+        };
+        let app = router_with_state(state);
+        let resp = app
+            .oneshot(
+                axum::http::Request::get("/metrics")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        let text = body_text(resp).await;
+        assert!(text.contains("fairlead_priority_limit{priority=\"realtime\"} 9"));
+        assert!(text.contains("fairlead_priority_limit{priority=\"batch\"} 5"));
+        assert!(text.contains("fairlead_priority_limit{priority=\"background\"} 1"));
+        assert!(text.contains("fairlead_priority_in_flight{priority=\"realtime\"} 0"));
+        assert!(text.contains("fairlead_priority_in_flight{priority=\"batch\"} 1"));
+        assert!(text.contains("fairlead_priority_in_flight{priority=\"background\"} 0"));
+    }
+
+    #[tokio::test]
     async fn metrics_reports_resource_snapshots() {
         let resources = crate::resources::ResourceRegistry::default();
         resources
@@ -506,6 +565,7 @@ mod tests {
             metrics: RoutingMetrics::default(),
             resources,
             resource_policy: crate::resources::ResourceRoutingPolicy::default(),
+            priority_limiter: crate::priority::PriorityLimiter::default(),
         };
         let app = router_with_state(state);
         let resp = app

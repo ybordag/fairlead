@@ -14,6 +14,7 @@ start process
   -> start background health probes
   -> register HTTP routes
   -> accept requests
+  -> check priority admission
   -> pick an available backend
   -> proxy the request to that backend
   -> stream the response back
@@ -36,7 +37,7 @@ flowchart TD
     probes --> probe_loop["background health loop\nGET backend health URL"]
     probe_loop --> circuit
 
-    main --> app_state["AppState\nclient + backends + affinity"]
+    main --> app_state["AppState\nclient + backends + affinity + resources + priority limiter"]
     app_state --> router_build["build_router()"]
 
     router_build --> health_route["GET /health\nhealth::health()"]
@@ -47,6 +48,7 @@ flowchart TD
     chat_route --> forward["src/proxy/mod.rs\nforward()"]
     embed_route --> forward
 
+    forward --> priority["src/priority.rs\nPriorityLimiter::try_acquire()"]
     forward --> affinity_read["src/router/affinity.rs\nSessionAffinity::preferred()"]
     forward --> select["src/router/fallback.rs\nselect_backend_excluding()"]
     select --> circuit
@@ -67,8 +69,10 @@ Important shared state:
 
 - `CircuitBreaker` is shared by request handlers, health probes, and metrics.
 - `SessionAffinity` is shared by request handlers.
+- `PriorityLimiter` is shared by request handlers so concurrent requests compete
+  for the same per-priority admission slots.
 - `AppState` is cloned into handlers, but its interior circuit breakers and
-  affinity map still point at shared allocations.
+  shared maps/limiters still point at shared allocations.
 
 ## Rust Concepts Used Here
 
@@ -282,13 +286,19 @@ pub struct AppState {
     pub client: reqwest::Client,
     pub backends: Vec<BackendState>,
     pub affinity: SessionAffinity,
+    pub metrics: RoutingMetrics,
+    pub resources: ResourceRegistry,
+    pub resource_policy: ResourceRoutingPolicy,
+    pub priority_limiter: PriorityLimiter,
 }
 ```
 
 Cloning `AppState` does not create independent circuit breakers or independent
 affinity maps. `BackendState` contains an `Arc<RwLock<CircuitBreaker>>`, and
 `SessionAffinity` contains an `Arc<RwLock<HashMap<...>>>`, so cloned handlers
-still coordinate through the same underlying state.
+still coordinate through the same underlying state. `PriorityLimiter` also
+contains shared semaphore state, so cloned handlers compete for the same
+realtime, batch, and background admission capacity.
 
 ### Tokio
 
@@ -674,7 +684,33 @@ The return type is `Option<String>`:
 checked before use, except the compiler forces the check before the inner value
 can be accessed.
 
-### 4. Look Up Preferred Backend
+### 4. Acquire Priority Admission
+
+```rust
+let Some(priority_permit) = state.priority_limiter.try_acquire(priority) else {
+    return (StatusCode::TOO_MANY_REQUESTS, "priority limit reached").into_response();
+};
+```
+
+`PriorityLimiter` owns one Tokio semaphore per priority level: `realtime`,
+`batch`, and `background`. `try_acquire` is non-blocking:
+
+- If the bucket has capacity, it returns a `PriorityPermit`.
+- If the bucket is full, it returns `None` and Fairlead returns HTTP 429.
+
+The permit is intentionally stored as a value. In Rust, a value is dropped when
+its owner goes away. Dropping the permit releases the semaphore slot and
+decrements the in-flight metric.
+
+For a successful upstream response, Fairlead moves the permit into the streamed
+response body wrapper. That keeps the priority slot occupied until the caller
+finishes or drops the response body, not merely until upstream response headers
+arrive.
+
+This is admission control, not a queue. Fairlead does not currently wait for
+priority capacity on synchronous proxy requests.
+
+### 5. Look Up Preferred Backend
 
 ```rust
 let preferred = match thread_id {
@@ -689,7 +725,7 @@ thread already has a preferred backend index.
 The `ref` means "borrow the string inside `Some` rather than moving it." We still
 need `thread_id` later when recording affinity.
 
-### 5. Select a Backend
+### 6. Select a Backend
 
 ```rust
 let mut attempted = Vec::new();
@@ -732,7 +768,7 @@ if result is Some(idx), continue with idx
 otherwise return 503
 ```
 
-### 6. How `select_backend_excluding` Works
+### 7. How `select_backend_excluding` Works
 
 `src/router/fallback.rs`:
 
@@ -770,7 +806,7 @@ Each check locks that backend's circuit breaker for writing because
 `is_available()` may mutate circuit state from `Open` to `HalfOpen` if cooldown
 has elapsed.
 
-### 7. How the Circuit Breaker Works
+### 8. How the Circuit Breaker Works
 
 `src/router/circuit.rs` defines:
 
@@ -793,7 +829,7 @@ States:
 `record_failure()` increments failures and opens the circuit when the configured
 threshold is reached.
 
-### 8. Build the Upstream URL
+### 9. Build the Upstream URL
 
 Back in `forward`:
 
@@ -1002,6 +1038,17 @@ Fallback and retry decisions have separate counters:
 ```text
 fairlead_fallbacks_total{workload="chat_completions",priority="realtime",backend="spark-b-vllm",node="spark-b",pool="local-llm",origin_node="spark-a",reason="origin_unavailable"} 1
 fairlead_retries_total{workload="chat_completions",priority="realtime",backend="spark-a-vllm",node="spark-a",pool="local-llm",origin_node="spark-a",reason="server_error"} 1
+```
+
+Priority admission exposes current in-flight counts and configured caps:
+
+```text
+fairlead_priority_in_flight{priority="realtime"} 0
+fairlead_priority_limit{priority="realtime"} 8
+fairlead_priority_in_flight{priority="batch"} 0
+fairlead_priority_limit{priority="batch"} 4
+fairlead_priority_in_flight{priority="background"} 0
+fairlead_priority_limit{priority="background"} 2
 ```
 
 The proxy logs structured fields for the same decision: request ID, workload,

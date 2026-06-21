@@ -2,6 +2,7 @@ mod config;
 mod error;
 mod health;
 mod metrics;
+mod priority;
 mod proxy;
 mod resources;
 mod router;
@@ -15,6 +16,7 @@ use tracing::info;
 use tracing_subscriber::EnvFilter;
 
 use metrics::RoutingMetrics;
+use priority::PriorityLimiter;
 use resources::{ResourceRegistry, ResourceRoutingPolicy};
 use router::{spawn_health_probe, BackendState, SessionAffinity};
 
@@ -36,6 +38,8 @@ pub struct AppState {
     pub resources: ResourceRegistry,
     /// Policy for using resource reports during backend selection.
     pub resource_policy: ResourceRoutingPolicy,
+    /// Per-priority synchronous admission limits.
+    pub priority_limiter: PriorityLimiter,
 }
 
 #[tokio::main]
@@ -79,6 +83,11 @@ async fn main() -> anyhow::Result<()> {
             chat_completions_required_vram_mb: cfg.chat_completions_required_vram_mb,
             embeddings_required_vram_mb: cfg.embeddings_required_vram_mb,
         },
+        priority_limiter: PriorityLimiter::new(
+            cfg.priority_realtime_limit,
+            cfg.priority_batch_limit,
+            cfg.priority_background_limit,
+        ),
     };
     let app = build_router(state);
 
@@ -127,6 +136,7 @@ mod tests {
             metrics: RoutingMetrics::default(),
             resources: ResourceRegistry::default(),
             resource_policy: ResourceRoutingPolicy::default(),
+            priority_limiter: PriorityLimiter::default(),
         };
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();

@@ -120,6 +120,12 @@ pub struct Config {
     pub chat_completions_required_vram_mb: u64,
     /// Coarse VRAM estimate for embedding requests. Default: 512 MB.
     pub embeddings_required_vram_mb: u64,
+    /// Max in-flight realtime requests. Default: 8.
+    pub priority_realtime_limit: usize,
+    /// Max in-flight batch requests. Default: 4.
+    pub priority_batch_limit: usize,
+    /// Max in-flight background requests. Default: 2.
+    pub priority_background_limit: usize,
 }
 
 impl Config {
@@ -177,6 +183,21 @@ impl Config {
                 .unwrap_or_else(|_| "512".to_string())
                 .parse()
                 .map_err(|e| anyhow!("invalid EMBEDDINGS_REQUIRED_VRAM_MB: {}", e))?,
+
+            priority_realtime_limit: get("PRIORITY_REALTIME_LIMIT")
+                .unwrap_or_else(|_| "8".to_string())
+                .parse()
+                .map_err(|e| anyhow!("invalid PRIORITY_REALTIME_LIMIT: {}", e))?,
+
+            priority_batch_limit: get("PRIORITY_BATCH_LIMIT")
+                .unwrap_or_else(|_| "4".to_string())
+                .parse()
+                .map_err(|e| anyhow!("invalid PRIORITY_BATCH_LIMIT: {}", e))?,
+
+            priority_background_limit: get("PRIORITY_BACKGROUND_LIMIT")
+                .unwrap_or_else(|_| "2".to_string())
+                .parse()
+                .map_err(|e| anyhow!("invalid PRIORITY_BACKGROUND_LIMIT: {}", e))?,
         })
     }
 }
@@ -334,6 +355,9 @@ mod tests {
         assert!(!cfg.resource_aware_routing);
         assert_eq!(cfg.chat_completions_required_vram_mb, 1024);
         assert_eq!(cfg.embeddings_required_vram_mb, 512);
+        assert_eq!(cfg.priority_realtime_limit, 8);
+        assert_eq!(cfg.priority_batch_limit, 4);
+        assert_eq!(cfg.priority_background_limit, 2);
     }
 
     #[test]
@@ -346,6 +370,9 @@ mod tests {
             ("RESOURCE_AWARE_ROUTING", "true"),
             ("CHAT_COMPLETIONS_REQUIRED_VRAM_MB", "2048"),
             ("EMBEDDINGS_REQUIRED_VRAM_MB", "256"),
+            ("PRIORITY_REALTIME_LIMIT", "16"),
+            ("PRIORITY_BATCH_LIMIT", "6"),
+            ("PRIORITY_BACKGROUND_LIMIT", "3"),
         ]))
         .unwrap();
         assert_eq!(cfg.circuit_failure_threshold, 5);
@@ -355,6 +382,9 @@ mod tests {
         assert!(cfg.resource_aware_routing);
         assert_eq!(cfg.chat_completions_required_vram_mb, 2048);
         assert_eq!(cfg.embeddings_required_vram_mb, 256);
+        assert_eq!(cfg.priority_realtime_limit, 16);
+        assert_eq!(cfg.priority_batch_limit, 6);
+        assert_eq!(cfg.priority_background_limit, 3);
     }
 
     #[test]
@@ -415,6 +445,16 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("invalid EMBEDDINGS_REQUIRED_VRAM_MB"));
+    }
+
+    #[test]
+    fn invalid_priority_limit_returns_err() {
+        let result = Config::from_lookup(env(&[("PRIORITY_REALTIME_LIMIT", "abc")]));
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("invalid PRIORITY_REALTIME_LIMIT"));
     }
 
     #[test]

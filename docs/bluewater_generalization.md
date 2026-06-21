@@ -75,7 +75,7 @@ It does not yet provide:
 - Separate backend pools by workload type.
 - Provider-specific auth/header policies.
 - VRAM or CPU resource accounting.
-- Priority queues.
+- Durable priority queues.
 - Async job submission, status, cancellation, worker registration, or callbacks.
 
 ## Easy Tasks
@@ -354,6 +354,7 @@ and async-job behavior.
 Scope:
 
 - [x] Add resource metrics for reported VRAM/load per node.
+- [x] Add synchronous priority limit and in-flight gauges.
 - [ ] Add queue depth by priority and workload.
 - [ ] Add queue wait time by priority and workload.
 - [ ] Add worker availability and utilization.
@@ -411,12 +412,17 @@ Implemented groundwork:
 - [x] Return `400` for unknown priority values.
 - [x] Add priority labels to synchronous request, retry, fallback, and latency
   metrics.
+- [x] Enforce per-priority synchronous admission limits.
+- [x] Return `429` when a synchronous priority bucket is full.
+- [x] Expose per-priority limit and in-flight metrics.
 
 Hard parts:
 
 - Avoid starving background work forever during heavy realtime use.
-- Bound concurrency per workload and per resource pool.
-- Decide whether synchronous HTTP requests can queue or should fail fast.
+- Bound concurrency per workload and per resource pool, not only by coarse
+  priority.
+- Decide whether any synchronous HTTP requests should queue instead of failing
+  fast.
 - Make queue depth and wait time observable.
 - Keep strict priority without accidentally blocking the Tokio runtime.
 
@@ -576,6 +582,8 @@ Docker, or the provider accounts themselves.
 - Add resource-aware backend eligibility.
 - Add conservative behavior for unknown capacity.
 - Add resource metrics.
+- Add per-priority synchronous admission limits.
+- Return 429 instead of queueing when a synchronous priority bucket is full.
 
 ### Bluewater 3: Async Compute Router
 

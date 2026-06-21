@@ -63,7 +63,7 @@ cargo watch -x run
 
 ## Project layout
 
-**What exists now (Phases 1–4):**
+**What exists now (Phases 1–5 in progress):**
 
 ```
 src/
@@ -72,6 +72,8 @@ src/
   error.rs          — FairleadError enum with IntoResponse impl
   health.rs         — GET /health → {"status":"ok"}
   metrics.rs        — GET /metrics → Prometheus circuit_state gauge per backend
+  priority.rs       — per-priority synchronous admission limiter
+  resources.rs      — POST/GET resource reports for VRAM/load control-plane state
   router/
     mod.rs          — module entry point
     circuit.rs      — CircuitBreaker: Closed/Open/HalfOpen state machine
@@ -160,8 +162,12 @@ Every request — inference or job — carries one of three priority levels:
 | `batch`      | Vision analysis, per-request embeddings (user submitted but not blocked) | Scheduled when no realtime demand |
 | `background` | Knowledge base ingestion, index rebuilds, clustering | Scheduled only when both higher tiers are idle |
 
-Fairlead implements this with three Tokio channels and a scheduler that always
-drains higher-priority channels before accepting lower-priority work:
+Current synchronous proxy behavior is admission limiting, not queueing. Each
+priority has its own in-flight cap. If the cap is full, Fairlead returns `429`
+and records `outcome="priority_limited"`.
+
+Future async job scheduling should use three Tokio channels and a scheduler that
+always drains higher-priority channels before accepting lower-priority work:
 
 ```rust
 tokio::select! {
@@ -171,8 +177,10 @@ tokio::select! {
 }
 ```
 
-This guarantees a user is never queued behind a background knowledge base rebuild,
-even when the GPU is heavily loaded.
+The current limiter guarantees a full lower-priority bucket does not block a
+higher-priority bucket. The future queued scheduler should guarantee that a user
+is never queued behind a background knowledge base rebuild, even when the GPU is
+heavily loaded.
 
 ## Job types
 
@@ -251,7 +259,7 @@ LOG_LEVEL                    — tracing level: error, warn, info, debug, trace 
 - Cloud provider support (OpenAI, Gemini, Anthropic — same OpenAI-compatible interface)
 - Test: primary down → secondary; same thread_id routes to same node while available
 
-### Phase 5 — VRAM accounting and priority queues
+### Phase 5 — VRAM accounting and priority admission
 
 - `ResourceRegistry`: per-node/backend resource reports with VRAM, load, and TTL
 - `POST /v1/resources/report` and `GET /v1/resources`
@@ -259,10 +267,16 @@ LOG_LEVEL                    — tracing level: error, warn, info, debug, trace 
   `RESOURCE_AWARE_ROUTING=true`; after locality and affinity, it prefers lower
   reported load and then higher available VRAM
 - Inference requests carry a `X-Fairlead-Priority` header (default:
-  `realtime`); priority is currently metadata and metrics, not queueing
-- Three-tier priority queue with Tokio channels (realtime / batch / background)
-- Scheduler drains higher-priority channels before accepting lower-priority work
-- Test: backend with insufficient VRAM is skipped; background jobs yield to realtime
+  `realtime`)
+- Synchronous proxy requests are admitted through per-priority in-flight limits:
+  `realtime`, `batch`, and `background`
+- A full synchronous priority bucket returns `429 Too Many Requests`; it does not
+  wait in a durable queue
+- Priority limit and in-flight gauges are exposed on `/metrics`
+- Durable three-tier queues with Tokio channels are deferred to the async job
+  scheduler
+- Test: backend with insufficient VRAM is skipped; a full batch bucket does not
+  block realtime admission
 
 ### Phase 6 — Async job dispatch
 

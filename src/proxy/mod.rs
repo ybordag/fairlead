@@ -7,12 +7,14 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use bytes::Bytes;
+use futures_util::StreamExt;
 use std::time::Instant;
 use tracing::{info, warn};
 
 use crate::{
     config::{Priority, WorkloadKind},
     metrics::{FallbackLabels, RequestLabels, RetryLabels},
+    priority::PriorityPermit,
     router::{select_backend_excluding_resource, BackendState, ResourceRank},
     AppState,
 };
@@ -60,20 +62,6 @@ async fn forward(
         Ok(priority) => priority,
         Err(message) => return (StatusCode::BAD_REQUEST, message).into_response(),
     };
-    if state.backends.is_empty() {
-        record_request(
-            state,
-            workload,
-            priority,
-            None,
-            None,
-            StatusCode::SERVICE_UNAVAILABLE,
-            "no_backends",
-            started,
-        );
-        return (StatusCode::SERVICE_UNAVAILABLE, "no backends configured").into_response();
-    }
-
     let request_id = headers
         .get("x-request-id")
         .or_else(|| headers.get("x-fairlead-request-id"))
@@ -91,6 +79,47 @@ async fn forward(
         .get("x-fairlead-origin-node")
         .and_then(|v| v.to_str().ok())
         .map(str::to_owned);
+
+    if state.backends.is_empty() {
+        record_request(
+            state,
+            workload,
+            priority,
+            None,
+            origin_node.as_deref(),
+            StatusCode::SERVICE_UNAVAILABLE,
+            "no_backends",
+            started,
+        );
+        return (StatusCode::SERVICE_UNAVAILABLE, "no backends configured").into_response();
+    }
+
+    let Some(priority_permit) = state.priority_limiter.try_acquire(priority) else {
+        record_request(
+            state,
+            workload,
+            priority,
+            None,
+            origin_node.as_deref(),
+            StatusCode::TOO_MANY_REQUESTS,
+            "priority_limited",
+            started,
+        );
+        info!(
+            request_id,
+            workload,
+            priority = priority.as_str(),
+            origin_node = origin_node.as_deref().unwrap_or(""),
+            affinity_key = thread_id.as_deref().unwrap_or(""),
+            selected_backend = "",
+            retry_count = 0,
+            fallback_reason = "",
+            status = StatusCode::TOO_MANY_REQUESTS.as_u16(),
+            outcome = "priority_limited",
+            "request completed"
+        );
+        return (StatusCode::TOO_MANY_REQUESTS, "priority limit reached").into_response();
+    };
 
     // Resolve preferred backend index (if any) then run the fallback chain.
     let preferred = match thread_id {
@@ -326,7 +355,7 @@ async fn forward(
                 outcome = "upstream_5xx",
                 "request completed"
             );
-            return upstream_response(upstream, status);
+            return upstream_response(upstream, status, priority_permit);
         }
 
         backend.circuit.write().await.record_success();
@@ -365,7 +394,7 @@ async fn forward(
             "request completed"
         );
 
-        return upstream_response(upstream, status);
+        return upstream_response(upstream, status, priority_permit);
     }
 }
 
@@ -571,7 +600,11 @@ fn record_retry(
     state.metrics.record_retry(labels);
 }
 
-fn upstream_response(upstream: reqwest::Response, status: StatusCode) -> Response {
+fn upstream_response(
+    upstream: reqwest::Response,
+    status: StatusCode,
+    priority_permit: PriorityPermit,
+) -> Response {
     let content_type = upstream.headers().get(CONTENT_TYPE).cloned();
     let is_sse = content_type
         .as_ref()
@@ -579,7 +612,10 @@ fn upstream_response(upstream: reqwest::Response, status: StatusCode) -> Respons
         .map(|v| v.contains("text/event-stream"))
         .unwrap_or(false);
 
-    let stream = upstream.bytes_stream();
+    let stream = upstream.bytes_stream().map(move |chunk| {
+        let _permit = &priority_permit;
+        chunk
+    });
     let mut builder = Response::builder().status(status);
 
     if let Some(ct) = content_type {
@@ -614,6 +650,7 @@ mod tests {
         time::Duration,
     };
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::sync::Notify;
     use tower::ServiceExt;
     use tracing::Level;
     use tracing_subscriber::fmt::MakeWriter;
@@ -733,6 +770,7 @@ mod tests {
             metrics: crate::metrics::RoutingMetrics::default(),
             resources: crate::resources::ResourceRegistry::default(),
             resource_policy: crate::resources::ResourceRoutingPolicy::default(),
+            priority_limiter: crate::priority::PriorityLimiter::default(),
         };
         start_fairlead_with_state(state).await
     }
@@ -899,6 +937,204 @@ mod tests {
 
         assert_eq!(resp.status(), 400);
         assert!(resp.text().await.unwrap().contains("X-Fairlead-Priority"));
+    }
+
+    #[tokio::test]
+    async fn priority_limit_returns_429_when_bucket_is_full() {
+        let entered = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let mock = Router::new().route(
+            "/v1/chat/completions",
+            post({
+                let entered = entered.clone();
+                let release = release.clone();
+                move || {
+                    let entered = entered.clone();
+                    let release = release.clone();
+                    async move {
+                        entered.notify_one();
+                        release.notified().await;
+                        axum::Json(json!({"source":"slow"}))
+                    }
+                }
+            }),
+        );
+        let backend = start_mock(mock).await;
+        let state = AppState {
+            client: reqwest::Client::new(),
+            backends: vec![BackendState::new(backend, 10, Duration::from_secs(60))],
+            affinity: SessionAffinity::default(),
+            metrics: crate::metrics::RoutingMetrics::default(),
+            resources: crate::resources::ResourceRegistry::default(),
+            resource_policy: crate::resources::ResourceRoutingPolicy::default(),
+            priority_limiter: crate::priority::PriorityLimiter::new(1, 1, 1),
+        };
+        let fairlead = start_fairlead_with_state(state).await;
+
+        let client = reqwest::Client::new();
+        let first_client = client.clone();
+        let first_url = format!("{}/v1/chat/completions", fairlead);
+        let first = tokio::spawn(async move {
+            first_client
+                .post(first_url)
+                .json(&json!({"model":"m","messages":[]}))
+                .send()
+                .await
+                .unwrap()
+        });
+
+        entered.notified().await;
+
+        let rejected = client
+            .post(format!("{}/v1/chat/completions", fairlead))
+            .json(&json!({"model":"m","messages":[]}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(rejected.status(), 429);
+        assert_eq!(rejected.text().await.unwrap(), "priority limit reached");
+
+        let metrics = client
+            .get(format!("{}/metrics", fairlead))
+            .send()
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap();
+        assert!(metrics.contains(
+            "fairlead_requests_total{workload=\"chat_completions\",priority=\"realtime\",backend=\"\",node=\"\",pool=\"\",origin_node=\"\",status=\"429\",outcome=\"priority_limited\"} 1"
+        ));
+
+        release.notify_one();
+        assert_eq!(first.await.unwrap().status(), 200);
+    }
+
+    #[tokio::test]
+    async fn priority_limit_is_held_until_response_body_completes() {
+        let release = Arc::new(Notify::new());
+        let mock = Router::new().route(
+            "/v1/chat/completions",
+            post({
+                let release = release.clone();
+                move || {
+                    let release = release.clone();
+                    async move {
+                        let body = futures_util::stream::once(async move {
+                            release.notified().await;
+                            Ok::<_, std::convert::Infallible>(Bytes::from_static(
+                                br#"{"source":"stream"}"#,
+                            ))
+                        });
+                        Response::builder()
+                            .status(200)
+                            .body(Body::from_stream(body))
+                            .unwrap()
+                    }
+                }
+            }),
+        );
+        let backend = start_mock(mock).await;
+        let state = AppState {
+            client: reqwest::Client::new(),
+            backends: vec![BackendState::new(backend, 10, Duration::from_secs(60))],
+            affinity: SessionAffinity::default(),
+            metrics: crate::metrics::RoutingMetrics::default(),
+            resources: crate::resources::ResourceRegistry::default(),
+            resource_policy: crate::resources::ResourceRoutingPolicy::default(),
+            priority_limiter: crate::priority::PriorityLimiter::new(1, 1, 1),
+        };
+        let fairlead = start_fairlead_with_state(state).await;
+
+        let client = reqwest::Client::new();
+        let first = client
+            .post(format!("{}/v1/chat/completions", fairlead))
+            .json(&json!({"model":"m","messages":[]}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(first.status(), 200);
+
+        let rejected = client
+            .post(format!("{}/v1/chat/completions", fairlead))
+            .json(&json!({"model":"m","messages":[]}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(rejected.status(), 429);
+
+        release.notify_one();
+        assert_eq!(first.text().await.unwrap(), r#"{"source":"stream"}"#);
+    }
+
+    #[tokio::test]
+    async fn priority_limit_buckets_are_independent_through_proxy() {
+        let entered = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let entered_count = Arc::new(AtomicUsize::new(0));
+        let mock = Router::new().route(
+            "/v1/chat/completions",
+            post({
+                let entered = entered.clone();
+                let release = release.clone();
+                let entered_count = entered_count.clone();
+                move || {
+                    let entered = entered.clone();
+                    let release = release.clone();
+                    let entered_count = entered_count.clone();
+                    async move {
+                        entered_count.fetch_add(1, Ordering::SeqCst);
+                        entered.notify_one();
+                        release.notified().await;
+                        axum::Json(json!({"source":"slow"}))
+                    }
+                }
+            }),
+        );
+        let backend = start_mock(mock).await;
+        let state = AppState {
+            client: reqwest::Client::new(),
+            backends: vec![BackendState::new(backend, 10, Duration::from_secs(60))],
+            affinity: SessionAffinity::default(),
+            metrics: crate::metrics::RoutingMetrics::default(),
+            resources: crate::resources::ResourceRegistry::default(),
+            resource_policy: crate::resources::ResourceRoutingPolicy::default(),
+            priority_limiter: crate::priority::PriorityLimiter::new(1, 1, 1),
+        };
+        let fairlead = start_fairlead_with_state(state).await;
+
+        let client = reqwest::Client::new();
+        let batch_client = client.clone();
+        let batch_url = format!("{}/v1/chat/completions", fairlead);
+        let batch = tokio::spawn(async move {
+            batch_client
+                .post(batch_url)
+                .header("x-fairlead-priority", "batch")
+                .json(&json!({"model":"m","messages":[]}))
+                .send()
+                .await
+                .unwrap()
+        });
+
+        entered.notified().await;
+
+        let realtime_client = client.clone();
+        let realtime_url = format!("{}/v1/chat/completions", fairlead);
+        let realtime = tokio::spawn(async move {
+            realtime_client
+                .post(realtime_url)
+                .json(&json!({"model":"m","messages":[]}))
+                .send()
+                .await
+                .unwrap()
+        });
+
+        entered.notified().await;
+        assert_eq!(entered_count.load(Ordering::SeqCst), 2);
+
+        release.notify_waiters();
+        assert_eq!(batch.await.unwrap().status(), 200);
+        assert_eq!(realtime.await.unwrap().status(), 200);
     }
 
     #[tokio::test]
@@ -1666,6 +1902,7 @@ mod tests {
                 chat_completions_required_vram_mb: 1024,
                 embeddings_required_vram_mb: 512,
             },
+            priority_limiter: crate::priority::PriorityLimiter::default(),
         };
         let fairlead = start_fairlead_with_state(state).await;
 
@@ -1744,6 +1981,7 @@ mod tests {
                 chat_completions_required_vram_mb: 1024,
                 embeddings_required_vram_mb: 512,
             },
+            priority_limiter: crate::priority::PriorityLimiter::default(),
         };
         let fairlead = start_fairlead_with_state(state).await;
 
@@ -1809,6 +2047,7 @@ mod tests {
                 chat_completions_required_vram_mb: 1024,
                 embeddings_required_vram_mb: 512,
             },
+            priority_limiter: crate::priority::PriorityLimiter::default(),
         };
         let fairlead = start_fairlead_with_state(state).await;
 
@@ -1856,6 +2095,7 @@ mod tests {
                 chat_completions_required_vram_mb: 1024,
                 embeddings_required_vram_mb: 512,
             },
+            priority_limiter: crate::priority::PriorityLimiter::default(),
         };
         let fairlead = start_fairlead_with_state(state).await;
 
@@ -1894,6 +2134,7 @@ mod tests {
             metrics: crate::metrics::RoutingMetrics::default(),
             resources: crate::resources::ResourceRegistry::default(),
             resource_policy: crate::resources::ResourceRoutingPolicy::default(),
+            priority_limiter: crate::priority::PriorityLimiter::default(),
         };
         let app = build_router(state);
 
@@ -2133,6 +2374,7 @@ mod tests {
             metrics: crate::metrics::RoutingMetrics::default(),
             resources: crate::resources::ResourceRegistry::default(),
             resource_policy: crate::resources::ResourceRoutingPolicy::default(),
+            priority_limiter: crate::priority::PriorityLimiter::default(),
         };
         let fairlead = start_fairlead_with_state(state).await;
 

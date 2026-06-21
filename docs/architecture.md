@@ -218,6 +218,7 @@ Every inference request goes through a decision pipeline:
 ```
 request arrives
   → check priority (realtime / batch / background)
+  → acquire a synchronous admission slot for that priority, or return 429
   → find eligible backends (circuit closed + VRAM headroom)
   → check session affinity (prefer same node for KV cache)
   → proxy to selected backend, stream response back
@@ -271,9 +272,14 @@ A background index rebuild that started at midnight will not slow down a user's
 chat response at 9am. This is enforced structurally, not by policy.
 
 Current Fairlead parses `X-Fairlead-Priority` on synchronous requests, defaults
-missing priority to `realtime`, rejects unknown values with `400`, and exposes
-priority on routing metrics. The actual priority queue and concurrency policy
-are still future Phase 5 work.
+missing priority to `realtime`, rejects unknown values with `400`, enforces
+per-priority in-flight admission limits, and exposes priority on routing
+metrics.
+
+This is not yet a durable priority queue. A full synchronous bucket fails fast
+with `429 Too Many Requests`; Fairlead does not currently wait in a queue for
+capacity. Queue depth, queue wait time, starvation policy, and async job
+scheduling remain future scheduler work.
 
 ---
 

@@ -7,10 +7,9 @@ health, circuit state, and session affinity.
 
 The name comes from sailing: a fairlead is a fitting that guides lines in exactly the right direction without friction or fouling.
 
-**Status:** Phase 4 complete. Fairlead currently runs as an Axum HTTP service
-with `/health`, `/metrics`, `/v1/chat/completions`, and `/v1/embeddings`.
-The `bluewater` branch is the generalization effort to make Fairlead useful
-beyond a single application.
+**Status:** Phase 5 in progress on the `trim` branch. Fairlead currently runs
+as an Axum HTTP service with `/health`, `/metrics`, `/v1/resources`,
+`/v1/resources/report`, `/v1/chat/completions`, and `/v1/embeddings`.
 
 ---
 
@@ -33,9 +32,12 @@ The current service provides:
   `/v1/resources`, with stale-report detection.
 - **Priority metadata** through `X-Fairlead-Priority` with `realtime`, `batch`,
   and `background` values. Missing priority defaults to `realtime`.
+- **Per-priority admission limits** for synchronous proxy requests. A full
+  priority bucket fails fast with `429 Too Many Requests` instead of silently
+  overloading the service.
 - **Prometheus-style metrics** for backend circuit state, request outcomes,
-  latency, fallback reasons, retry reasons, priority, and reported resource
-  state.
+  latency, fallback reasons, retry reasons, priority limits/in-flight counts,
+  and reported resource state.
 
 Fairlead does **not** run inference itself. It routes requests to model servers
 such as vLLM. vLLM owns model loading, GPU execution, KV cache management, and
@@ -187,6 +189,20 @@ CHAT_COMPLETIONS_REQUIRED_VRAM_MB=1024 \
 EMBEDDINGS_REQUIRED_VRAM_MB=512 \
 cargo run
 ```
+
+Priority admission limits are synchronous request caps, not durable queues. Tune
+them with:
+
+```bash
+PRIORITY_REALTIME_LIMIT=8 \
+PRIORITY_BATCH_LIMIT=4 \
+PRIORITY_BACKGROUND_LIMIT=2 \
+cargo run
+```
+
+When a bucket is full, Fairlead returns `429 Too Many Requests` and records
+`outcome="priority_limited"` in request metrics. Full priority queues, wait-time
+metrics, and async job scheduling remain future scheduler work.
 
 Chat completions are proxied to one of the configured backends:
 
