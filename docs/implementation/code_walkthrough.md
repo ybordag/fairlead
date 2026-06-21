@@ -423,7 +423,8 @@ pub struct AppState {
 - `resource_policy` controls whether resource-aware eligibility is active.
 - `priority_limiter` stores per-priority synchronous admission limits.
 - `jobs` stores first-slice in-memory async job records.
-- `workers` stores non-dispatching worker registration and heartbeat state.
+- `workers` stores worker registration, heartbeat, stale status, and capacity
+  accounting.
 
 `#[derive(Clone)]` asks Rust to generate a `clone()` implementation. Axum clones
 state handles into request handlers. This is cheap here because the expensive
@@ -640,6 +641,14 @@ Router::new()
         "/v1/workers/:worker_id/jobs/:job_id/renew",
         post(scheduler::renew_worker_job_lease_handler),
     )
+    .route(
+        "/v1/workers/:worker_id/jobs/:job_id/complete",
+        post(scheduler::complete_worker_job_handler),
+    )
+    .route(
+        "/v1/workers/:worker_id/jobs/:job_id/fail",
+        post(scheduler::fail_worker_job_handler),
+    )
     .route("/v1/workers/:id/heartbeat", post(workers::heartbeat_worker))
     .route("/v1/chat/completions", post(proxy::chat_completions))
     .route("/v1/embeddings", post(proxy::embeddings))
@@ -664,6 +673,10 @@ This means:
 - `POST /v1/workers/{id}/claim` calls `scheduler::claim_worker_job_handler`.
 - `POST /v1/workers/{worker_id}/jobs/{job_id}/renew` calls
   `scheduler::renew_worker_job_lease_handler`.
+- `POST /v1/workers/{worker_id}/jobs/{job_id}/complete` calls
+  `scheduler::complete_worker_job_handler`.
+- `POST /v1/workers/{worker_id}/jobs/{job_id}/fail` calls
+  `scheduler::fail_worker_job_handler`.
 - `POST /v1/workers/{id}/heartbeat` calls `workers::heartbeat_worker`.
 - `POST /v1/chat/completions` calls `proxy::chat_completions`.
 - `POST /v1/embeddings` calls `proxy::embeddings`.
@@ -1221,12 +1234,35 @@ fairlead_job_queue_wait_seconds_max{priority="batch",type="vision_analysis"} 2.4
 The wait metric only considers jobs still in `queued` state. Cancelled jobs are
 removed from queue depth and wait-time accounting.
 
-Worker registration exposes current non-dispatching worker availability:
+Terminal async job duration is aggregated by priority, type, and final status:
+
+```text
+fairlead_job_duration_seconds_count{priority="batch",type="vision_analysis",status="complete"} 1
+fairlead_job_duration_seconds_sum{priority="batch",type="vision_analysis",status="complete"} 1.240000
+fairlead_job_duration_seconds_max{priority="batch",type="vision_analysis",status="complete"} 1.240000
+```
+
+The duration metric only includes terminal jobs: `complete`, `failed`, and
+`cancelled`. Running and queued jobs are excluded.
+
+Worker registration exposes current worker availability:
 
 ```text
 fairlead_workers{type="vision_analysis",status="available"} 1
 fairlead_workers{type="embed_batch",status="stale"} 1
 ```
+
+Worker capacity accounting exposes the current leased load per worker:
+
+```text
+fairlead_worker_in_flight_jobs{worker="vision-a",node="spark-a"} 1
+fairlead_worker_max_concurrent_jobs{worker="vision-a",node="spark-a"} 2
+fairlead_worker_available_job_slots{worker="vision-a",node="spark-a"} 1
+```
+
+`max_concurrent_jobs` is optional. Workers without a configured maximum can keep
+claiming compatible jobs, and Fairlead omits the max/available-slot gauges for
+that worker.
 
 `GET /v1/scheduler/preview` asks the scheduler to inspect the in-memory queues
 and registered workers:
@@ -1244,20 +1280,29 @@ lease is created, and Fairlead does not call the worker endpoint.
 
 `POST /v1/workers/{id}/claim` is the first mutating worker-pull scheduler path:
 
-1. Fairlead looks up the worker by ID.
-2. If the worker is missing, Fairlead returns `404`.
-3. If the worker is stale, Fairlead returns `409`.
-4. Otherwise, `JobRegistry::requeue_expired_leases()` sweeps running jobs whose
-   leases have expired. Jobs with attempts left return to their priority queue;
-   jobs with exhausted attempts become `failed`.
-5. `JobRegistry::claim_next_for_worker()` scans queued jobs in
+1. Fairlead sweeps expired leases before assigning more work. Jobs with attempts
+   left return to their priority queue; jobs with exhausted attempts become
+   `failed`; the previous worker's in-flight slot is released.
+2. Fairlead looks up the worker by ID.
+3. If the worker is missing, Fairlead returns `404`.
+4. If the worker is stale, Fairlead returns `409`.
+5. If the worker is already at `max_concurrent_jobs`, Fairlead returns `409`.
+6. Otherwise, Fairlead acquires one worker slot.
+7. `JobRegistry::claim_next_for_worker()` scans queued jobs in
    priority/FIFO order for a job type the worker supports.
-6. If a match exists, the job becomes `running`, `attempts` increments, lease
+8. If a match exists, the job becomes `running`, `attempts` increments, lease
    metadata is attached, and the job is removed from queue-depth accounting.
-7. If no compatible queued job exists, Fairlead returns `204`.
+9. If no compatible queued job exists, Fairlead releases the worker slot and
+   returns `204`.
 
-The claim endpoint still does not call the worker process. It only grants the
-worker a bounded lease and returns the job payload to run.
+The claim endpoint still does not push work to the worker process. It grants the
+worker a bounded lease and returns the job payload to run. This is worker-pull
+execution, not Fairlead-initiated push dispatch.
+
+Lease expiry is Fairlead's current per-attempt timeout mechanism. When a sweep
+finds an expired running lease, the job records `attempt timed out` in `error`.
+If attempts remain, the job returns to `queued` with `retryable: true`; if
+attempts are exhausted, the job becomes `failed` with `retryable: false`.
 
 `POST /v1/workers/{worker_id}/jobs/{job_id}/renew` extends a running lease:
 
@@ -1272,6 +1317,31 @@ worker a bounded lease and returns the job payload to run.
    returns the job.
 6. If the job is missing, Fairlead returns `404`. If it is not running or is
    leased to another worker, Fairlead returns `409`.
+
+`POST /v1/workers/{worker_id}/jobs/{job_id}/complete` closes a running attempt:
+
+1. Fairlead validates that the worker exists and is fresh.
+2. Fairlead sweeps expired leases before completion, so late completion cannot
+   resurrect an expired attempt.
+3. `JobRegistry::complete_lease()` checks that the job exists, is still
+   `running`, and is leased to that worker.
+4. If those checks pass, the job becomes `complete`, the result payload is
+   stored, error state is cleared, lease metadata is removed, and the worker's
+   in-flight slot is released.
+5. Missing jobs return `404`; stale workers, wrong workers, expired leases, and
+   non-running jobs return `409`.
+
+`POST /v1/workers/{worker_id}/jobs/{job_id}/fail` reports an attempt failure:
+
+1. Fairlead validates the worker and rejects empty error messages.
+2. Fairlead sweeps expired leases before applying the failure.
+3. `JobRegistry::fail_lease()` checks that the job is running and leased to that
+   worker.
+4. The failure message and retryable flag are stored on the job.
+5. Retryable failures return the job to its priority queue when attempts remain.
+6. Non-retryable failures, or retryable failures after max attempts, mark the
+   job `failed`.
+7. Both requeue and terminal-failure paths release the worker's in-flight slot.
 
 The proxy logs structured fields for the same decision: request ID, workload,
 origin node, affinity key, selected backend, retry count, fallback reason,
@@ -1335,8 +1405,9 @@ The current code does not:
 - Estimate token count or memory use.
 - Manage CUDA memory.
 - Enforce complete pool-aware routing and placement policies.
-- Dispatch jobs to workers, enforce leases, or deliver callbacks.
+- Push-dispatch jobs to workers or deliver callbacks.
 - Reserve GPU memory for a request; resource reports are cooperative control-plane
   hints, not allocator-level reservations.
 
-Those are future roadmap phases, not current behavior.
+Push dispatch, callbacks, durable state, completed-job pruning, and complete
+pool-aware placement are future roadmap phases, not current behavior.

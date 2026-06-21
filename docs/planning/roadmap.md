@@ -107,10 +107,12 @@ Fairlead currently provides:
 - In-memory async job API for submission, listing, polling, and cancellation.
 - In-memory per-priority async queue state.
 - Queue depth and queue wait-time metrics.
-- Non-dispatching worker registration, heartbeat, stale status, and
-  availability metrics.
+- Worker registration, heartbeat, stale status, and availability metrics.
 - Non-dispatching scheduler preview endpoint that matches queued jobs to fresh,
   capable workers without leasing or dispatching.
+- Worker-pull claims, lease renewal, completion, failure, retryable requeue, and
+  worker in-flight capacity accounting.
+- Terminal job duration metrics and explicit timeout state for expired attempts.
 - Documentation for a manual two-node DGX Spark deployment.
 - Sanitized fixture conventions and ignore rules for private local config.
 
@@ -120,9 +122,8 @@ It does not yet provide:
   policy across sync backends and async workers.
 - CPU resource accounting and richer resource dimensions beyond coarse VRAM/load.
 - Durable priority queues or durable job persistence.
-- Worker leases, worker-pull claims, callback delivery, or async worker
-  execution.
-- Worker deregistration, graceful shutdown, or utilization metrics.
+- Callback delivery or durable async worker execution state.
+- Worker deregistration, graceful shutdown, or callback success/failure metrics.
 
 ## Easy Tasks
 
@@ -409,8 +410,9 @@ Scope:
 - [x] Add queue depth by priority and workload.
 - [x] Add queue wait time by priority and workload.
 - [x] Add worker availability.
-- [ ] Add worker utilization.
-- [ ] Add job duration and callback success/failure.
+- [x] Add worker utilization.
+- [x] Add job duration.
+- [ ] Add callback success/failure.
 
 Acceptance criteria:
 
@@ -605,7 +607,8 @@ Needed metrics:
 - Queue wait time by priority and workload.
 - Worker availability and utilization.
 - Resource used/free by node and resource kind.
-- Job duration and callback success/failure.
+- Job duration.
+- Callback success/failure.
 
 Tracing should carry:
 
@@ -719,14 +722,19 @@ execution simple and bounded.
 Scope: let workers complete or fail leased jobs and make execution behavior
 observable.
 
-- Define the worker result contract.
-- Add completion and failure endpoints.
-- Enforce bounded attempts, retry limits, and per-attempt timeouts.
-- Track worker in-flight counts and capacity usage.
-- Add worker utilization metrics.
-- Add job duration metrics.
-- Add tests for success, retryable failure, retry exhaustion, timeout, and
-  utilization accounting.
+- [x] Define the worker result contract.
+- [x] Add completion and failure endpoints.
+- [x] Enforce bounded attempts and retry limits for reported worker failures.
+- [x] Enforce per-attempt timeouts.
+- [x] Track worker in-flight counts and capacity usage.
+- [x] Add worker utilization metrics.
+- [x] Add job duration metrics.
+- [x] Add tests for timeout accounting.
+- [x] Add tests for success, retryable failure, and retry exhaustion.
+- [x] Add tests for utilization accounting.
+- [x] Add tests for duration accounting.
+- [x] Add tests for stale/unknown workers on result endpoints and duplicate
+  terminal result reports.
 
 ### Phase 6E: Durable Job State and Recovery
 

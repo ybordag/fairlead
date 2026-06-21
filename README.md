@@ -7,11 +7,14 @@ health, circuit state, and session affinity.
 
 The name comes from sailing: a fairlead is a fitting that guides lines in exactly the right direction without friction or fouling.
 
-**Status:** Phase 6C is in progress on the `cleat` branch. Fairlead currently
-runs as an Axum HTTP service with `/health`, `/metrics`, `/v1/models`,
+**Status:** Phase 6D is complete on the `halyard` branch and pending final
+review/PR merge. Fairlead currently runs as an Axum HTTP service with `/health`,
+`/metrics`, `/v1/models`,
 `/v1/resources`, `/v1/resources/report`, `/v1/jobs`, `/v1/jobs/{id}`,
 `/v1/workers`, `/v1/workers/{id}/claim`,
-`/v1/workers/{worker_id}/jobs/{job_id}/renew`, `/v1/scheduler/preview`,
+`/v1/workers/{worker_id}/jobs/{job_id}/renew`,
+`/v1/workers/{worker_id}/jobs/{job_id}/complete`,
+`/v1/workers/{worker_id}/jobs/{job_id}/fail`, `/v1/scheduler/preview`,
 `/v1/chat/completions`, and `/v1/embeddings`.
 
 ---
@@ -40,7 +43,8 @@ The current service provides:
   overloading the service.
 - **Prometheus-style metrics** for backend circuit state, request outcomes,
   latency, fallback reasons, retry reasons, priority limits/in-flight counts,
-  and reported resource state.
+  reported resource state, async queue depth/wait, worker utilization, and
+  terminal job duration.
 
 Fairlead does **not** run inference itself. It routes requests to model servers
 such as vLLM. vLLM owns model loading, GPU execution, KV cache management, and
@@ -80,10 +84,20 @@ Implemented generalization work includes:
 - **Worker-pull claim groundwork** that leases a compatible queued job to a
   fresh worker, marks it running, renews held leases, and requeues expired
   leases when attempts remain.
+- **Initial worker result reporting** so the lease holder can complete a job
+  with a result or report failure, with retryable failures requeued while
+  attempts remain.
+- **Worker capacity accounting** so claims respect `max_concurrent_jobs` and
+  release in-flight slots on completion, failure, cancellation, or expired
+  leases.
+- **Per-attempt timeout state** so expired leases record `attempt timed out`,
+  requeue while attempts remain, and fail when attempts are exhausted.
+- **Terminal job duration metrics** grouped by priority, job type, and terminal
+  status.
 
-Future Phase 6 subphases add worker execution, durable job state, callback
-delivery, and async completion metrics. Later phases add complete pool-aware
-routing, adapter boundaries, and cloud fallback.
+Future Phase 6 subphases add durable job state, callback delivery, and callback
+success/failure metrics. Later phases add complete pool-aware routing, adapter
+boundaries, and cloud fallback.
 
 See [`docs/planning/roadmap.md`](docs/planning/roadmap.md) for the
 implementation plan and acceptance criteria.
@@ -219,7 +233,8 @@ cargo run
 
 When a bucket is full, Fairlead returns `429 Too Many Requests` and records
 `outcome="priority_limited"` in request metrics. Synchronous requests still do
-not wait in a queue; full async scheduling remains future scheduler work.
+not wait in a queue; durable async scheduling policy remains future scheduler
+work.
 
 Chat completions are proxied to one of the configured backends:
 

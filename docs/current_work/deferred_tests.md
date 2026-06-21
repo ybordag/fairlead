@@ -99,11 +99,11 @@ synchronous and async compute.
 
 ### `phase_6c_worker_claims_and_leases`
 
-When later phases build on Phase 6C worker-pull claims and leases, add tests
-for:
+When later phases build on Phase 6C/6D worker-pull claims, leases, and result
+reporting, add tests for:
 
-- cancellation races between cancel and future complete/fail endpoints
-- lease ownership checks for future complete/fail endpoints
+- concurrent cancellation versus complete/fail requests against the same leased
+  job
 - background lease sweep behavior, if Fairlead adds a scheduler loop instead of
   claim-time opportunistic sweeps only
 - opt-in local multi-process e2e: start Fairlead, register two fake workers,
@@ -115,28 +115,44 @@ for:
 
 **Why deferred:** Phase 6B now has the in-memory job API, worker registry, queue
 metrics, and non-mutating scheduler preview. These tests require mutating claims,
-lease metadata, running-job state, and later worker execution endpoints. Cleat
-now covers the claim endpoint, duplicate-claim prevention, stale worker
-exclusion, unsupported job types, priority ordering, FIFO ordering,
-queued/running cancellation basics, claim-time expired lease requeue/failure,
-lease renewal, renewal ownership checks, and cancellation ordering around
-running leases and requeued jobs. The remaining race tests need future
-complete/fail endpoints or a heavier multi-process/deployment harness.
+lease metadata, running-job state, and worker execution endpoints. Cleat covers
+the claim endpoint, duplicate-claim prevention, stale worker exclusion,
+unsupported job types, priority ordering, FIFO ordering, queued/running
+cancellation basics, claim-time expired lease requeue/failure, lease renewal,
+renewal ownership checks, and cancellation ordering around running leases and
+requeued jobs. Halyard adds result endpoints, timeout state, capacity
+accounting, and duration metrics. The remaining race and e2e tests need a
+heavier multi-process/deployment harness. Halyard's in-process suite covers
+duplicate result reports after terminal state.
 
 ### `phase_6d_worker_execution_and_utilization`
 
-When Phase 6D implements worker completion/failure reporting, add tests for:
+After Phase 6D, add tests for:
 
-- successful completion of a leased job
-- retryable worker failure requeueing a job when attempts remain
-- retry exhaustion marking a job permanently failed
-- per-attempt timeout handling
-- worker in-flight and capacity accounting
-- worker utilization metrics
-- job duration metrics
+- configurable per-workload timeout policy, if future phases allow different
+  timeout durations by job type
+- concurrent claims racing against `max_concurrent_jobs` once the scheduler runs
+  under a heavier multi-worker harness
+- local multi-process e2e: start Fairlead, register fake workers, submit jobs,
+  claim work, complete/fail work, verify terminal state, retry behavior, worker
+  capacity release, timeout state, duration metrics, and utilization metrics
+- opt-in DGX Spark e2e with fake async workers on the two connected nodes:
+  register node-local workers, claim/renew/complete jobs from each node, verify
+  capacity metrics and timeout/retry state, and keep real model execution out of
+  the test unless a later workload-specific smoke test needs it
+- concurrency stress: many workers claim against the same queue and limited
+  `max_concurrent_jobs` values, asserting no duplicate running job leases and no
+  worker exceeds configured capacity
 
-**Why deferred:** These need worker execution endpoints, bounded attempts,
-timeout policy, and utilization counters, which are deliberately outside 6B.
+**Why deferred:** Halyard's first slice covers completion, retryable failure
+requeue, non-retryable failure, retry exhaustion, and endpoint ownership checks.
+The current Halyard branch also covers in-flight accounting, capacity release on
+completion/failure/cancellation/expiry, capacity rejection, and utilization
+metric output. It also covers terminal job duration snapshots and metrics. The
+current Halyard branch also covers explicit timeout error state for expired
+leases, unknown/stale workers on result endpoints, and duplicate result reports
+after terminal state. The remaining tests need configurable timeout policy or a
+heavier concurrency/e2e harness.
 
 ### `phase_6e_job_persistence_and_recovery`
 

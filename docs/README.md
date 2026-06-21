@@ -10,7 +10,7 @@ detail.
   run commands, and the documentation index.
 - [`planning/architecture.md`](planning/architecture.md) — how Fairlead fits
   with Rhizome, vLLM, GPU nodes, resource reporting, priority admission, and
-  future async jobs.
+  worker-pull async jobs.
 - [`implementation/code_walkthrough.md`](implementation/code_walkthrough.md) —
   end-to-end Rust walkthrough from process startup to proxied response.
 
@@ -18,7 +18,7 @@ detail.
 
 - [`planning/design.md`](planning/design.md) — design horizon and longer-term
   product shape.
-- [`planning/roadmap.md`](planning/roadmap.md) — completed phases, current Tackle
+- [`planning/roadmap.md`](planning/roadmap.md) — completed phases, Phase 6E/6F
   scope, future phases, acceptance criteria, and deferred work.
 
 ## Implementation And Examples
@@ -32,7 +32,9 @@ detail.
 
 ## Current Work
 
-- [`current_work/phase_6c_cleat.md`](current_work/phase_6c_cleat.md) — active
+- [`current_work/phase_6d_halyard.md`](current_work/phase_6d_halyard.md) —
+  completed Phase 6D worker execution, retries, and utilization notes.
+- [`current_work/phase_6c_cleat.md`](current_work/phase_6c_cleat.md) — completed
   Phase 6C worker-pull claims and leases notes.
 - [`current_work/phase_6b_tackle.md`](current_work/phase_6b_tackle.md) — completed
   Phase 6B scope and progress notes.

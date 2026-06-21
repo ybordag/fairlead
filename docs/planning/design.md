@@ -59,6 +59,8 @@ POST /v1/workers/register
 POST /v1/workers/{id}/heartbeat
 POST /v1/workers/{id}/claim
 POST /v1/workers/{worker_id}/jobs/{job_id}/renew
+POST /v1/workers/{worker_id}/jobs/{job_id}/complete
+POST /v1/workers/{worker_id}/jobs/{job_id}/fail
 GET  /v1/workers
 GET  /health
 GET  /metrics
@@ -79,7 +81,10 @@ The scheduler preview endpoint is non-mutating: it shows which queued job and
 fresh compatible worker would match next. The worker claim endpoint grants a
 bounded lease and marks a compatible job running. The worker lease renewal
 endpoint extends a running lease only for the worker currently holding it.
-Durable queues, execution, and callback delivery are future Phase 6 subphases.
+The worker result endpoints let that same lease holder complete a job or report
+retryable/non-retryable failure. Expired leases record timeout state and
+terminal jobs emit duration metrics. Durable queues, richer recovery behavior,
+and callback delivery are future Phase 6 subphases.
 
 ---
 
@@ -238,7 +243,7 @@ it on crash, or allocate GPU resources. That is k3s's job.
 
 ## Extensibility
 
-- **Async embedding service** — future job queue for batch embeddings
+- **Async embedding service** — future worker implementation for batch embeddings
 - **Context chunking service** — async chunking for RAG pipelines, job-queue backed
 - **Additional agent applications** — each registers its own worker pool
 

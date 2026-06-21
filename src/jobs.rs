@@ -15,6 +15,8 @@ use tokio::sync::RwLock;
 
 use crate::{config::Priority, AppState};
 
+pub const ATTEMPT_TIMEOUT_ERROR: &str = "attempt timed out";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum JobKind {
@@ -49,6 +51,16 @@ impl JobStatus {
     fn is_terminal(&self) -> bool {
         matches!(self, Self::Complete | Self::Failed | Self::Cancelled)
     }
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Queued => "queued",
+            Self::Running => "running",
+            Self::Complete => "complete",
+            Self::Failed => "failed",
+            Self::Cancelled => "cancelled",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -72,11 +84,19 @@ pub struct JobRecord {
     pub status: JobStatus,
     pub payload: Value,
     pub callback_url: Option<String>,
+    pub result: Option<Value>,
+    pub error: Option<JobFailure>,
     pub attempts: u32,
     pub max_attempts: u32,
     pub lease: Option<JobLease>,
     pub created_at_unix_ms: u128,
     pub updated_at_unix_ms: u128,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct JobFailure {
+    pub message: String,
+    pub retryable: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -90,6 +110,19 @@ pub struct JobLease {
 #[derive(Debug, Clone, Serialize)]
 pub struct JobResponse {
     pub job: JobRecord,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct CompleteJobRequest {
+    #[serde(default)]
+    pub result: Value,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct FailJobRequest {
+    pub error: String,
+    #[serde(default = "default_retryable_failure")]
+    pub retryable: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -115,10 +148,21 @@ pub struct JobQueueWaitSnapshot {
     pub wait_seconds_max: f64,
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
+pub struct JobDurationSnapshot {
+    pub priority: &'static str,
+    pub kind: &'static str,
+    pub status: &'static str,
+    pub count: usize,
+    pub duration_seconds_sum: f64,
+    pub duration_seconds_max: f64,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct LeaseExpiryReport {
     pub requeued: usize,
     pub failed: usize,
+    pub released_workers: Vec<String>,
 }
 
 #[derive(Clone, Default)]
@@ -180,6 +224,8 @@ impl JobRegistry {
             status: JobStatus::Queued,
             payload: request.payload,
             callback_url,
+            result: None,
+            error: None,
             attempts: 0,
             max_attempts: 3,
             lease: None,
@@ -281,6 +327,53 @@ impl JobRegistry {
         snapshots
     }
 
+    pub async fn terminal_duration_snapshots(&self) -> Vec<JobDurationSnapshot> {
+        let guard = self.inner.read().await;
+        let mut snapshots: Vec<JobDurationSnapshot> = Vec::new();
+
+        for id in &guard.order {
+            let Some(job) = guard.jobs.get(id) else {
+                continue;
+            };
+            if !job.status.is_terminal() {
+                continue;
+            }
+
+            let duration_seconds = job
+                .updated_at_unix_ms
+                .saturating_sub(job.created_at_unix_ms) as f64
+                / 1000.0;
+
+            if let Some(snapshot) = snapshots.iter_mut().find(|s| {
+                s.priority == job.priority.as_str()
+                    && s.kind == job.kind.as_str()
+                    && s.status == job.status.as_str()
+            }) {
+                snapshot.count += 1;
+                snapshot.duration_seconds_sum += duration_seconds;
+                snapshot.duration_seconds_max = snapshot.duration_seconds_max.max(duration_seconds);
+            } else {
+                snapshots.push(JobDurationSnapshot {
+                    priority: job.priority.as_str(),
+                    kind: job.kind.as_str(),
+                    status: job.status.as_str(),
+                    count: 1,
+                    duration_seconds_sum: duration_seconds,
+                    duration_seconds_max: duration_seconds,
+                });
+            }
+        }
+
+        snapshots.sort_by_key(|snapshot| {
+            (
+                priority_rank(snapshot.priority),
+                kind_rank(snapshot.kind),
+                status_rank(snapshot.status),
+            )
+        });
+        snapshots
+    }
+
     pub async fn queued_jobs_by_priority(&self) -> Vec<JobRecord> {
         let guard = self.inner.read().await;
         let mut jobs = Vec::new();
@@ -318,6 +411,7 @@ impl JobRegistry {
         let now = unix_ms();
         job.status = JobStatus::Running;
         job.attempts += 1;
+        job.result = None;
         job.lease = Some(JobLease {
             worker_id: worker_id.to_string(),
             attempt: job.attempts,
@@ -352,10 +446,17 @@ impl JobRegistry {
                 continue;
             }
 
+            report.released_workers.push(lease.worker_id.clone());
+            let retryable = job.attempts < job.max_attempts;
+            job.result = None;
+            job.error = Some(JobFailure {
+                message: ATTEMPT_TIMEOUT_ERROR.into(),
+                retryable,
+            });
             job.lease = None;
             job.updated_at_unix_ms = now;
 
-            if job.attempts < job.max_attempts {
+            if retryable {
                 job.status = JobStatus::Queued;
                 requeued_jobs.push((job.priority, id));
                 report.requeued += 1;
@@ -409,6 +510,88 @@ impl JobRegistry {
         RenewJobLeaseResult::Renewed(job.clone())
     }
 
+    pub async fn complete_lease(
+        &self,
+        id: &str,
+        worker_id: &str,
+        result: Value,
+    ) -> FinishJobResult {
+        let mut guard = self.inner.write().await;
+        let Some(job) = guard.jobs.get_mut(id) else {
+            return FinishJobResult::NotFound;
+        };
+
+        if job.status != JobStatus::Running {
+            return FinishJobResult::NotRunning(job.clone());
+        }
+
+        let Some(lease) = &job.lease else {
+            return FinishJobResult::NotRunning(job.clone());
+        };
+
+        if lease.worker_id != worker_id {
+            return FinishJobResult::LeaseNotHeld(job.clone());
+        }
+
+        let now = unix_ms();
+        if lease.expires_at_unix_ms <= now {
+            return FinishJobResult::Expired(job.clone());
+        }
+
+        job.status = JobStatus::Complete;
+        job.result = Some(result);
+        job.error = None;
+        job.lease = None;
+        job.updated_at_unix_ms = now;
+        FinishJobResult::Completed(job.clone())
+    }
+
+    pub async fn fail_lease(
+        &self,
+        id: &str,
+        worker_id: &str,
+        failure: JobFailure,
+    ) -> FinishJobResult {
+        let mut guard = self.inner.write().await;
+        let Some(job) = guard.jobs.get_mut(id) else {
+            return FinishJobResult::NotFound;
+        };
+
+        if job.status != JobStatus::Running {
+            return FinishJobResult::NotRunning(job.clone());
+        }
+
+        let Some(lease) = &job.lease else {
+            return FinishJobResult::NotRunning(job.clone());
+        };
+
+        if lease.worker_id != worker_id {
+            return FinishJobResult::LeaseNotHeld(job.clone());
+        }
+
+        let now = unix_ms();
+        if lease.expires_at_unix_ms <= now {
+            return FinishJobResult::Expired(job.clone());
+        }
+
+        job.result = None;
+        job.error = Some(failure.clone());
+        job.lease = None;
+        job.updated_at_unix_ms = now;
+
+        if failure.retryable && job.attempts < job.max_attempts {
+            job.status = JobStatus::Queued;
+            let priority = job.priority;
+            let id = job.id.clone();
+            let job = job.clone();
+            guard.queues.for_priority_mut(priority).push_back(id);
+            FinishJobResult::Requeued(job)
+        } else {
+            job.status = JobStatus::Failed;
+            FinishJobResult::Failed(job.clone())
+        }
+    }
+
     pub async fn cancel(&self, id: &str) -> CancelJobResult {
         let mut guard = self.inner.write().await;
         let Some(job) = guard.jobs.get_mut(id) else {
@@ -442,6 +625,16 @@ pub enum RenewJobLeaseResult {
     NotFound,
 }
 
+pub enum FinishJobResult {
+    Completed(JobRecord),
+    Requeued(JobRecord),
+    Failed(JobRecord),
+    NotRunning(JobRecord),
+    LeaseNotHeld(JobRecord),
+    Expired(JobRecord),
+    NotFound,
+}
+
 pub async fn submit_job(
     State(state): State<AppState>,
     Json(request): Json<SubmitJobRequest>,
@@ -467,7 +660,12 @@ pub async fn get_job(State(state): State<AppState>, Path(id): Path<String>) -> R
 
 pub async fn cancel_job(State(state): State<AppState>, Path(id): Path<String>) -> Response {
     match state.jobs.cancel(&id).await {
-        CancelJobResult::Cancelled(job) => Json(JobResponse { job }).into_response(),
+        CancelJobResult::Cancelled(job) => {
+            if let Some(lease) = &job.lease {
+                state.workers.release_slot(&lease.worker_id).await;
+            }
+            Json(JobResponse { job }).into_response()
+        }
         CancelJobResult::AlreadyTerminal(job) => {
             (StatusCode::CONFLICT, Json(JobResponse { job })).into_response()
         }
@@ -486,6 +684,10 @@ fn normalize_callback_url(callback_url: Option<String>) -> Result<Option<String>
     Ok(Some(trimmed.to_string()))
 }
 
+fn default_retryable_failure() -> bool {
+    true
+}
+
 fn priority_rank(priority: &str) -> u8 {
     match priority {
         "realtime" => 0,
@@ -502,6 +704,17 @@ fn kind_rank(kind: &str) -> u8 {
         "index_build" => 2,
         "cluster" => 3,
         _ => 4,
+    }
+}
+
+fn status_rank(status: &str) -> u8 {
+    match status {
+        "queued" => 0,
+        "running" => 1,
+        "complete" => 2,
+        "failed" => 3,
+        "cancelled" => 4,
+        _ => 5,
     }
 }
 
@@ -939,12 +1152,20 @@ mod tests {
             LeaseExpiryReport {
                 requeued: 1,
                 failed: 0,
+                released_workers: vec!["worker-a".into()],
             }
         );
 
         let job = jobs.get("job-1").await.unwrap();
         assert_eq!(job.status, JobStatus::Queued);
         assert_eq!(job.attempts, 1);
+        assert_eq!(
+            job.error,
+            Some(JobFailure {
+                message: ATTEMPT_TIMEOUT_ERROR.into(),
+                retryable: true,
+            })
+        );
         assert!(job.lease.is_none());
         assert_eq!(
             jobs.queued_jobs_by_priority()
@@ -994,12 +1215,20 @@ mod tests {
             LeaseExpiryReport {
                 requeued: 0,
                 failed: 1,
+                released_workers: vec!["worker-a".into()],
             }
         );
 
         let job = jobs.get("job-1").await.unwrap();
         assert_eq!(job.status, JobStatus::Failed);
         assert_eq!(job.attempts, job.max_attempts);
+        assert_eq!(
+            job.error,
+            Some(JobFailure {
+                message: ATTEMPT_TIMEOUT_ERROR.into(),
+                retryable: false,
+            })
+        );
         assert!(job.lease.is_none());
         assert!(jobs.queued_jobs_by_priority().await.is_empty());
     }
@@ -1193,6 +1422,194 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn complete_lease_marks_held_running_job_complete() {
+        let jobs = JobRegistry::default();
+        jobs.submit(SubmitJobRequest {
+            kind: JobKind::VisionAnalysis,
+            priority: Priority::Batch,
+            payload: Value::Null,
+            callback_url: None,
+        })
+        .await
+        .unwrap();
+        jobs.claim_next_for_worker("worker-a", &[JobKind::VisionAnalysis], 30_000)
+            .await
+            .unwrap();
+
+        let result = jobs
+            .complete_lease("job-1", "worker-a", json!({"ok": true}))
+            .await;
+        let FinishJobResult::Completed(job) = result else {
+            panic!("expected completion");
+        };
+
+        assert_eq!(job.status, JobStatus::Complete);
+        assert_eq!(job.result, Some(json!({"ok": true})));
+        assert!(job.error.is_none());
+        assert!(job.lease.is_none());
+        assert!(jobs.queue_snapshots().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn complete_lease_rejects_wrong_worker_and_expired_lease() {
+        let jobs = JobRegistry::default();
+        jobs.submit(SubmitJobRequest {
+            kind: JobKind::EmbedBatch,
+            priority: Priority::Realtime,
+            payload: Value::Null,
+            callback_url: None,
+        })
+        .await
+        .unwrap();
+        jobs.claim_next_for_worker("worker-a", &[JobKind::EmbedBatch], 30_000)
+            .await
+            .unwrap();
+
+        let wrong_worker = jobs.complete_lease("job-1", "worker-b", Value::Null).await;
+        assert!(matches!(wrong_worker, FinishJobResult::LeaseNotHeld(_)));
+
+        jobs.submit(SubmitJobRequest {
+            kind: JobKind::Cluster,
+            priority: Priority::Batch,
+            payload: Value::Null,
+            callback_url: None,
+        })
+        .await
+        .unwrap();
+        jobs.claim_next_for_worker("worker-a", &[JobKind::Cluster], 0)
+            .await
+            .unwrap();
+
+        let expired = jobs.complete_lease("job-2", "worker-a", Value::Null).await;
+        assert!(matches!(expired, FinishJobResult::Expired(_)));
+    }
+
+    #[tokio::test]
+    async fn fail_lease_requeues_retryable_failure_when_attempts_remain() {
+        let jobs = JobRegistry::default();
+        jobs.submit(SubmitJobRequest {
+            kind: JobKind::IndexBuild,
+            priority: Priority::Background,
+            payload: Value::Null,
+            callback_url: None,
+        })
+        .await
+        .unwrap();
+        jobs.claim_next_for_worker("worker-a", &[JobKind::IndexBuild], 30_000)
+            .await
+            .unwrap();
+
+        let result = jobs
+            .fail_lease(
+                "job-1",
+                "worker-a",
+                JobFailure {
+                    message: "transient oom".into(),
+                    retryable: true,
+                },
+            )
+            .await;
+        let FinishJobResult::Requeued(job) = result else {
+            panic!("expected retryable failure to requeue");
+        };
+
+        assert_eq!(job.status, JobStatus::Queued);
+        assert_eq!(job.attempts, 1);
+        assert!(job.lease.is_none());
+        assert_eq!(
+            job.error,
+            Some(JobFailure {
+                message: "transient oom".into(),
+                retryable: true,
+            })
+        );
+        assert_eq!(
+            jobs.queued_jobs_by_priority()
+                .await
+                .iter()
+                .map(|job| job.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["job-1"]
+        );
+    }
+
+    #[tokio::test]
+    async fn fail_lease_marks_non_retryable_or_exhausted_failure_failed() {
+        let jobs = JobRegistry::default();
+        jobs.submit(SubmitJobRequest {
+            kind: JobKind::Cluster,
+            priority: Priority::Batch,
+            payload: Value::Null,
+            callback_url: None,
+        })
+        .await
+        .unwrap();
+        jobs.claim_next_for_worker("worker-a", &[JobKind::Cluster], 30_000)
+            .await
+            .unwrap();
+
+        let non_retryable = jobs
+            .fail_lease(
+                "job-1",
+                "worker-a",
+                JobFailure {
+                    message: "bad input".into(),
+                    retryable: false,
+                },
+            )
+            .await;
+        let FinishJobResult::Failed(job) = non_retryable else {
+            panic!("expected non-retryable failure");
+        };
+        assert_eq!(job.status, JobStatus::Failed);
+        assert!(job.lease.is_none());
+
+        jobs.submit(SubmitJobRequest {
+            kind: JobKind::EmbedBatch,
+            priority: Priority::Realtime,
+            payload: Value::Null,
+            callback_url: None,
+        })
+        .await
+        .unwrap();
+        for _ in 0..2 {
+            jobs.claim_next_for_worker("worker-a", &[JobKind::EmbedBatch], 30_000)
+                .await
+                .unwrap();
+            let result = jobs
+                .fail_lease(
+                    "job-2",
+                    "worker-a",
+                    JobFailure {
+                        message: "temporary failure".into(),
+                        retryable: true,
+                    },
+                )
+                .await;
+            assert!(matches!(result, FinishJobResult::Requeued(_)));
+        }
+        jobs.claim_next_for_worker("worker-a", &[JobKind::EmbedBatch], 30_000)
+            .await
+            .unwrap();
+        let exhausted = jobs
+            .fail_lease(
+                "job-2",
+                "worker-a",
+                JobFailure {
+                    message: "temporary failure".into(),
+                    retryable: true,
+                },
+            )
+            .await;
+        let FinishJobResult::Failed(job) = exhausted else {
+            panic!("expected retry exhaustion");
+        };
+        assert_eq!(job.status, JobStatus::Failed);
+        assert_eq!(job.attempts, job.max_attempts);
+        assert!(jobs.queued_jobs_by_priority().await.is_empty());
+    }
+
+    #[tokio::test]
     async fn queue_wait_snapshots_measure_queued_job_age_by_priority_and_type() {
         let jobs = JobRegistry::default();
 
@@ -1222,6 +1639,59 @@ mod tests {
         assert_eq!(snapshots[0].count, 2);
         assert!(snapshots[0].wait_seconds_sum > 0.0);
         assert!(snapshots[0].wait_seconds_max > 0.0);
+    }
+
+    #[tokio::test]
+    async fn terminal_duration_snapshots_group_terminal_jobs() {
+        let jobs = JobRegistry::default();
+
+        jobs.submit(SubmitJobRequest {
+            kind: JobKind::VisionAnalysis,
+            priority: Priority::Batch,
+            payload: Value::Null,
+            callback_url: None,
+        })
+        .await
+        .unwrap();
+        jobs.submit(SubmitJobRequest {
+            kind: JobKind::EmbedBatch,
+            priority: Priority::Realtime,
+            payload: Value::Null,
+            callback_url: None,
+        })
+        .await
+        .unwrap();
+        jobs.submit(SubmitJobRequest {
+            kind: JobKind::Cluster,
+            priority: Priority::Background,
+            payload: Value::Null,
+            callback_url: None,
+        })
+        .await
+        .unwrap();
+
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+
+        jobs.claim_next_for_worker("worker-a", &[JobKind::VisionAnalysis], 30_000)
+            .await
+            .unwrap();
+        jobs.complete_lease("job-1", "worker-a", json!({"ok": true}))
+            .await;
+        jobs.cancel("job-2").await;
+
+        let snapshots = jobs.terminal_duration_snapshots().await;
+
+        assert_eq!(snapshots.len(), 2);
+        assert_eq!(snapshots[0].priority, "realtime");
+        assert_eq!(snapshots[0].kind, "embed_batch");
+        assert_eq!(snapshots[0].status, "cancelled");
+        assert_eq!(snapshots[0].count, 1);
+        assert_eq!(snapshots[1].priority, "batch");
+        assert_eq!(snapshots[1].kind, "vision_analysis");
+        assert_eq!(snapshots[1].status, "complete");
+        assert_eq!(snapshots[1].count, 1);
+        assert!(snapshots[1].duration_seconds_sum > 0.0);
+        assert!(snapshots[1].duration_seconds_max > 0.0);
     }
 
     #[tokio::test]
@@ -1326,6 +1796,80 @@ mod tests {
         ));
         assert!(!metrics.contains(
             "fairlead_job_queue_wait_seconds_max{priority=\"background\",type=\"cluster\"}"
+        ));
+    }
+
+    #[tokio::test]
+    async fn metrics_reports_terminal_job_duration() {
+        let state = test_state();
+        let jobs = state.jobs.clone();
+        let app = build_router(state);
+
+        jobs.submit(SubmitJobRequest {
+            kind: JobKind::VisionAnalysis,
+            priority: Priority::Batch,
+            payload: Value::Null,
+            callback_url: None,
+        })
+        .await
+        .unwrap();
+        jobs.submit(SubmitJobRequest {
+            kind: JobKind::Cluster,
+            priority: Priority::Background,
+            payload: Value::Null,
+            callback_url: None,
+        })
+        .await
+        .unwrap();
+        jobs.submit(SubmitJobRequest {
+            kind: JobKind::EmbedBatch,
+            priority: Priority::Realtime,
+            payload: Value::Null,
+            callback_url: None,
+        })
+        .await
+        .unwrap();
+
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+
+        jobs.claim_next_for_worker("worker-a", &[JobKind::VisionAnalysis], 30_000)
+            .await
+            .unwrap();
+        jobs.complete_lease("job-1", "worker-a", json!({"ok": true}))
+            .await;
+        jobs.claim_next_for_worker("worker-a", &[JobKind::Cluster], 30_000)
+            .await
+            .unwrap();
+        jobs.fail_lease(
+            "job-2",
+            "worker-a",
+            JobFailure {
+                message: "bad input".into(),
+                retryable: false,
+            },
+        )
+        .await;
+
+        let response = app
+            .oneshot(Request::get("/metrics").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let metrics = response_text(response).await;
+
+        assert!(metrics.contains(
+            "fairlead_job_duration_seconds_count{priority=\"batch\",type=\"vision_analysis\",status=\"complete\"} 1"
+        ));
+        assert!(metrics.contains(
+            "fairlead_job_duration_seconds_sum{priority=\"batch\",type=\"vision_analysis\",status=\"complete\"} "
+        ));
+        assert!(metrics.contains(
+            "fairlead_job_duration_seconds_max{priority=\"batch\",type=\"vision_analysis\",status=\"complete\"} "
+        ));
+        assert!(metrics.contains(
+            "fairlead_job_duration_seconds_count{priority=\"background\",type=\"cluster\",status=\"failed\"} 1"
+        ));
+        assert!(!metrics.contains(
+            "fairlead_job_duration_seconds_count{priority=\"realtime\",type=\"embed_batch\""
         ));
     }
 
