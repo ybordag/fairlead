@@ -370,10 +370,7 @@ Retention, pruning, and maintenance cases:
   `JOB_MAINTENANCE_INTERVAL_SECS`, and optional `JOB_PRUNE_INTERVAL_SECS`
 - submit jobs that complete, fail, cancel, remain queued, and remain running
 - create terminal jobs with pending and delivered callbacks
-- verify manual `POST /v1/jobs/prune` removes only eligible terminal jobs
-- verify pending-callback terminal jobs are retained until delivery succeeds
-- verify delivered-callback terminal jobs become prunable
-- verify queued/running jobs survive manual and background pruning
+- verify queued/running jobs survive background pruning
 - verify repeated prune calls with no eligible jobs return `removed: 0` and do
   not create misleading prune metrics
 - verify manual prune works while background pruning is enabled

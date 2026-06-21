@@ -137,6 +137,10 @@ impl FairleadProcess {
         self.post_json("/v1/jobs", body).await
     }
 
+    async fn prune_jobs(&self) -> (StatusCode, Value) {
+        self.post_json("/v1/jobs/prune", json!({})).await
+    }
+
     async fn register_worker(&self, body: Value) -> (StatusCode, Value) {
         self.post_json("/v1/workers/register", body).await
     }
@@ -1089,6 +1093,180 @@ async fn worker_renew_and_retryable_fail_requeues_over_real_http() {
         "backup-worker"
     );
     assert_eq!(completed["job"]["terminal_attempt"]["attempt"], 2);
+
+    fairlead.shutdown().await;
+}
+
+#[tokio::test]
+async fn prune_endpoint_removes_only_eligible_terminal_jobs_over_real_http() {
+    let (delivered_callback_url, mut delivered_callbacks) =
+        start_callback_target(StatusCode::OK).await;
+    let (pending_callback_url, mut pending_callbacks) =
+        start_callback_target(StatusCode::INTERNAL_SERVER_ERROR).await;
+    let mut fairlead = FairleadProcess::spawn(&[
+        ("JOB_RETENTION_SECS", "1"),
+        ("JOB_PRUNE_LIMIT", "10"),
+        ("CALLBACK_MAX_ATTEMPTS", "1"),
+        ("CALLBACK_RETRY_DELAY_MS", "25"),
+        ("CALLBACK_TIMEOUT_SECS", "1"),
+    ]);
+    fairlead.wait_for_health().await;
+
+    let (status, _) = fairlead
+        .register_worker(json!({
+            "id": "prune-worker",
+            "endpoint_url": "http://prune-worker.local",
+            "node_id": "spark-a",
+            "pool": "default",
+            "job_types": ["vision_analysis"],
+            "max_concurrent_jobs": 1,
+            "available_vram_mb": 4096
+        }))
+        .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, complete_job) = fairlead
+        .submit_job(json!({
+            "type": "vision_analysis",
+            "priority": "batch",
+            "payload": { "image": "complete.jpg" }
+        }))
+        .await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+    assert_eq!(complete_job["job"]["id"], "job-1");
+
+    let (status, claim) = fairlead.claim_worker_job("prune-worker").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(claim["job"]["id"], "job-1");
+    let (status, completed) = fairlead
+        .complete_worker_job(
+            "prune-worker",
+            "job-1",
+            json!({
+                "attempt": 1,
+                "result": { "classification": "healthy" }
+            }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(completed["job"]["status"], "complete");
+
+    let (status, delivered_job) = fairlead
+        .submit_job(json!({
+            "type": "vision_analysis",
+            "priority": "batch",
+            "payload": { "image": "delivered-callback.jpg" },
+            "callback_url": delivered_callback_url
+        }))
+        .await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+    assert_eq!(delivered_job["job"]["id"], "job-2");
+    let (status, claim) = fairlead.claim_worker_job("prune-worker").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(claim["job"]["id"], "job-2");
+    let (status, completed) = fairlead
+        .complete_worker_job(
+            "prune-worker",
+            "job-2",
+            json!({
+                "attempt": 1,
+                "result": { "classification": "healthy" }
+            }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(completed["job"]["status"], "complete");
+    tokio::time::timeout(Duration::from_secs(2), delivered_callbacks.recv())
+        .await
+        .expect("delivered callback was sent")
+        .expect("delivered callback receiver stayed open");
+    wait_for_callback_status(&fairlead, "job-2", "delivered").await;
+
+    let (status, pending_job) = fairlead
+        .submit_job(json!({
+            "type": "vision_analysis",
+            "priority": "batch",
+            "payload": { "image": "pending-callback.jpg" },
+            "callback_url": pending_callback_url
+        }))
+        .await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+    assert_eq!(pending_job["job"]["id"], "job-3");
+    let (status, claim) = fairlead.claim_worker_job("prune-worker").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(claim["job"]["id"], "job-3");
+    let (status, completed) = fairlead
+        .complete_worker_job(
+            "prune-worker",
+            "job-3",
+            json!({
+                "attempt": 1,
+                "result": { "classification": "healthy" }
+            }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(completed["job"]["status"], "complete");
+    tokio::time::timeout(Duration::from_secs(2), pending_callbacks.recv())
+        .await
+        .expect("pending callback was attempted")
+        .expect("pending callback receiver stayed open");
+    wait_for_callback_attempt(&fairlead, "job-3", "pending", 1, 500).await;
+
+    let (status, queued_job) = fairlead
+        .submit_job(json!({
+            "type": "vision_analysis",
+            "priority": "batch",
+            "payload": { "image": "queued.jpg" }
+        }))
+        .await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+    assert_eq!(queued_job["job"]["id"], "job-4");
+
+    let (status, running_job) = fairlead
+        .submit_job(json!({
+            "type": "vision_analysis",
+            "priority": "batch",
+            "payload": { "image": "running.jpg" }
+        }))
+        .await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+    assert_eq!(running_job["job"]["id"], "job-5");
+    let (status, claim) = fairlead.claim_worker_job("prune-worker").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(claim["job"]["id"], "job-4");
+
+    tokio::time::sleep(Duration::from_millis(1_200)).await;
+
+    let (status, pruned) = fairlead.prune_jobs().await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(pruned["pruned"]["removed"], 2);
+    assert_eq!(pruned["pruned"]["retained_pending_callbacks"], 1);
+    assert_eq!(pruned["pruned"]["by_status"][0]["status"], "complete");
+    assert_eq!(pruned["pruned"]["by_status"][0]["removed"], 2);
+
+    for removed_id in ["job-1", "job-2"] {
+        let (status, body) = fairlead.get_json(&format!("/v1/jobs/{removed_id}")).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body["raw"], "job not found");
+    }
+
+    let (status, pending) = fairlead.get_json("/v1/jobs/job-3").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(pending["job"]["status"], "complete");
+    assert_eq!(pending["job"]["callback"]["status"], "pending");
+
+    let (status, running) = fairlead.get_json("/v1/jobs/job-4").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(running["job"]["status"], "running");
+
+    let (status, queued) = fairlead.get_json("/v1/jobs/job-5").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(queued["job"]["status"], "queued");
+
+    let (status, metrics) = fairlead.get_text("/metrics").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(metrics.contains("fairlead_job_prunes_total{status=\"complete\"} 2"));
 
     fairlead.shutdown().await;
 }

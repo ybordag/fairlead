@@ -904,6 +904,9 @@ workload protocols.
     worker listing.
   - [x] Add process-level worker renew and retryable failure coverage with
     requeue, worker capacity release, reclaim, and completion.
+  - [x] Add process-level manual prune coverage for eligible terminal jobs,
+    delivered callbacks, pending callbacks, queued jobs, running jobs, and prune
+    metrics.
   - Add process-level restart e2e harnesses for jobs, leases, callbacks, and
     metrics.
 - Keep Temporal deferred unless application workflows need durable multi-step

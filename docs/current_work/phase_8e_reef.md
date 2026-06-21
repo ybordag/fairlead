@@ -56,8 +56,11 @@ behavior that in-process Rust tests cannot cover.
 - Added `worker_renew_and_retryable_fail_requeues_over_real_http`, which
   verifies renewal extends a running lease and retryable worker failure requeues
   the job for another worker to reclaim and complete.
+- Added a process harness helper for `POST /v1/jobs/prune`.
+- Added `prune_endpoint_removes_only_eligible_terminal_jobs_over_real_http`,
+  which verifies manual pruning removes eligible terminal jobs and delivered
+  callback jobs while preserving pending-callback, running, and queued jobs.
 
 ## Next Slices
 
-- Add helpers for prune endpoints.
 - Move deferred Phase 8 local-process cases into concrete tests incrementally.
