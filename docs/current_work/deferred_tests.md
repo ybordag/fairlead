@@ -99,12 +99,11 @@ synchronous and async compute.
 
 ### `phase_6c_worker_claims_and_leases`
 
-When later phases build on Phase 6C worker-pull claims and leases, add tests
-for:
+When later phases build on Phase 6C/6D worker-pull claims, leases, and result
+reporting, add tests for:
 
 - concurrent cancellation versus complete/fail requests against the same leased
   job
-- complete/fail idempotency for duplicate worker reports after a terminal state
 - background lease sweep behavior, if Fairlead adds a scheduler loop instead of
   claim-time opportunistic sweeps only
 - opt-in local multi-process e2e: start Fairlead, register two fake workers,
@@ -121,8 +120,10 @@ the claim endpoint, duplicate-claim prevention, stale worker exclusion,
 unsupported job types, priority ordering, FIFO ordering, queued/running
 cancellation basics, claim-time expired lease requeue/failure, lease renewal,
 renewal ownership checks, and cancellation ordering around running leases and
-requeued jobs. Halyard adds complete/fail endpoints. The remaining race and e2e
-tests need a heavier multi-process/deployment harness.
+requeued jobs. Halyard adds result endpoints, timeout state, capacity
+accounting, and duration metrics. The remaining race and e2e tests need a
+heavier multi-process/deployment harness. Halyard's in-process suite covers
+duplicate result reports after terminal state.
 
 ### `phase_6d_worker_execution_and_utilization`
 

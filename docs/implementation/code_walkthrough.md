@@ -423,7 +423,8 @@ pub struct AppState {
 - `resource_policy` controls whether resource-aware eligibility is active.
 - `priority_limiter` stores per-priority synchronous admission limits.
 - `jobs` stores first-slice in-memory async job records.
-- `workers` stores non-dispatching worker registration and heartbeat state.
+- `workers` stores worker registration, heartbeat, stale status, and capacity
+  accounting.
 
 `#[derive(Clone)]` asks Rust to generate a `clone()` implementation. Axum clones
 state handles into request handlers. This is cheap here because the expensive
@@ -1244,7 +1245,7 @@ fairlead_job_duration_seconds_max{priority="batch",type="vision_analysis",status
 The duration metric only includes terminal jobs: `complete`, `failed`, and
 `cancelled`. Running and queued jobs are excluded.
 
-Worker registration exposes current non-dispatching worker availability:
+Worker registration exposes current worker availability:
 
 ```text
 fairlead_workers{type="vision_analysis",status="available"} 1
@@ -1294,8 +1295,9 @@ lease is created, and Fairlead does not call the worker endpoint.
 9. If no compatible queued job exists, Fairlead releases the worker slot and
    returns `204`.
 
-The claim endpoint still does not call the worker process. It only grants the
-worker a bounded lease and returns the job payload to run.
+The claim endpoint still does not push work to the worker process. It grants the
+worker a bounded lease and returns the job payload to run. This is worker-pull
+execution, not Fairlead-initiated push dispatch.
 
 Lease expiry is Fairlead's current per-attempt timeout mechanism. When a sweep
 finds an expired running lease, the job records `attempt timed out` in `error`.
@@ -1403,8 +1405,9 @@ The current code does not:
 - Estimate token count or memory use.
 - Manage CUDA memory.
 - Enforce complete pool-aware routing and placement policies.
-- Dispatch jobs to workers, enforce leases, or deliver callbacks.
+- Push-dispatch jobs to workers or deliver callbacks.
 - Reserve GPU memory for a request; resource reports are cooperative control-plane
   hints, not allocator-level reservations.
 
-Those are future roadmap phases, not current behavior.
+Push dispatch, callbacks, durable state, completed-job pruning, and complete
+pool-aware placement are future roadmap phases, not current behavior.

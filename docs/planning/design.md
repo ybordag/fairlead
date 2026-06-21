@@ -82,7 +82,8 @@ fresh compatible worker would match next. The worker claim endpoint grants a
 bounded lease and marks a compatible job running. The worker lease renewal
 endpoint extends a running lease only for the worker currently holding it.
 The worker result endpoints let that same lease holder complete a job or report
-retryable/non-retryable failure. Durable queues, richer execution accounting,
+retryable/non-retryable failure. Expired leases record timeout state and
+terminal jobs emit duration metrics. Durable queues, richer recovery behavior,
 and callback delivery are future Phase 6 subphases.
 
 ---
@@ -242,7 +243,7 @@ it on crash, or allocate GPU resources. That is k3s's job.
 
 ## Extensibility
 
-- **Async embedding service** — future job queue for batch embeddings
+- **Async embedding service** — future worker implementation for batch embeddings
 - **Context chunking service** — async chunking for RAG pipelines, job-queue backed
 - **Additional agent applications** — each registers its own worker pool
 

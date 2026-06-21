@@ -7,11 +7,12 @@ routes synchronous OpenAI-compatible inference requests across local GPU nodes,
 manages circuit breaking and session failover, and tracks cooperative VRAM/load
 reports from model servers and other GPU consumers.
 
-It exposes an OpenAI-compatible inference API and a first-slice generic async
+It exposes an OpenAI-compatible inference API and an in-memory generic async
 job API. The inference path is synchronous (request → response). The job path is
-currently submit → job_id → poll/cancel, with non-dispatching worker
-registration, scheduler preview, and initial worker-pull claims. Worker
-execution, durable state, and callbacks are Phase 6D+ work.
+currently submit → job_id → poll/cancel plus worker registration, scheduler
+preview, worker-pull claims, lease renewal, worker result reporting, retryable
+failure, timeout state, and worker capacity accounting. Durable state and
+callbacks are Phase 6E/6F work.
 
 See `docs/planning/design.md` for the design horizon and
 `docs/planning/architecture.md` for the current architecture.
@@ -19,7 +20,7 @@ See `docs/planning/design.md` for the design horizon and
 ## Related repos
 
 - **Rhizome** (Python) — the agent. Points its model client at Fairlead `/v1`.
-  Can submit async compute jobs to Fairlead's Phase 6B job API once Rhizome has
+  Can submit async compute jobs to Fairlead's Phase 6 job API once Rhizome has
   matching job schemas.
 - **Cambium** (Go) — the API gateway. Calls Rhizome; Rhizome calls Fairlead.
 - **Fairlead** (this repo, Rust) — routes to vLLM on spark-a/spark-b; cloud
@@ -54,10 +55,10 @@ cargo watch -x run
 
 ## Current status
 
-**Phase 6C complete** (cleat → main). **Phase 6D is in progress on halyard**:
-worker completion/failure reporting, retries, worker capacity accounting,
-duration metrics, and per-attempt timeout state before durable state and
-callbacks.
+**Phase 6C complete** (cleat → main). **Phase 6D is complete on halyard** and
+pending final review/PR merge. Halyard adds worker completion/failure
+reporting, retries, worker capacity accounting, duration metrics, and
+per-attempt timeout state before durable state and callbacks.
 
 | Phase | Branch | Status |
 |---|---|---|
@@ -69,7 +70,7 @@ callbacks.
 | 6A — Synchronous surface cleanup | clew → main | ✅ complete |
 | 6B — Async API + scheduler preview | tackle → main | ✅ complete |
 | 6C — Worker-pull claims + leases | cleat → main | ✅ complete |
-| 6D — Worker execution + retries | halyard | in progress |
+| 6D — Worker execution + retries | halyard | complete, pending PR |
 | 6E — Durable job state + recovery | — | pending |
 | 6F — Callback delivery + finalization | — | pending |
 | 7A — Pool-aware routing + placement | — | pending |
@@ -77,7 +78,7 @@ callbacks.
 
 ## Project layout
 
-**What exists now (Phases 1–6D current slices):**
+**What exists now (Phases 1–6D):**
 
 ```
 src/
@@ -85,13 +86,13 @@ src/
   config.rs         — Config from env, backend metadata, workload route metadata
   error.rs          — FairleadError enum with IntoResponse impl
   health.rs         — GET /health → {"status":"ok"}
-  jobs.rs           — in-memory async job API: submit, list, get, cancel, queue snapshots
-  metrics.rs        — GET /metrics → Prometheus circuit_state gauge per backend
+  jobs.rs           — in-memory async job API: submit, list, get, cancel, leases, result state
+  metrics.rs        — GET /metrics → Prometheus sync, resource, queue, worker, duration metrics
   models.rs         — GET /v1/models → configured backend/model metadata
   priority.rs       — per-priority synchronous admission limiter
   resources.rs      — POST/GET resource reports for VRAM/load control-plane state
-  scheduler.rs      — non-dispatching scheduler preview: queued job → fresh capable worker
-  workers.rs        — non-dispatching worker registration, heartbeat, stale status
+  scheduler.rs      — scheduler preview, worker-pull claims, lease renewal, completion/failure
+  workers.rs        — worker registration, heartbeat, stale status, capacity accounting
   router/
     mod.rs          — module entry point
     circuit.rs      — CircuitBreaker: Closed/Open/HalfOpen state machine
@@ -156,9 +157,11 @@ metadata is attached. Expired running leases are requeued when attempts remain
 and failed when attempts are exhausted. Workers holding a lease can renew it
 before expiry. Phase 6D adds result reporting: the lease holder can complete a
 job with a result payload or fail it. Retryable failures requeue while attempts
-remain; non-retryable or exhausted failures become terminal. Worker
-deregistration, callback delivery, worker utilization metrics, and
-SQLite-backed persistence are still planned.
+remain; non-retryable or exhausted failures become terminal. Expired leases
+record `attempt timed out`, requeue while attempts remain, and fail when
+attempts are exhausted. Worker utilization and terminal job duration metrics are
+implemented. Worker deregistration, callback delivery, completed-job pruning,
+and SQLite-backed persistence are still planned.
 
 Job request body:
 ```json
@@ -366,22 +369,25 @@ WORKER_HEARTBEAT_SECS        — interval before a worker is considered stale
 - [x] Mark expired leases failed when attempts are exhausted.
 - [x] Let the worker holding a running lease renew it before expiry.
 
-### Phase 6D+ — Remaining async compute router work
+### Phase 6D — Worker execution, retries, and utilization
 
-- Worker deregistration API and graceful shutdown semantics.
+- [x] Worker completion/failure reporting.
+- [x] Retryable failure requeue and terminal failure.
 - [x] Worker utilization metrics for in-flight jobs, max concurrency, and
   available slots.
-- Scheduler policy based on lease availability, VRAM headroom, and load.
 - [x] Job manager: per-attempt timeout state and cancellation.
+- [x] Job duration metrics.
+
+### Phase 6E/6F — Remaining async compute router work
+
+- Worker deregistration API and graceful shutdown semantics.
+- Scheduler policy based on richer lease availability, VRAM headroom, and load.
 - Completed-job pruning.
 - Persistence path: SQLite first for local durable state, Postgres later for
   multiple Fairlead instances.
 - Callback delivery: on completion, POST to `callback_url` with result payload;
   retry on failure.
-- [x] Job duration metrics.
 - Callback success/failure metrics.
-- Test: submit vision job → claimed by registered worker → completed → callback
-  fires with result.
 
 Temporal is deferred. Fairlead owns compute job orchestration; Rhizome owns
 domain workflow state. Add Temporal only if Rhizome starts needing durable

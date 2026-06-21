@@ -20,8 +20,11 @@ Fairlead         Rust compute router — inference routing, resource admission, 
 vLLM             Python model server — GPU inference on spark-a
 ```
 
-Future phases may add async job dispatch and cloud-provider fallback, but those
-are not part of the current synchronous proxy surface.
+The current synchronous proxy surface routes OpenAI-compatible requests. The
+current async surface supports in-memory worker-pull jobs: workers claim leased
+jobs, renew leases, and report completion or failure. Future phases may add
+durable job state, callback delivery, push dispatch, and cloud-provider
+fallback.
 
 **Cambium** handles everything external-facing: verifies JWT tokens, decrypts the
 user's stored API key, injects it into the Rhizome request. It knows about users
@@ -32,10 +35,10 @@ weather → triage → LLM → tools → loop. It knows about plants, projects, 
 incidents. It does not know which GPU served its last LLM call.
 
 **Fairlead** is a compute infrastructure layer. Today it receives
-OpenAI-compatible synchronous requests. Its planned async surface will also
-receive job submissions. It knows about nodes, reported VRAM/load, circuit
-states, priority admission, and future job queues. It does not know what a
-garden is.
+OpenAI-compatible synchronous requests and bounded async job submissions. It
+knows about nodes, reported VRAM/load, circuit states, priority admission,
+in-memory job queues, worker leases, and worker capacity. It does not know what
+a garden is.
 
 **vLLM** serves the model. It knows about GPU memory, batching, and
 PagedAttention. It knows nothing above itself.
@@ -236,15 +239,16 @@ request arrives
 
 ### Surface 2: Async job dispatch
 
-Phase 6B implements the HTTP job surface, non-dispatching worker registration,
-queue visibility, and scheduler preview with in-memory state. Phase 6C adds the
-first worker-pull claim path: Fairlead grants a bounded lease, marks the job
-running, and returns it to the worker. Phase 6D adds worker completion/failure,
-retryable requeue, and worker capacity accounting. Fairlead also
-opportunistically requeues expired running leases before fresh workers claim more
-work. Persistence and callback delivery are later Phase 6 work. The design
-belongs in the architecture because it defines Fairlead's boundary: Fairlead
-should be a compute control plane, not a general-purpose workflow engine.
+Phase 6B implements the HTTP job surface, worker registration, queue visibility,
+and scheduler preview with in-memory state. Phase 6C adds the first worker-pull
+claim path: Fairlead grants a bounded lease, marks the job running, and returns
+it to the worker. Phase 6D adds worker completion/failure, retryable requeue,
+worker capacity accounting, duration metrics, and explicit timeout state for
+expired attempts. Fairlead also opportunistically requeues expired running
+leases before fresh workers claim more work. Persistence and callback delivery
+are later Phase 6 work. The design belongs in the architecture because it
+defines Fairlead's boundary: Fairlead should be a compute control plane, not a
+general-purpose workflow engine.
 
 ```
 POST /v1/jobs        — submit, get job_id immediately
@@ -301,7 +305,7 @@ Current Phase 6B/6C/6D behavior:
 - `POST /v1/workers/{worker_id}/jobs/{job_id}/fail` validates the worker and
   lease, records an error, then requeues retryable failures when attempts remain
   or marks the job `failed`; both paths release worker capacity
-- no job is dispatched to a worker yet
+- no push dispatch exists yet; workers must pull by calling the claim endpoint
 - no callback is delivered yet
 - no durable queue or background scheduler loop exists yet
 
@@ -331,15 +335,16 @@ job submitted
   node metadata
 - `POST /v1/workers/{id}/heartbeat` — workers refresh liveness
 - `GET /v1/workers` — current in-memory worker registry
-- `POST /v1/workers/{id}/claim` — Phase 6C worker-pull claim endpoint
-- `POST /v1/workers/{worker_id}/jobs/{job_id}/renew` — Phase 6C lease renewal
-- `POST /v1/workers/{worker_id}/jobs/{job_id}/complete` — Phase 6D completion
-- `POST /v1/workers/{worker_id}/jobs/{job_id}/fail` — Phase 6D failure/retry
+- `POST /v1/workers/{id}/claim` — worker-pull claim endpoint
+- `POST /v1/workers/{worker_id}/jobs/{job_id}/renew` — lease renewal
+- `POST /v1/workers/{worker_id}/jobs/{job_id}/complete` — completion
+- `POST /v1/workers/{worker_id}/jobs/{job_id}/fail` — failure/retry
 - `POST /v1/resources/report` — GPU consumers and workers report capacity
 - `GET /v1/resources` — current resource control-plane state
 - `GET /metrics` — Prometheus: queue depth/wait, circuit states, VRAM per node,
   worker availability, and worker in-flight capacity
-- Persistent job state for running attempts, retries, callbacks, and pruning.
+- Future persistent job state for running attempts, retries, callbacks, and
+  pruning.
 
 ### Worker-pull claim decision
 
@@ -584,7 +589,8 @@ metrics.
 This is not yet a durable priority queue. A full synchronous bucket fails fast
 with `429 Too Many Requests`; Fairlead does not currently wait in a queue for
 capacity. The async job API exposes in-memory queue depth and wait age, but
-starvation policy and async job scheduling remain future scheduler work.
+durable starvation policy and richer async scheduling remain future scheduler
+work.
 
 ---
 
