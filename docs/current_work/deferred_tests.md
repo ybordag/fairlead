@@ -117,6 +117,8 @@ tests for complete pool placement behavior:
   before rejected workers appear in `GET /v1/workers`
 - omitted worker pools deserialize to `default`, and strict mode accepts or
   rejects that default based on whether `default` is configured or derived
+- strict workload pool mode fails process startup when explicit policy is absent
+  or partial, and starts when every known workload has policy
 - per-pool metrics report candidate counts, selected pool/backend or worker,
   no-compatible-pool cases, fallback reasons, and capacity pressure
 - local mock e2e and two-node DGX Spark e2e use the same sanitized pool config
@@ -246,6 +248,31 @@ fake workers:
 **Why deferred:** Unit and in-process endpoint tests cover the validation
 boundary. This e2e needs binary lifecycle, environment setup, port allocation,
 HTTP client orchestration, and log capture.
+
+### `phase_7d_strict_workload_pool_startup_process_e2e`
+
+Add an opt-in process-level e2e for strict workload pool validation:
+
+- start Fairlead with `STRICT_WORKLOAD_POOLS=true` and no
+  `WORKLOAD_POOLS_JSON`; verify the process exits before binding and the error
+  names the missing explicit policy
+- start Fairlead with `STRICT_WORKLOAD_POOLS=true` and partial
+  `WORKLOAD_POOLS_JSON`; verify the process exits before binding and the error
+  names the missing workload policies
+- start Fairlead with `STRICT_WORKLOAD_POOLS=false` or unset and the same
+  partial `WORKLOAD_POOLS_JSON`; verify the process starts and omitted
+  workloads remain permissive
+- start Fairlead with `STRICT_WORKLOAD_POOLS=true`, `BACKENDS_JSON` using
+  derived pools, and complete `WORKLOAD_POOLS_JSON`; verify the process starts
+  and logs `strict_workload_pools=true`
+- issue sync and async HTTP calls against that complete strict config to verify
+  Phase 7B and 7C placement behavior is unchanged after startup validation
+- scrape `/metrics` after those calls and verify pool labels still reflect the
+  configured policy
+
+**Why deferred:** The unit tests cover parser behavior and derived-pool
+interaction. This e2e needs binary lifecycle, port allocation, startup failure
+assertions, log capture, fake backends, fake workers, and real HTTP calls.
 
 ### `phase_7d_dgx_strict_pool_registration_smoke_test`
 

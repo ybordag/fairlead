@@ -56,6 +56,8 @@ without a process harness:
   reports missing workloads.
 - Strict workload pool validation accepts complete policy for every known
   workload.
+- Strict workload pool validation accepts complete policy that references pools
+  derived from `BACKENDS_JSON`, preserving the Phase 7A derived-pool path.
 - Strict mode does not change the default derived pool set when no `POOLS_JSON`
   is provided.
 - Worker registration remains permissive by default for ad hoc pool names.

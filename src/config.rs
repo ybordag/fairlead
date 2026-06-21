@@ -846,6 +846,46 @@ mod tests {
     }
 
     #[test]
+    fn strict_workload_pools_accepts_complete_policy_with_derived_backend_pools() {
+        let cfg = Config::from_lookup(env(&[
+            (
+                "BACKENDS_JSON",
+                r#"[
+                    {"id":"node-a-vllm","url":"http://node-a:8000/v1","pool":"local-llm"},
+                    {"id":"node-b-vllm","url":"http://node-b:8000/v1","pool":"peer-llm"}
+                ]"#,
+            ),
+            (
+                "WORKLOAD_POOLS_JSON",
+                r#"{
+                    "chat_completions": ["local-llm", "peer-llm"],
+                    "embeddings": ["peer-llm"],
+                    "vision_analysis": ["peer-llm"],
+                    "embed_batch": ["peer-llm"],
+                    "index_build": ["default"],
+                    "cluster": ["default"]
+                }"#,
+            ),
+            ("STRICT_WORKLOAD_POOLS", "true"),
+        ]))
+        .unwrap();
+
+        assert!(cfg.strict_workload_pools);
+        assert_eq!(
+            pool_ids(&cfg),
+            vec![DEFAULT_BACKEND_POOL, "local-llm", "peer-llm"]
+        );
+        assert_eq!(
+            cfg.workload_pools.get("chat_completions").unwrap(),
+            &vec!["local-llm".to_string(), "peer-llm".to_string()]
+        );
+        assert_eq!(
+            cfg.workload_pools.get("embeddings").unwrap(),
+            &vec!["peer-llm".to_string()]
+        );
+    }
+
+    #[test]
     fn strict_worker_pools_preserves_default_pool_derivation() {
         let cfg = Config::from_lookup(env(&[("STRICT_WORKER_POOLS", "true")])).unwrap();
 
