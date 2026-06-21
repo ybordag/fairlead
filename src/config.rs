@@ -1100,6 +1100,18 @@ mod tests {
     }
 
     #[test]
+    fn invalid_pools_json_returns_err() {
+        for raw in ["not json", r#"{"id":"default"}"#] {
+            let result = Config::from_lookup(env(&[("POOLS_JSON", raw)]));
+            assert!(result.is_err(), "expected {raw} to fail");
+            assert!(result
+                .unwrap_err()
+                .to_string()
+                .contains("invalid POOLS_JSON"));
+        }
+    }
+
+    #[test]
     fn explicit_pools_json_rejects_unknown_backend_pool_reference() {
         let result = Config::from_lookup(env(&[
             (
@@ -1114,6 +1126,33 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("references unknown pool 'local-llm'"));
+    }
+
+    #[test]
+    fn workload_pools_json_can_reference_derived_backend_pools() {
+        let cfg = Config::from_lookup(env(&[
+            (
+                "BACKENDS_JSON",
+                r#"[
+                    {"id":"node-a-vllm","url":"http://node-a:8000/v1","pool":"local-llm"},
+                    {"id":"node-b-vllm","url":"http://node-b:8000/v1","pool":"peer-llm"}
+                ]"#,
+            ),
+            (
+                "WORKLOAD_POOLS_JSON",
+                r#"{"chat_completions": ["local-llm", "peer-llm"]}"#,
+            ),
+        ]))
+        .unwrap();
+
+        assert_eq!(
+            cfg.workload_pools.get("chat_completions").unwrap(),
+            &vec!["local-llm".to_string(), "peer-llm".to_string()]
+        );
+        assert_eq!(
+            pool_ids(&cfg),
+            vec![DEFAULT_BACKEND_POOL, "local-llm", "peer-llm"]
+        );
     }
 
     #[test]
@@ -1139,6 +1178,18 @@ mod tests {
             &vec!["vision".to_string(), "local-llm".to_string()]
         );
         assert!(!cfg.workload_pools.contains_key("embeddings"));
+    }
+
+    #[test]
+    fn invalid_workload_pools_json_returns_err() {
+        for raw in ["not json", r#"["chat_completions"]"#] {
+            let result = Config::from_lookup(env(&[("WORKLOAD_POOLS_JSON", raw)]));
+            assert!(result.is_err(), "expected {raw} to fail");
+            assert!(result
+                .unwrap_err()
+                .to_string()
+                .contains("invalid WORKLOAD_POOLS_JSON"));
+        }
     }
 
     #[test]
