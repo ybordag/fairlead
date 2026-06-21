@@ -194,9 +194,10 @@ resource-aware slice. Backends can carry `node_id` metadata, requests can carry
 `X-Fairlead-Origin-Node`, and workers/backends can report resource state through
 `/v1/resources/report`. When `RESOURCE_AWARE_ROUTING=true`, the router skips
 backends without a fresh report that satisfies the workload's coarse VRAM
-estimate before applying locality, affinity, and configured order. It does not
-yet implement backend-pool selection, queueing, load/headroom ranking, or cloud
-fallback.
+estimate, applies locality and affinity precedence, then ranks remaining
+eligible candidates by lower reported load, higher available VRAM, and
+configured order. It does not yet implement backend-pool selection, queueing, or
+cloud fallback.
 
 ---
 

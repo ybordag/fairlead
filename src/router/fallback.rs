@@ -1,5 +1,11 @@
 use crate::router::backend::BackendState;
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ResourceRank {
+    pub current_load: Option<f64>,
+    pub available_vram_mb: u64,
+}
+
 /// Select the best available backend index, with optional origin-node locality
 /// and soft affinity.
 ///
@@ -25,7 +31,7 @@ pub async fn select_backend_excluding(
     origin_node: Option<&str>,
     excluded: &[usize],
 ) -> Option<usize> {
-    select_backend_excluding_resource(backends, preferred, origin_node, excluded, &[]).await
+    select_backend_excluding_resource(backends, preferred, origin_node, excluded, &[], &[]).await
 }
 
 /// Select the best available backend index while skipping both already
@@ -36,23 +42,26 @@ pub async fn select_backend_excluding_resource(
     origin_node: Option<&str>,
     excluded: &[usize],
     resource_ineligible: &[usize],
+    resource_ranks: &[Option<ResourceRank>],
 ) -> Option<usize> {
     let mut checked = Vec::with_capacity(2);
 
-    // Prefer same-node backends first. This is the first Bluewater locality
-    // rule; resource eligibility will be layered in later.
+    // Prefer same-node backends first. If multiple origin-local candidates are
+    // available, resource rank chooses the least-loaded / highest-headroom one.
     if let Some(origin) = origin_node {
-        for (i, backend) in backends.iter().enumerate() {
-            if excluded.contains(&i)
-                || resource_ineligible.contains(&i)
-                || backend.node_id.as_deref() != Some(origin)
-            {
-                continue;
-            }
-            checked.push(i);
-            if backend.circuit.write().await.is_available() {
-                return Some(i);
-            }
+        let candidates: Vec<_> = backends
+            .iter()
+            .enumerate()
+            .filter_map(|(i, backend)| {
+                (!excluded.contains(&i)
+                    && !resource_ineligible.contains(&i)
+                    && backend.node_id.as_deref() == Some(origin))
+                .then_some(i)
+            })
+            .collect();
+        checked.extend(candidates.iter().copied());
+        if let Some(idx) = best_available_backend(backends, &candidates, resource_ranks).await {
+            return Some(idx);
         }
     }
 
@@ -71,17 +80,67 @@ pub async fn select_backend_excluding_resource(
         }
     }
 
-    // Walk in declared priority order, skipping already-checked candidates.
-    for (i, backend) in backends.iter().enumerate() {
-        if checked.contains(&i) || excluded.contains(&i) || resource_ineligible.contains(&i) {
+    // Walk remaining backends in resource-rank order, using configured order as
+    // the deterministic tie-breaker.
+    let candidates: Vec<_> = backends
+        .iter()
+        .enumerate()
+        .filter_map(|(i, _)| {
+            (!checked.contains(&i) && !excluded.contains(&i) && !resource_ineligible.contains(&i))
+                .then_some(i)
+        })
+        .collect();
+    best_available_backend(backends, &candidates, resource_ranks).await
+}
+
+async fn best_available_backend(
+    backends: &[BackendState],
+    candidates: &[usize],
+    resource_ranks: &[Option<ResourceRank>],
+) -> Option<usize> {
+    let mut available = Vec::new();
+    for idx in candidates {
+        let Some(backend) = backends.get(*idx) else {
             continue;
-        }
+        };
         if backend.circuit.write().await.is_available() {
-            return Some(i);
+            available.push(*idx);
         }
     }
 
-    None
+    available
+        .into_iter()
+        .min_by(|a, b| compare_resource_rank(*a, *b, resource_ranks))
+}
+
+fn compare_resource_rank(
+    a: usize,
+    b: usize,
+    resource_ranks: &[Option<ResourceRank>],
+) -> std::cmp::Ordering {
+    let a_rank = resource_ranks.get(a).and_then(|rank| *rank);
+    let b_rank = resource_ranks.get(b).and_then(|rank| *rank);
+
+    match (a_rank, b_rank) {
+        (Some(a_rank), Some(b_rank)) => compare_rank_values(a_rank, b_rank).then_with(|| a.cmp(&b)),
+        (Some(_), None) => std::cmp::Ordering::Less,
+        (None, Some(_)) => std::cmp::Ordering::Greater,
+        (None, None) => a.cmp(&b),
+    }
+}
+
+fn compare_rank_values(a: ResourceRank, b: ResourceRank) -> std::cmp::Ordering {
+    compare_optional_load(a.current_load, b.current_load)
+        .then_with(|| b.available_vram_mb.cmp(&a.available_vram_mb))
+}
+
+fn compare_optional_load(a: Option<f64>, b: Option<f64>) -> std::cmp::Ordering {
+    match (a, b) {
+        (Some(a), Some(b)) => a.partial_cmp(&b).unwrap_or(std::cmp::Ordering::Equal),
+        (Some(_), None) => std::cmp::Ordering::Less,
+        (None, Some(_)) => std::cmp::Ordering::Greater,
+        (None, None) => std::cmp::Ordering::Equal,
+    }
 }
 
 #[cfg(test)]
@@ -263,7 +322,8 @@ mod tests {
         ];
 
         assert_eq!(
-            select_backend_excluding_resource(&backends, None, Some("node-a"), &[], &[0]).await,
+            select_backend_excluding_resource(&backends, None, Some("node-a"), &[], &[0], &[])
+                .await,
             Some(1)
         );
     }
@@ -276,8 +336,102 @@ mod tests {
         ];
 
         assert_eq!(
-            select_backend_excluding_resource(&backends, None, Some("node-a"), &[], &[0, 1]).await,
+            select_backend_excluding_resource(&backends, None, Some("node-a"), &[], &[0, 1], &[])
+                .await,
             None
+        );
+    }
+
+    #[tokio::test]
+    async fn lower_load_backend_wins_among_remaining_candidates() {
+        let backends = vec![
+            healthy_on_node("http://node-a:8000/v1", "node-a"),
+            healthy_on_node("http://node-b:8000/v1", "node-b"),
+        ];
+        let ranks = vec![
+            Some(ResourceRank {
+                current_load: Some(0.8),
+                available_vram_mb: 60_000,
+            }),
+            Some(ResourceRank {
+                current_load: Some(0.2),
+                available_vram_mb: 20_000,
+            }),
+        ];
+
+        assert_eq!(
+            select_backend_excluding_resource(&backends, None, None, &[], &[], &ranks).await,
+            Some(1)
+        );
+    }
+
+    #[tokio::test]
+    async fn higher_headroom_breaks_equal_load_tie() {
+        let backends = vec![
+            healthy_on_node("http://node-a:8000/v1", "node-a"),
+            healthy_on_node("http://node-b:8000/v1", "node-b"),
+        ];
+        let ranks = vec![
+            Some(ResourceRank {
+                current_load: Some(0.2),
+                available_vram_mb: 20_000,
+            }),
+            Some(ResourceRank {
+                current_load: Some(0.2),
+                available_vram_mb: 60_000,
+            }),
+        ];
+
+        assert_eq!(
+            select_backend_excluding_resource(&backends, None, None, &[], &[], &ranks).await,
+            Some(1)
+        );
+    }
+
+    #[tokio::test]
+    async fn origin_node_precedence_over_load_ranking() {
+        let backends = vec![
+            healthy_on_node("http://node-a:8000/v1", "node-a"),
+            healthy_on_node("http://node-b:8000/v1", "node-b"),
+        ];
+        let ranks = vec![
+            Some(ResourceRank {
+                current_load: Some(0.8),
+                available_vram_mb: 20_000,
+            }),
+            Some(ResourceRank {
+                current_load: Some(0.1),
+                available_vram_mb: 60_000,
+            }),
+        ];
+
+        assert_eq!(
+            select_backend_excluding_resource(&backends, None, Some("node-a"), &[], &[], &ranks)
+                .await,
+            Some(0)
+        );
+    }
+
+    #[tokio::test]
+    async fn affinity_precedence_over_load_ranking() {
+        let backends = vec![
+            healthy_on_node("http://node-a:8000/v1", "node-a"),
+            healthy_on_node("http://node-b:8000/v1", "node-b"),
+        ];
+        let ranks = vec![
+            Some(ResourceRank {
+                current_load: Some(0.1),
+                available_vram_mb: 60_000,
+            }),
+            Some(ResourceRank {
+                current_load: Some(0.8),
+                available_vram_mb: 20_000,
+            }),
+        ];
+
+        assert_eq!(
+            select_backend_excluding_resource(&backends, Some(1), None, &[], &[], &ranks).await,
+            Some(1)
         );
     }
 }

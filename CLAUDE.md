@@ -256,7 +256,8 @@ LOG_LEVEL                    — tracing level: error, warn, info, debug, trace 
 - `ResourceRegistry`: per-node/backend resource reports with VRAM, load, and TTL
 - `POST /v1/resources/report` and `GET /v1/resources`
 - Router checks available VRAM before selecting a backend when
-  `RESOURCE_AWARE_ROUTING=true`
+  `RESOURCE_AWARE_ROUTING=true`; after locality and affinity, it prefers lower
+  reported load and then higher available VRAM
 - Three-tier priority queue with Tokio channels (realtime / batch / background)
 - Scheduler drains higher-priority channels before accepting lower-priority work
 - Inference requests carry a `X-Fairlead-Priority` header (default: `realtime`)

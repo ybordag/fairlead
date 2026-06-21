@@ -13,7 +13,7 @@ use tracing::{info, warn};
 use crate::{
     config::WorkloadKind,
     metrics::{FallbackLabels, RequestLabels, RetryLabels},
-    router::{select_backend_excluding_resource, BackendState},
+    router::{select_backend_excluding_resource, BackendState, ResourceRank},
     AppState,
 };
 
@@ -95,7 +95,7 @@ async fn forward(
 
     let mut attempted = Vec::new();
     let mut next_backend = None;
-    let resource_ineligible = resource_ineligible_backends(state, &workload_kind).await;
+    let resource_state = resource_selection_state(state, &workload_kind).await;
 
     loop {
         let idx = match next_backend.take() {
@@ -106,7 +106,8 @@ async fn forward(
                     preferred,
                     origin_node.as_deref(),
                     &attempted,
-                    &resource_ineligible,
+                    &resource_state.ineligible,
+                    &resource_state.ranks,
                 )
                 .await
                 else {
@@ -117,7 +118,7 @@ async fn forward(
                             None,
                             origin_node.as_deref(),
                             StatusCode::SERVICE_UNAVAILABLE,
-                            unavailable_outcome(&resource_ineligible),
+                            unavailable_outcome(&resource_state.ineligible),
                             started,
                         );
                         info!(
@@ -127,14 +128,15 @@ async fn forward(
                             affinity_key = thread_id.as_deref().unwrap_or(""),
                             selected_backend = "",
                             retry_count = attempted.len(),
-                            fallback_reason = unavailable_fallback_reason(&resource_ineligible),
+                            fallback_reason =
+                                unavailable_fallback_reason(&resource_state.ineligible),
                             status = StatusCode::SERVICE_UNAVAILABLE.as_u16(),
-                            outcome = unavailable_outcome(&resource_ineligible),
+                            outcome = unavailable_outcome(&resource_state.ineligible),
                             "request completed"
                         );
                         return (
                             StatusCode::SERVICE_UNAVAILABLE,
-                            unavailable_message(&resource_ineligible),
+                            unavailable_message(&resource_state.ineligible),
                         )
                             .into_response();
                     }
@@ -171,7 +173,7 @@ async fn forward(
             idx,
             preferred,
             origin_node.as_deref(),
-            &resource_ineligible,
+            &resource_state.ineligible,
         );
         if let Some(reason) = fallback_reason {
             record_fallback(state, workload, backend, origin_node.as_deref(), reason);
@@ -212,7 +214,8 @@ async fn forward(
                     preferred,
                     origin_node.as_deref(),
                     &attempted,
-                    &resource_ineligible,
+                    &resource_state.ineligible,
+                    &resource_state.ranks,
                 )
                 .await;
                 if next_backend.is_some() {
@@ -271,7 +274,8 @@ async fn forward(
                 preferred,
                 origin_node.as_deref(),
                 &attempted,
-                &resource_ineligible,
+                &resource_state.ineligible,
+                &resource_state.ranks,
             )
             .await;
             if next_backend.is_some() {
@@ -387,17 +391,30 @@ fn fallback_reason(
     None
 }
 
-async fn resource_ineligible_backends(state: &AppState, workload: &WorkloadKind) -> Vec<usize> {
+#[derive(Default)]
+struct ResourceSelectionState {
+    ineligible: Vec<usize>,
+    ranks: Vec<Option<ResourceRank>>,
+}
+
+async fn resource_selection_state(
+    state: &AppState,
+    workload: &WorkloadKind,
+) -> ResourceSelectionState {
+    let mut selection = ResourceSelectionState {
+        ineligible: Vec::new(),
+        ranks: vec![None; state.backends.len()],
+    };
+
     if !state.resource_policy.enabled {
-        return Vec::new();
+        return selection;
     }
 
     let required_vram_mb = state.resource_policy.required_vram_mb(workload);
-    let mut ineligible = Vec::new();
 
     for (idx, backend) in state.backends.iter().enumerate() {
         let Some(node_id) = backend.node_id.as_deref() else {
-            ineligible.push(idx);
+            selection.ineligible.push(idx);
             continue;
         };
 
@@ -406,16 +423,22 @@ async fn resource_ineligible_backends(state: &AppState, workload: &WorkloadKind)
             .fresh_backend_report(node_id, &backend.id)
             .await
         else {
-            ineligible.push(idx);
+            selection.ineligible.push(idx);
             continue;
         };
 
         if report.available_vram_mb < required_vram_mb {
-            ineligible.push(idx);
+            selection.ineligible.push(idx);
+            continue;
         }
+
+        selection.ranks[idx] = Some(ResourceRank {
+            current_load: report.current_load,
+            available_vram_mb: report.available_vram_mb,
+        });
     }
 
-    ineligible
+    selection
 }
 
 fn unavailable_outcome(resource_ineligible: &[usize]) -> &'static str {
@@ -1546,6 +1569,70 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn resource_aware_routing_prefers_lower_load_when_no_locality_or_affinity() {
+        let node_a = Router::new().route(
+            "/v1/chat/completions",
+            post(|| async { axum::Json(json!({"source":"node-a"})) }),
+        );
+        let node_b = Router::new().route(
+            "/v1/chat/completions",
+            post(|| async { axum::Json(json!({"source":"node-b"})) }),
+        );
+        let node_a_url = start_mock(node_a).await;
+        let node_b_url = start_mock(node_b).await;
+        let resources = crate::resources::ResourceRegistry::default();
+        resources
+            .report(crate::resources::ResourceReportRequest {
+                node_id: "node-a".into(),
+                backend_id: Some("node-a-vllm".into()),
+                total_vram_mb: 64_000,
+                reserved_vram_mb: 16_000,
+                current_load: Some(0.85),
+            })
+            .await
+            .unwrap();
+        resources
+            .report(crate::resources::ResourceReportRequest {
+                node_id: "node-b".into(),
+                backend_id: Some("node-b-vllm".into()),
+                total_vram_mb: 64_000,
+                reserved_vram_mb: 20_000,
+                current_load: Some(0.20),
+            })
+            .await
+            .unwrap();
+        let state = AppState {
+            client: reqwest::Client::new(),
+            backends: vec![
+                backend_on_node(node_a_url, "node-a"),
+                backend_on_node(node_b_url, "node-b"),
+            ],
+            affinity: SessionAffinity::default(),
+            metrics: crate::metrics::RoutingMetrics::default(),
+            resources,
+            resource_policy: crate::resources::ResourceRoutingPolicy {
+                enabled: true,
+                chat_completions_required_vram_mb: 1024,
+                embeddings_required_vram_mb: 512,
+            },
+        };
+        let fairlead = start_fairlead_with_state(state).await;
+
+        let resp = reqwest::Client::new()
+            .post(format!("{}/v1/chat/completions", fairlead))
+            .json(&json!({"model":"m","messages":[]}))
+            .send()
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), 200);
+        assert_eq!(
+            resp.json::<serde_json::Value>().await.unwrap()["source"],
+            "node-b"
+        );
+    }
+
+    #[tokio::test]
     async fn resource_aware_routing_ignores_stale_reports() {
         let node_a = Router::new().route(
             "/v1/chat/completions",
@@ -1557,7 +1644,7 @@ mod tests {
         );
         let node_a_url = start_mock(node_a).await;
         let node_b_url = start_mock(node_b).await;
-        let resources = crate::resources::ResourceRegistry::new(Duration::from_millis(10));
+        let resources = crate::resources::ResourceRegistry::new(Duration::from_millis(250));
         resources
             .report(crate::resources::ResourceReportRequest {
                 node_id: "node-a".into(),
@@ -1568,7 +1655,7 @@ mod tests {
             })
             .await
             .unwrap();
-        tokio::time::sleep(Duration::from_millis(20)).await;
+        tokio::time::sleep(Duration::from_millis(300)).await;
         resources
             .report(crate::resources::ResourceReportRequest {
                 node_id: "node-b".into(),

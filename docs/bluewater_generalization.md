@@ -324,7 +324,7 @@ Scope:
   chat and embeddings.
 - [x] Decide conservative behavior when no resource report exists.
 - [x] Add tests for local backend full -> peer backend selected.
-- [ ] Rank eligible candidates by load/headroom after locality and affinity.
+- [x] Rank eligible candidates by load/headroom after locality and affinity.
 
 Proposed decision pipeline:
 
@@ -334,7 +334,7 @@ candidates = remove circuit-open backends
 candidates = remove backends without enough reported capacity
 rank by origin-node locality
 rank by session affinity
-rank by load/headroom (future)
+rank by load/headroom
 rank by configured order
 ```
 

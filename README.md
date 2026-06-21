@@ -175,7 +175,8 @@ curl http://localhost:7000/v1/resources
 ```
 
 Resource-aware routing is opt-in. When enabled, Fairlead skips healthy backends
-that do not have a fresh report with enough available VRAM for the workload:
+that do not have a fresh report with enough available VRAM for the workload,
+then ranks eligible fallback candidates by lower load and higher available VRAM:
 
 ```bash
 RESOURCE_AWARE_ROUTING=true \
