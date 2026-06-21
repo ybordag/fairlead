@@ -1,3 +1,4 @@
+mod callbacks;
 mod config;
 mod error;
 mod health;
@@ -39,15 +40,19 @@ pub struct AppState {
     pub affinity: SessionAffinity,
     /// In-process routing metrics rendered by `/metrics`.
     pub metrics: RoutingMetrics,
+    /// Callback delivery retry and timeout settings.
+    pub callback_policy: callbacks::CallbackPolicy,
+    /// In-process callback delivery coordinator.
+    pub callback_dispatcher: callbacks::CallbackDispatcher,
     /// Cooperative resource reports from model servers and compute workers.
     pub resources: ResourceRegistry,
     /// Policy for using resource reports during backend selection.
     pub resource_policy: ResourceRoutingPolicy,
     /// Per-priority synchronous admission limits.
     pub priority_limiter: PriorityLimiter,
-    /// In-memory async job and lease state for Phase 6B/6C job API requests.
+    /// Async job and lease state, optionally backed by SQLite.
     pub jobs: jobs::JobRegistry,
-    /// In-memory worker registry for Phase 6B/6C.
+    /// In-memory worker registry for async worker-pull jobs.
     pub workers: workers::WorkerRegistry,
 }
 
@@ -64,6 +69,13 @@ async fn main() -> anyhow::Result<()> {
     };
 
     let client = reqwest::Client::new();
+    let metrics = RoutingMetrics::default();
+    let callback_policy = callbacks::CallbackPolicy {
+        max_attempts: cfg.callback_max_attempts,
+        timeout: Duration::from_secs(cfg.callback_timeout_secs),
+        retry_delay: Duration::from_millis(cfg.callback_retry_delay_ms),
+    };
+    let callback_dispatcher = callbacks::CallbackDispatcher::default();
 
     let backends: Vec<BackendState> = cfg
         .backends
@@ -88,10 +100,12 @@ async fn main() -> anyhow::Result<()> {
     }
 
     let state = AppState {
-        client,
+        client: client.clone(),
         backends,
         affinity: SessionAffinity::default(),
-        metrics: RoutingMetrics::default(),
+        metrics: metrics.clone(),
+        callback_policy,
+        callback_dispatcher: callback_dispatcher.clone(),
         resources: ResourceRegistry::new(Duration::from_secs(cfg.resource_report_ttl_secs)),
         resource_policy: ResourceRoutingPolicy {
             enabled: cfg.resource_aware_routing,
@@ -103,9 +117,16 @@ async fn main() -> anyhow::Result<()> {
             cfg.priority_batch_limit,
             cfg.priority_background_limit,
         ),
-        jobs,
+        jobs: jobs.clone(),
         workers: workers::WorkerRegistry::default(),
     };
+    callbacks::spawn_callback_recovery_loop(
+        callback_dispatcher,
+        client,
+        metrics,
+        callback_policy,
+        jobs,
+    );
     let app = build_router(state);
 
     let addr: SocketAddr = format!("0.0.0.0:{}", cfg.port).parse()?;
@@ -177,6 +198,8 @@ mod tests {
             backends: vec![],
             affinity: SessionAffinity::default(),
             metrics: RoutingMetrics::default(),
+            callback_policy: callbacks::CallbackPolicy::default(),
+            callback_dispatcher: callbacks::CallbackDispatcher::default(),
             resources: ResourceRegistry::default(),
             resource_policy: ResourceRoutingPolicy::default(),
             priority_limiter: PriorityLimiter::default(),

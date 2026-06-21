@@ -412,7 +412,7 @@ Scope:
 - [x] Add worker availability.
 - [x] Add worker utilization.
 - [x] Add job duration.
-- [ ] Add callback success/failure.
+- [x] Add callback success/failure.
 
 Acceptance criteria:
 
@@ -760,13 +760,15 @@ Fairlead the application source of truth.
 Scope: close the async loop for callers that want status pushed back instead of
 polling forever.
 
-- Deliver callbacks for terminal job states when `callback_url` is present.
-- Track callback success/failure separately from compute job status.
-- Add callback retry and timeout policy.
-- Add callback success/failure metrics.
-- Add final async end-to-end demo and documentation.
-- Document Temporal as deferred unless Rhizome needs durable multi-step workflow
-  orchestration beyond compute dispatch.
+- [x] Deliver callbacks for terminal job states when `callback_url` is present.
+- [x] Track callback success/failure separately from compute job status.
+- [x] Add callback success/failure metrics.
+- [x] Add callback retry and timeout policy.
+- [x] Persist callback delivery state and recover pending callbacks after
+  ordinary Fairlead restarts.
+- [x] Add final async end-to-end demo and documentation.
+- [x] Document Temporal as deferred unless Rhizome needs durable multi-step
+  workflow orchestration beyond compute dispatch.
 
 ### Phase 7A: Pool-Aware Routing and Placement Policies
 

@@ -7,10 +7,10 @@ health, circuit state, and session affinity.
 
 The name comes from sailing: a fairlead is a fitting that guides lines in exactly the right direction without friction or fouling.
 
-**Status:** Phase 6E is in progress on the `shackle` branch. Fairlead currently
-runs as an Axum HTTP service with `/health`, `/metrics`, `/v1/models`,
-`/v1/resources`, `/v1/resources/report`, `/v1/jobs`, `/v1/jobs/{id}`,
-`/v1/workers`, `/v1/workers/{id}/claim`,
+**Status:** Phase 6F is implemented on the `stay` branch and ready for PR.
+Fairlead currently runs as an Axum HTTP service with `/health`, `/metrics`,
+`/v1/models`, `/v1/resources`, `/v1/resources/report`, `/v1/jobs`,
+`/v1/jobs/{id}`, `/v1/workers`, `/v1/workers/{id}/claim`,
 `/v1/workers/{worker_id}/jobs/{job_id}/renew`,
 `/v1/workers/{worker_id}/jobs/{job_id}/complete`,
 `/v1/workers/{worker_id}/jobs/{job_id}/fail`, `/v1/scheduler/preview`,
@@ -43,7 +43,7 @@ The current service provides:
 - **Prometheus-style metrics** for backend circuit state, request outcomes,
   latency, fallback reasons, retry reasons, priority limits/in-flight counts,
   reported resource state, async queue depth/wait, worker utilization, and
-  terminal job duration.
+  terminal job duration, and callback delivery outcomes.
 
 Fairlead does **not** run inference itself. It routes requests to model servers
 such as vLLM. vLLM owns model loading, GPU execution, KV cache management, and
@@ -93,13 +93,23 @@ Implemented generalization work includes:
   requeue while attempts remain, and fail when attempts are exhausted.
 - **Terminal job duration metrics** grouped by priority, job type, and terminal
   status.
+- **SQLite-backed durable job state** as an opt-in mode for local restart
+  recovery.
+- **Terminal job callbacks** with bounded retry/timeout policy,
+  success/failure metrics, and SQLite-backed at-least-once restart recovery.
 
-Future Phase 6 subphases add durable job state, callback delivery, and callback
-success/failure metrics. Later phases add complete pool-aware routing, adapter
-boundaries, and cloud fallback.
+Future phases add process-level e2e coverage, complete pool-aware routing,
+adapter boundaries, and cloud fallback.
 
 See [`docs/planning/roadmap.md`](docs/planning/roadmap.md) for the
 implementation plan and acceptance criteria.
+
+Local GPU-free demos are available in [`demo/`](demo/):
+
+```bash
+./demo/run_routing_demo.sh
+./demo/run_async_jobs_demo.sh
+```
 
 ---
 
@@ -194,8 +204,28 @@ cargo run
 
 With `JOB_STORE=sqlite`, Fairlead persists submitted jobs, queue order, claim and
 lease state, attempts, cancellation, completion, failure, payloads, callback
-metadata, and result/error state. On startup, already-expired running leases are
-requeued when attempts remain and failed when attempts are exhausted.
+metadata, callback delivery state, and result/error state. On startup,
+already-expired running leases are requeued when attempts remain and failed when
+attempts are exhausted.
+
+Terminal async jobs with `callback_url` are delivered asynchronously. Callback
+delivery is at-least-once when SQLite persistence is enabled: pending callback
+state survives ordinary Fairlead restarts and the recovery loop retries delivery
+until a 2xx response is recorded. Callback handlers should be idempotent by job
+ID because a crash after the receiver handles a callback but before Fairlead
+records success can produce a duplicate callback after restart.
+
+Callback delivery is bounded per delivery sweep by:
+
+```bash
+CALLBACK_MAX_ATTEMPTS=3 \
+CALLBACK_TIMEOUT_SECS=5 \
+CALLBACK_RETRY_DELAY_MS=250 \
+cargo run
+```
+
+Each callback attempt is counted in `/metrics` by job type, terminal status,
+delivery outcome, and callback HTTP status.
 
 Health:
 

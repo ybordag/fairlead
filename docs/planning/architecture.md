@@ -265,7 +265,7 @@ POST /v1/workers/{worker_id}/jobs/{job_id}/fail — fail or requeue a held job
 GET  /v1/workers                — list registered workers
 ```
 
-Current Phase 6B/6C/6D behavior:
+Current Phase 6 behavior:
 
 - submitted jobs enter `queued`
 - submitted jobs are tracked in in-memory per-priority queues
@@ -306,8 +306,12 @@ Current Phase 6B/6C/6D behavior:
   lease, records an error, then requeues retryable failures when attempts remain
   or marks the job `failed`; both paths release worker capacity
 - no push dispatch exists yet; workers must pull by calling the claim endpoint
-- no callback is delivered yet
-- no durable queue or background scheduler loop exists yet
+- terminal jobs with `callback_url` dispatch asynchronous callbacks with bounded
+  retry and timeout policy
+- SQLite-backed callback state gives at-least-once delivery across ordinary
+  Fairlead restarts by retrying pending callbacks after startup
+- durable job state is available through opt-in SQLite, but there is no
+  background scheduler loop yet
 
 Current worker-pull execution flow:
 
@@ -321,7 +325,9 @@ job submitted
   → Fairlead records completion/failure and releases worker capacity
   → if the lease expires first, Fairlead records timeout error state and
     requeues or fails the job by remaining attempts
-  → future phase: callback fires to caller on completion
+  → terminal callback state is persisted when callback_url exists
+  → Fairlead posts the terminal job payload to the callback_url until a 2xx
+    response is recorded
 ```
 
 **Job types:**
@@ -342,9 +348,11 @@ job submitted
 - `POST /v1/resources/report` — GPU consumers and workers report capacity
 - `GET /v1/resources` — current resource control-plane state
 - `GET /metrics` — Prometheus: queue depth/wait, circuit states, VRAM per node,
-  worker availability, and worker in-flight capacity
-- Future persistent job state for running attempts, retries, callbacks, and
-  pruning.
+  worker availability, worker in-flight capacity, job duration, and callback
+  delivery outcomes
+- Persistent callback-attempt state and pending callback recovery are
+  implemented for SQLite-backed job state.
+- Future completed-job pruning.
 
 ### Worker-pull claim decision
 
@@ -520,6 +528,11 @@ result_ref
 error
 callback_url
 callback_status
+callback_attempt_count
+callback_last_attempt_at
+callback_delivered_at
+callback_last_http_status
+callback_last_error
 ```
 
 Common scheduler operations must be atomic:

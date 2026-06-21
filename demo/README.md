@@ -1,4 +1,14 @@
-# Local Routing Demo
+# Local Demos
+
+Fairlead includes GPU-free demos that run entirely on localhost:
+
+- `run_routing_demo.sh` shows synchronous OpenAI-compatible routing.
+- `run_async_jobs_demo.sh` shows async job submission, worker-pull execution,
+  terminal callback delivery, SQLite job state, and metrics.
+
+---
+
+## Routing Demo
 
 This demo runs Fairlead against two tiny OpenAI-compatible mock backends named
 `spark-a` and `spark-b`. It does not require GPUs, vLLM, Docker, or external
@@ -49,3 +59,52 @@ target/routing-demo/
 ```
 
 Those logs are generated artifacts and should not be committed.
+
+---
+
+## Async Jobs Demo
+
+This demo runs Fairlead with SQLite-backed async job state and a tiny local
+callback receiver. It does not require GPUs, vLLM, Docker, or external provider
+credentials.
+
+Run it from the repo root:
+
+```bash
+./demo/run_async_jobs_demo.sh
+```
+
+The script starts:
+
+- callback receiver on `127.0.0.1:18110`
+- Fairlead on `127.0.0.1:17010`
+- SQLite job store at `target/async-demo/fairlead-jobs.sqlite3`
+
+Ports can be overridden:
+
+```bash
+FAIRLEAD_ASYNC_DEMO_PORT=19010 \
+FAIRLEAD_ASYNC_DEMO_CALLBACK_PORT=19110 \
+./demo/run_async_jobs_demo.sh
+```
+
+## What It Shows
+
+The runner performs assertions for:
+
+1. A `vision_analysis` worker registers with capacity metadata.
+2. A batch `vision_analysis` job is submitted with a callback URL.
+3. `/v1/scheduler/preview` selects the compatible worker without mutating state.
+4. The worker claims the job and receives a lease.
+5. The worker completes the job with a result payload.
+6. The callback receiver gets the terminal job payload.
+7. Fairlead records the callback as delivered in the SQLite-backed job state.
+8. `/metrics` exposes queue, worker, duration, and callback metrics.
+
+The script writes logs, the SQLite DB, and the received callback payload to:
+
+```text
+target/async-demo/
+```
+
+Those files are generated artifacts and should not be committed.

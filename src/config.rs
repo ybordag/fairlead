@@ -2,6 +2,10 @@ use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
 use std::env::VarError;
 
+use crate::callbacks::{
+    DEFAULT_CALLBACK_MAX_ATTEMPTS, DEFAULT_CALLBACK_RETRY_DELAY_MS, DEFAULT_CALLBACK_TIMEOUT_SECS,
+};
+
 pub const DEFAULT_BACKEND_POOL: &str = "default";
 pub const DEFAULT_JOB_DB_PATH: &str = "fairlead_jobs.sqlite3";
 
@@ -175,6 +179,12 @@ pub struct Config {
     pub priority_background_limit: usize,
     /// Job state persistence backend. Default: memory.
     pub job_store: JobStoreConfig,
+    /// Max callback delivery attempts for terminal async jobs. Default: 3.
+    pub callback_max_attempts: u32,
+    /// Per-attempt callback timeout in seconds. Default: 5.
+    pub callback_timeout_secs: u64,
+    /// Delay between callback retry attempts in milliseconds. Default: 250.
+    pub callback_retry_delay_ms: u64,
 }
 
 impl Config {
@@ -249,8 +259,46 @@ impl Config {
                 .map_err(|e| anyhow!("invalid PRIORITY_BACKGROUND_LIMIT: {}", e))?,
 
             job_store: parse_job_store(&get)?,
+
+            callback_max_attempts: parse_nonzero(
+                "CALLBACK_MAX_ATTEMPTS",
+                DEFAULT_CALLBACK_MAX_ATTEMPTS,
+                &get,
+            )?,
+
+            callback_timeout_secs: parse_nonzero(
+                "CALLBACK_TIMEOUT_SECS",
+                DEFAULT_CALLBACK_TIMEOUT_SECS,
+                &get,
+            )?,
+
+            callback_retry_delay_ms: get("CALLBACK_RETRY_DELAY_MS")
+                .unwrap_or_else(|_| DEFAULT_CALLBACK_RETRY_DELAY_MS.to_string())
+                .parse()
+                .map_err(|e| anyhow!("invalid CALLBACK_RETRY_DELAY_MS: {}", e))?,
         })
     }
+}
+
+fn parse_nonzero<T>(
+    key: &str,
+    default: T,
+    get: &impl Fn(&str) -> Result<String, VarError>,
+) -> Result<T>
+where
+    T: TryFrom<u64> + ToString + PartialEq + Default,
+    <T as TryFrom<u64>>::Error: std::fmt::Display,
+{
+    let value: T = get(key)
+        .unwrap_or_else(|_| default.to_string())
+        .parse::<u64>()
+        .map_err(|e| anyhow!("invalid {}: {}", key, e))?
+        .try_into()
+        .map_err(|e| anyhow!("invalid {}: {}", key, e))?;
+    if value == T::default() {
+        return Err(anyhow!("invalid {}: value must be greater than zero", key));
+    }
+    Ok(value)
 }
 
 fn parse_job_store(get: &impl Fn(&str) -> Result<String, VarError>) -> Result<JobStoreConfig> {
@@ -457,6 +505,9 @@ mod tests {
         assert_eq!(cfg.priority_batch_limit, 4);
         assert_eq!(cfg.priority_background_limit, 2);
         assert_eq!(cfg.job_store, JobStoreConfig::Memory);
+        assert_eq!(cfg.callback_max_attempts, DEFAULT_CALLBACK_MAX_ATTEMPTS);
+        assert_eq!(cfg.callback_timeout_secs, DEFAULT_CALLBACK_TIMEOUT_SECS);
+        assert_eq!(cfg.callback_retry_delay_ms, DEFAULT_CALLBACK_RETRY_DELAY_MS);
     }
 
     #[test]
@@ -472,6 +523,9 @@ mod tests {
             ("PRIORITY_REALTIME_LIMIT", "16"),
             ("PRIORITY_BATCH_LIMIT", "6"),
             ("PRIORITY_BACKGROUND_LIMIT", "3"),
+            ("CALLBACK_MAX_ATTEMPTS", "5"),
+            ("CALLBACK_TIMEOUT_SECS", "9"),
+            ("CALLBACK_RETRY_DELAY_MS", "50"),
         ]))
         .unwrap();
         assert_eq!(cfg.circuit_failure_threshold, 5);
@@ -484,6 +538,9 @@ mod tests {
         assert_eq!(cfg.priority_realtime_limit, 16);
         assert_eq!(cfg.priority_batch_limit, 6);
         assert_eq!(cfg.priority_background_limit, 3);
+        assert_eq!(cfg.callback_max_attempts, 5);
+        assert_eq!(cfg.callback_timeout_secs, 9);
+        assert_eq!(cfg.callback_retry_delay_ms, 50);
     }
 
     #[test]
@@ -554,6 +611,19 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("invalid PRIORITY_REALTIME_LIMIT"));
+    }
+
+    #[test]
+    fn invalid_callback_policy_returns_err() {
+        for (key, value) in [
+            ("CALLBACK_MAX_ATTEMPTS", "0"),
+            ("CALLBACK_TIMEOUT_SECS", "0"),
+            ("CALLBACK_RETRY_DELAY_MS", "abc"),
+        ] {
+            let result = Config::from_lookup(env(&[(key, value)]));
+            assert!(result.is_err(), "expected {key}={value} to fail");
+            assert!(result.unwrap_err().to_string().contains(key));
+        }
     }
 
     #[test]
