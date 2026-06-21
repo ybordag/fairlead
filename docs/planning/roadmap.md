@@ -864,7 +864,10 @@ workload protocols.
     callback handling where needed.
 - **8D Clove: Background Maintenance Loops**
   - Add background expiry/recovery loops if claim-time sweeps are not enough.
-  - Add optional background pruning loop if 8B needs it.
+  - Add optional background pruning loop that invokes the 8B terminal-job
+    pruning policy on a configured interval.
+  - Keep explicit `POST /v1/jobs/prune` as the operator/manual path even if a
+    background pruning loop is enabled later.
 - **8E Reef: Process-Level E2E Harness**
   - Add process-level restart e2e harnesses for jobs, leases, callbacks, and
     metrics.

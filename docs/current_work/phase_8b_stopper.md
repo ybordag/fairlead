@@ -20,6 +20,14 @@ processes can bound completed job history without weakening callback delivery.
   callback protection, SQLite persistence, endpoint responses, and metrics.
 - Added edge tests for delivered callback pruning, queued/running job
   preservation, and cumulative prune metrics across bounded prune calls.
+- Completed the 8B test audit:
+  - in-process tests cover config parsing, registry pruning policy, callback
+    safety, queue/running preservation, endpoint response shape, metrics, and
+    SQLite persistence
+  - process-level restart, timing, callback receiver, large-database, and
+    concurrency tests are documented in `deferred_tests.md`
+  - background pruning is scoped to Phase 8D as a maintenance-loop user of the
+    explicit 8B pruning policy
 
 ## Remaining
 
