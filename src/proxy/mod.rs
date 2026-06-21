@@ -65,6 +65,10 @@ async fn forward(
         .get("x-fairlead-thread-id")
         .and_then(|v| v.to_str().ok())
         .map(str::to_owned);
+    let affinity_key = thread_id
+        .as_deref()
+        .map(|tid| affinity_key(workload_kind, tid));
+    let affinity_key_str = affinity_key.as_deref().unwrap_or("");
 
     // Extract optional origin node for locality-aware routing.
     let origin_node = headers
@@ -102,7 +106,7 @@ async fn forward(
             workload,
             priority = priority.as_str(),
             origin_node = origin_node.as_deref().unwrap_or(""),
-            affinity_key = thread_id.as_deref().unwrap_or(""),
+            affinity_key = affinity_key_str,
             selected_backend = "",
             retry_count = 0,
             fallback_reason = "",
@@ -114,8 +118,8 @@ async fn forward(
     };
 
     // Resolve preferred backend index (if any) then run the fallback chain.
-    let preferred = match thread_id {
-        Some(ref tid) => state.affinity.preferred(tid).await,
+    let preferred = match affinity_key {
+        Some(ref key) => state.affinity.preferred(key).await,
         None => None,
     };
 
@@ -159,7 +163,7 @@ async fn forward(
                             workload,
                             priority = priority.as_str(),
                             origin_node = origin_node.as_deref().unwrap_or(""),
-                            affinity_key = thread_id.as_deref().unwrap_or(""),
+                            affinity_key = affinity_key_str,
                             selected_backend = "",
                             retry_count = attempted.len(),
                             fallback_reason = unavailable_fallback_reason(
@@ -200,7 +204,7 @@ async fn forward(
                         workload,
                         priority = priority.as_str(),
                         origin_node = origin_node.as_deref().unwrap_or(""),
-                        affinity_key = thread_id.as_deref().unwrap_or(""),
+                        affinity_key = affinity_key_str,
                         selected_backend = "",
                         retry_count = attempted.len(),
                         fallback_reason = "",
@@ -263,7 +267,7 @@ async fn forward(
                     workload,
                     priority = priority.as_str(),
                     origin_node = origin_node.as_deref().unwrap_or(""),
-                    affinity_key = thread_id.as_deref().unwrap_or(""),
+                    affinity_key = affinity_key_str,
                     failed_backend = backend.id,
                     retry_count = attempted.len() + 1,
                     reason = "connection_error",
@@ -297,7 +301,7 @@ async fn forward(
                     workload,
                     priority = priority.as_str(),
                     origin_node = origin_node.as_deref().unwrap_or(""),
-                    affinity_key = thread_id.as_deref().unwrap_or(""),
+                    affinity_key = affinity_key_str,
                     selected_backend = backend.id,
                     retry_count = attempted.len(),
                     fallback_reason = fallback_reason.unwrap_or(""),
@@ -326,7 +330,7 @@ async fn forward(
                 workload,
                 priority = priority.as_str(),
                 origin_node = origin_node.as_deref().unwrap_or(""),
-                affinity_key = thread_id.as_deref().unwrap_or(""),
+                affinity_key = affinity_key_str,
                 failed_backend = backend.id,
                 retry_count = attempted.len() + 1,
                 status = status.as_u16(),
@@ -361,7 +365,7 @@ async fn forward(
                 workload,
                 priority = priority.as_str(),
                 origin_node = origin_node.as_deref().unwrap_or(""),
-                affinity_key = thread_id.as_deref().unwrap_or(""),
+                affinity_key = affinity_key_str,
                 selected_backend = backend.id,
                 retry_count = attempted.len(),
                 fallback_reason = fallback_reason.unwrap_or(""),
@@ -373,10 +377,10 @@ async fn forward(
         }
 
         backend.circuit.write().await.record_success();
-        // Update affinity so the next request from this thread prefers the
-        // same backend — including after a fallback re-route.
-        if let Some(ref tid) = thread_id {
-            state.affinity.record(tid, idx).await;
+        // Update workload-scoped affinity so the next request from this thread
+        // and workload prefers the same backend, including after fallback.
+        if let Some(ref key) = affinity_key {
+            state.affinity.record(key, idx).await;
         }
 
         let outcome = if attempted.is_empty() {
@@ -399,7 +403,7 @@ async fn forward(
             workload,
             priority = priority.as_str(),
             origin_node = origin_node.as_deref().unwrap_or(""),
-            affinity_key = thread_id.as_deref().unwrap_or(""),
+            affinity_key = affinity_key_str,
             selected_backend = backend.id,
             retry_count = attempted.len(),
             fallback_reason = fallback_reason.unwrap_or(""),
@@ -410,6 +414,10 @@ async fn forward(
 
         return upstream_response(upstream, status, priority_permit);
     }
+}
+
+fn affinity_key(workload: WorkloadKind, thread_id: &str) -> String {
+    format!("{}:{thread_id}", workload.as_str())
 }
 
 fn fallback_reason(
@@ -2401,7 +2409,7 @@ mod tests {
         assert_eq!(fields["request_id"], "trace-test-1");
         assert_eq!(fields["workload"], "chat_completions");
         assert_eq!(fields["origin_node"], "node-a");
-        assert_eq!(fields["affinity_key"], "thread-trace");
+        assert_eq!(fields["affinity_key"], "chat_completions:thread-trace");
         assert_eq!(fields["selected_backend"], "node-b-vllm");
         assert_eq!(fields["retry_count"], 0);
         assert_eq!(fields["fallback_reason"], "origin_unavailable");
@@ -2621,6 +2629,170 @@ mod tests {
 
         assert_eq!(resp.status(), 200);
         assert_eq!(affinity.len().await, 0);
+    }
+
+    #[test]
+    fn affinity_key_is_scoped_by_workload() {
+        assert_eq!(
+            affinity_key(WorkloadKind::ChatCompletions, "thread-1"),
+            "chat_completions:thread-1"
+        );
+        assert_eq!(
+            affinity_key(WorkloadKind::Embeddings, "thread-1"),
+            "embeddings:thread-1"
+        );
+    }
+
+    #[tokio::test]
+    async fn affinity_is_scoped_per_workload_for_same_thread_id() {
+        let chat_a = Router::new().route(
+            "/v1/chat/completions",
+            post(|| async { axum::Json(json!({"source":"chat-a"})) }),
+        );
+        let embed_a = Router::new().route(
+            "/v1/embeddings",
+            post(|| async {
+                axum::Json(json!({
+                    "object":"list",
+                    "data":[{"object":"embedding","index":0,"embedding":[0.1]}],
+                    "model":"embed-a"
+                }))
+            }),
+        );
+        let chat_b = Router::new().route(
+            "/v1/chat/completions",
+            post(|| async { axum::Json(json!({"source":"chat-b"})) }),
+        );
+        let embed_b = Router::new().route(
+            "/v1/embeddings",
+            post(|| async {
+                axum::Json(json!({
+                    "object":"list",
+                    "data":[{"object":"embedding","index":0,"embedding":[0.2]}],
+                    "model":"embed-b"
+                }))
+            }),
+        );
+
+        let chat_a_url = start_mock(chat_a).await;
+        let embed_a_url = start_mock(embed_a).await;
+        let chat_b_url = start_mock(chat_b).await;
+        let embed_b_url = start_mock(embed_b).await;
+
+        let chat_a_backend = BackendState::from_config(
+            BackendConfig {
+                id: "chat-a".into(),
+                url: chat_a_url,
+                node_id: None,
+                pool: "local-llm".into(),
+                workloads: vec![WorkloadKind::ChatCompletions],
+                health_path: None,
+            },
+            1,
+            Duration::from_secs(60),
+        );
+        let chat_a_handle = chat_a_backend.clone();
+        chat_a_handle.circuit.write().await.record_failure();
+
+        let embed_a_backend = BackendState::from_config(
+            BackendConfig {
+                id: "embed-a".into(),
+                url: embed_a_url,
+                node_id: None,
+                pool: "embedding".into(),
+                workloads: vec![WorkloadKind::Embeddings],
+                health_path: None,
+            },
+            10,
+            Duration::from_secs(60),
+        );
+        let chat_b_backend = BackendState::from_config(
+            BackendConfig {
+                id: "chat-b".into(),
+                url: chat_b_url,
+                node_id: None,
+                pool: "local-llm".into(),
+                workloads: vec![WorkloadKind::ChatCompletions],
+                health_path: None,
+            },
+            10,
+            Duration::from_secs(60),
+        );
+        let embed_b_backend = BackendState::from_config(
+            BackendConfig {
+                id: "embed-b".into(),
+                url: embed_b_url,
+                node_id: None,
+                pool: "embedding".into(),
+                workloads: vec![WorkloadKind::Embeddings],
+                health_path: None,
+            },
+            10,
+            Duration::from_secs(60),
+        );
+
+        let fairlead = start_fairlead_with_backends(vec![
+            chat_a_backend,
+            embed_a_backend,
+            chat_b_backend,
+            embed_b_backend,
+        ])
+        .await;
+        let client = reqwest::Client::new();
+        let chat_url = format!("{}/v1/chat/completions", fairlead);
+        let embed_url = format!("{}/v1/embeddings", fairlead);
+
+        let chat_first = client
+            .post(&chat_url)
+            .header("x-fairlead-thread-id", "thread-1")
+            .json(&json!({"model":"m","messages":[]}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            chat_first.json::<serde_json::Value>().await.unwrap()["source"],
+            "chat-b"
+        );
+
+        let embed_first = client
+            .post(&embed_url)
+            .header("x-fairlead-thread-id", "thread-1")
+            .json(&json!({"model":"m","input":"hello"}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            embed_first.json::<serde_json::Value>().await.unwrap()["model"],
+            "embed-a"
+        );
+
+        chat_a_handle.circuit.write().await.record_success();
+
+        let chat_second = client
+            .post(&chat_url)
+            .header("x-fairlead-thread-id", "thread-1")
+            .json(&json!({"model":"m","messages":[]}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            chat_second.json::<serde_json::Value>().await.unwrap()["source"],
+            "chat-b",
+            "chat should keep its own workload-scoped affinity"
+        );
+
+        let embed_second = client
+            .post(&embed_url)
+            .header("x-fairlead-thread-id", "thread-1")
+            .json(&json!({"model":"m","input":"hello"}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            embed_second.json::<serde_json::Value>().await.unwrap()["model"],
+            "embed-a",
+            "embeddings should not inherit chat affinity"
+        );
     }
 
     /// Affinity is only updated on success, never on failure. When a preferred

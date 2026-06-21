@@ -50,7 +50,18 @@ Implemented:
 - Return `503` without touching an upstream backend when no backend supports the
   requested workload.
 
+## Third Slice
+
+Implemented:
+
+- Chose per-workload session affinity for Clew.
+- Kept the public `X-Fairlead-Thread-Id` header unchanged.
+- Scoped the stored affinity key as `<workload>:<thread-id>`, for example
+  `chat_completions:abc` or `embeddings:abc`.
+- Added tests proving chat and embeddings with the same thread ID can keep
+  independent backend affinity.
+
 Next likely slice:
 
-- Decide whether session affinity should be global, per workload, or per backend
-  pool, then encode that policy in the routing path.
+- Add provider/header forwarding policy for content type, authorization, and
+  provider-specific opt-in headers.

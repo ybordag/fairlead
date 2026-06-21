@@ -497,7 +497,7 @@ Fairlead's shared state objects, each `Arc`-wrapped and cloned into each handler
 and background task:
 - `Arc<RwLock<BackendMap>>` — backend states and circuit breakers
 - `Arc<RwLock<ResourceRegistry>>` — cooperative resource reports per node/backend
-- `Arc<RwLock<AffinityMap>>` — thread_id → preferred backend
+- `Arc<RwLock<AffinityMap>>` — workload-scoped thread ID → preferred backend
 - `Arc<RwLock<WorkerRegistry>>` — registered job workers
 
 ### 2. The async model requires structure, not just `async fn`
