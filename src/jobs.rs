@@ -893,6 +893,31 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn cancelling_running_job_prevents_later_lease_renewal() {
+        let jobs = JobRegistry::default();
+        jobs.submit(SubmitJobRequest {
+            kind: JobKind::VisionAnalysis,
+            priority: Priority::Batch,
+            payload: Value::Null,
+            callback_url: None,
+        })
+        .await
+        .unwrap();
+        jobs.claim_next_for_worker("worker-a", &[JobKind::VisionAnalysis], 30_000)
+            .await
+            .unwrap();
+
+        jobs.cancel("job-1").await;
+
+        let result = jobs.renew_lease("job-1", "worker-a", 30_000).await;
+        let RenewJobLeaseResult::NotRunning(job) = result else {
+            panic!("expected cancelled job to reject renewal");
+        };
+        assert_eq!(job.status, JobStatus::Cancelled);
+        assert!(job.lease.is_some());
+    }
+
+    #[tokio::test]
     async fn requeue_expired_leases_requeues_running_job_when_attempts_remain() {
         let jobs = JobRegistry::default();
         jobs.submit(SubmitJobRequest {
@@ -1016,6 +1041,37 @@ mod tests {
             JobStatus::Cancelled
         );
         assert!(jobs.queued_jobs_by_priority().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn cancelling_requeued_expired_job_prevents_future_claim() {
+        let jobs = JobRegistry::default();
+        jobs.submit(SubmitJobRequest {
+            kind: JobKind::Cluster,
+            priority: Priority::Background,
+            payload: Value::Null,
+            callback_url: None,
+        })
+        .await
+        .unwrap();
+
+        jobs.claim_next_for_worker("worker-a", &[JobKind::Cluster], 0)
+            .await
+            .unwrap();
+        let report = jobs.requeue_expired_leases().await;
+        assert_eq!(report.requeued, 1);
+
+        jobs.cancel("job-1").await;
+
+        assert!(jobs
+            .claim_next_for_worker("worker-b", &[JobKind::Cluster], 30_000)
+            .await
+            .is_none());
+        assert!(jobs.queue_snapshots().await.is_empty());
+        assert_eq!(
+            jobs.get("job-1").await.unwrap().status,
+            JobStatus::Cancelled
+        );
     }
 
     #[tokio::test]

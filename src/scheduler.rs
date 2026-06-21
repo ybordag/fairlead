@@ -736,6 +736,102 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn worker_renew_endpoint_rejects_cancelled_running_job() {
+        let jobs = JobRegistry::default();
+        let workers = WorkerRegistry::default();
+
+        jobs.submit(SubmitJobRequest {
+            kind: JobKind::VisionAnalysis,
+            priority: Priority::Batch,
+            payload: Value::Null,
+            callback_url: None,
+        })
+        .await
+        .unwrap();
+        jobs.claim_next_for_worker("vision-worker", &[JobKind::VisionAnalysis], 30_000)
+            .await
+            .unwrap();
+        jobs.cancel("job-1").await;
+        workers
+            .register(RegisterWorkerRequest {
+                id: "vision-worker".into(),
+                endpoint_url: "http://vision-worker:9000".into(),
+                node_id: None,
+                job_types: vec![JobKind::VisionAnalysis],
+                max_concurrent_jobs: None,
+                available_vram_mb: None,
+            })
+            .await
+            .unwrap();
+
+        let app = build_router(test_state(jobs, workers));
+        let response = app
+            .oneshot(
+                Request::post("/v1/workers/vision-worker/jobs/job-1/renew")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(value["job"]["status"], "cancelled");
+        assert_eq!(value["job"]["lease"]["worker_id"], "vision-worker");
+    }
+
+    #[tokio::test]
+    async fn worker_claim_endpoint_skips_cancelled_requeued_job() {
+        let jobs = JobRegistry::default();
+        let workers = WorkerRegistry::default();
+
+        jobs.submit(SubmitJobRequest {
+            kind: JobKind::Cluster,
+            priority: Priority::Background,
+            payload: Value::Null,
+            callback_url: None,
+        })
+        .await
+        .unwrap();
+        jobs.claim_next_for_worker("old-worker", &[JobKind::Cluster], 0)
+            .await
+            .unwrap();
+        jobs.requeue_expired_leases().await;
+        jobs.cancel("job-1").await;
+        workers
+            .register(RegisterWorkerRequest {
+                id: "cluster-worker".into(),
+                endpoint_url: "http://cluster-worker:9000".into(),
+                node_id: None,
+                job_types: vec![JobKind::Cluster],
+                max_concurrent_jobs: None,
+                available_vram_mb: None,
+            })
+            .await
+            .unwrap();
+
+        let app = build_router(test_state(jobs.clone(), workers));
+        let response = app
+            .oneshot(
+                Request::post("/v1/workers/cluster-worker/claim")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        assert_eq!(
+            jobs.get("job-1").await.unwrap().status,
+            crate::jobs::JobStatus::Cancelled
+        );
+        assert!(jobs.queue_snapshots().await.is_empty());
+    }
+
+    #[tokio::test]
     async fn worker_renew_endpoint_returns_not_found_for_missing_job() {
         let workers = WorkerRegistry::default();
         workers

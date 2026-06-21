@@ -74,8 +74,9 @@ Implemented:
   extending the expiry time.
 - Added registry and endpoint tests for success, missing workers/jobs, stale
   workers, wrong lease holders, non-running jobs, and expired leases.
+- Added cancellation ordering tests: cancelled running jobs cannot renew, and
+  cancelled requeued jobs cannot be claimed again.
 
 Remaining likely Cleat work:
 
-- Tighten cancellation-race tests around running jobs and future completion
-  endpoints.
+- Final documentation and PR-readiness pass.

@@ -710,7 +710,9 @@ execution simple and bounded.
   unsupported job types, and duplicate-claim prevention.
 - [x] Add tests for lease expiry.
 - [x] Add tests for lease renewal and lease ownership.
-- Add tests for cancellation races.
+- [x] Add tests for cancellation ordering around running leases and requeued
+  jobs.
+- Defer true cancellation races with worker complete/fail endpoints until 6D.
 
 ### Phase 6D: Worker Execution, Retries, and Utilization
 
