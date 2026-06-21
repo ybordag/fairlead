@@ -766,7 +766,7 @@ polling forever.
 - [x] Add callback retry and timeout policy.
 - [x] Persist callback delivery state and recover pending callbacks after
   ordinary Fairlead restarts.
-- Add final async end-to-end demo and documentation.
+- [x] Add final async end-to-end demo and documentation.
 - Document Temporal as deferred unless Rhizome needs durable multi-step workflow
   orchestration beyond compute dispatch.
 

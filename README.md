@@ -104,6 +104,13 @@ adapter boundaries, and cloud fallback.
 See [`docs/planning/roadmap.md`](docs/planning/roadmap.md) for the
 implementation plan and acceptance criteria.
 
+Local GPU-free demos are available in [`demo/`](demo/):
+
+```bash
+./demo/run_routing_demo.sh
+./demo/run_async_jobs_demo.sh
+```
+
 ---
 
 ## System topology

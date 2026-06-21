@@ -23,8 +23,8 @@ detail.
 
 ## Implementation And Examples
 
-- [`../demo/README.md`](../demo/README.md) — local GPU-free routing demo with two
-  mock OpenAI-compatible backends. The executable demo remains at the repo root.
+- [`../demo/README.md`](../demo/README.md) — local GPU-free routing and async job
+  demos. The executable demos remain under the repo-level `demo/` directory.
 - [`implementation/dgx_spark_deployment.md`](implementation/dgx_spark_deployment.md)
   — manual two-node DGX Spark deployment notes using vLLM and Fairlead.
 - [`implementation/fixture_examples.md`](implementation/fixture_examples.md) —

@@ -74,7 +74,20 @@ Implemented:
   - pending callback delivery after registry restart.
   - failed callback attempt retry after registry restart.
 - Updated storage migration coverage for `callback_state_json`.
+- Added focused tests for recovery-loop callback delivery and in-process
+  in-flight callback de-duplication.
+
+## Fourth Slice
+
+Implemented:
+
+- Added `demo/run_async_jobs_demo.sh`, a local GPU-free async jobs demo.
+- Added `demo/async_callback_receiver.py`, a tiny callback receiver used by the
+  demo.
+- The demo verifies worker registration, async job submission, scheduler
+  preview, worker claim, completion, callback receipt, persisted delivered
+  callback state, and queue/worker/duration/callback metrics.
 
 Remaining Stay work:
 
-- Add process-level or demo-level callback e2e coverage.
+- Final PR documentation review.
