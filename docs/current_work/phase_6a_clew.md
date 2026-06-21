@@ -28,7 +28,7 @@ Clew does not include:
 - Worker registration or heartbeat.
 - Queue depth or wait-time metrics.
 - Complete pool-aware backend configuration, pool fallback chains, or placement
-  policies. These are deferred to Phase 7A so they can cover both synchronous
+  policies. These are deferred to Phase 7 so they can cover both synchronous
   backends and async workers.
 - Cloud-provider fallback unless a clear demo need appears.
 

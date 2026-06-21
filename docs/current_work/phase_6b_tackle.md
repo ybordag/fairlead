@@ -27,7 +27,7 @@ Tackle does not include:
 
 - Domain-specific Rhizome state transitions.
 - Temporal or general workflow orchestration.
-- Complete pool-aware placement. That is deferred to Phase 7A.
+- Complete pool-aware placement. That is deferred to Phase 7.
 - Worker process supervision or restart policy.
 - Worker-pull claims, leases, execution, retries, callback delivery, or durable
   persistence. Those are Phase 6C+ work.

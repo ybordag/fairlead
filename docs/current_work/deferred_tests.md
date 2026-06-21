@@ -83,19 +83,44 @@ vLLM/Fairlead logs and distinguish pre-stream failure from mid-stream failure.
 
 ## Future Phase Tests
 
-### `phase_7a_pool_aware_routing_matrix`
+### `phase_7a_process_startup_pool_policy_validation`
 
-When Phase 7A implements complete pool-aware routing, add tests for:
+Add an opt-in process-level smoke test that starts the Fairlead binary with
+several pool policy configurations and verifies process startup or failure:
 
-- workload-to-pool validation at startup
-- missing, empty, and misspelled named pools
-- pool fallback chains, such as local -> peer -> cloud overflow
-- per-pool metrics and fallback labels
-- consistent pool semantics for synchronous backends and async workers
+- valid `BACKENDS` without `POOLS_JSON` starts and logs the derived `default`
+  pool policy
+- valid `BACKENDS_JSON`, `POOLS_JSON`, and `WORKLOAD_POOLS_JSON` starts and logs
+  the configured pools
+- malformed `POOLS_JSON` exits before binding a port
+- `BACKENDS_JSON` that references an undeclared explicit pool exits before
+  binding a port
+- `WORKLOAD_POOLS_JSON` with an undeclared pool exits before binding a port
+- process stderr or structured logs include the invalid config key name
 
-**Why deferred:** Clew intentionally keeps only pool metadata. Complete
-pool-aware placement is deferred to Phase 7A so the design can cover both
-synchronous and async compute.
+**Why deferred:** The current unit tests cover the parser and validation errors
+without spawning a process. A process-level test needs binary lifecycle, port
+allocation, log capture, and timeout handling.
+
+### `phase_7_pool_placement_e2e_matrix`
+
+After Phase 7B and 7C consume the validated policy, add local and DGX Spark e2e
+tests for complete pool placement behavior:
+
+- synchronous workload pool allowlists select only eligible backend pools
+- ordered pool fallback chains, if implemented, behave as documented
+- pool policy interacts correctly with origin locality, affinity, resource
+  ranking, circuit state, and same-request retry
+- async workers register with pools and only claim jobs whose workload can use
+  that worker pool
+- per-pool metrics report candidate counts, selected pool/backend or worker,
+  no-compatible-pool cases, fallback reasons, and capacity pressure
+- local mock e2e and two-node DGX Spark e2e use the same sanitized pool config
+  shape
+
+**Why deferred:** Phase 7A intentionally stops at config and validation. The
+routing, async placement, and deployment behavior belongs to Phase 7B through
+7D and needs a richer process/deployment harness.
 
 ### `phase_6c_worker_claims_and_leases`
 

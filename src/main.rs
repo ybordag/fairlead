@@ -61,6 +61,18 @@ async fn main() -> anyhow::Result<()> {
     let cfg = config::Config::from_env()?;
 
     init_tracing(&cfg);
+    let pool_ids = cfg
+        .pools
+        .iter()
+        .map(|pool| pool.id.as_str())
+        .collect::<Vec<_>>();
+    info!(
+        pool_count = cfg.pools.len(),
+        workload_policy_count = cfg.workload_pools.len(),
+        pools = ?pool_ids,
+        "loaded pool policy"
+    );
+
     let jobs = match &cfg.job_store {
         config::JobStoreConfig::Memory => jobs::JobRegistry::default(),
         config::JobStoreConfig::Sqlite { path } => {
