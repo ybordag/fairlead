@@ -212,9 +212,10 @@ When `POOLS_JSON` is absent, Fairlead derives pools from configured backend
 metadata and always includes the backward-compatible `default` pool. When
 `WORKLOAD_POOLS_JSON` is absent, all known workloads are considered eligible for
 all configured pools. Phase 7B applies this policy to synchronous chat and
-embedding backend eligibility. If a workload is omitted from an explicit partial
-policy, it remains permissive for now. Phase 7C applies the same vocabulary to
-async worker placement.
+embedding backend eligibility and treats each workload's pool list as an ordered
+fallback chain. If a workload is omitted from an explicit partial policy, it
+remains permissive for now. Phase 7C applies the same vocabulary to async worker
+placement.
 
 Async job state is in-memory by default. During Phase 6E, SQLite can be enabled
 explicitly for durable job state across ordinary Fairlead restarts:

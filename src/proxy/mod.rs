@@ -139,19 +139,19 @@ async fn forward(
     let mut next_backend = None;
     let route_ineligible = route_ineligible_backends(state, &route);
     let resource_state = resource_selection_state(state, &workload_kind).await;
-    let selection_ineligible = selection_ineligible(&route_ineligible, &resource_state.ineligible);
 
     loop {
         let idx = match next_backend.take() {
             Some(idx) => idx,
             None => {
-                let Some(idx) = select_backend_excluding_resource(
-                    &state.backends,
+                let Some(idx) = select_backend_for_route(
+                    state,
+                    &route,
                     preferred,
                     origin_node.as_deref(),
                     &attempted,
-                    &selection_ineligible,
-                    &resource_state.ranks,
+                    &route_ineligible,
+                    &resource_state,
                 )
                 .await
                 else {
@@ -286,13 +286,14 @@ async fn forward(
                     "retrying after upstream failure"
                 );
                 attempted.push(idx);
-                next_backend = select_backend_excluding_resource(
-                    &state.backends,
+                next_backend = select_backend_for_route(
+                    state,
+                    &route,
                     preferred,
                     origin_node.as_deref(),
                     &attempted,
-                    &selection_ineligible,
-                    &resource_state.ranks,
+                    &route_ineligible,
+                    &resource_state,
                 )
                 .await;
                 if next_backend.is_some() {
@@ -350,13 +351,14 @@ async fn forward(
                 "retrying after upstream failure"
             );
             attempted.push(idx);
-            next_backend = select_backend_excluding_resource(
-                &state.backends,
+            next_backend = select_backend_for_route(
+                state,
+                &route,
                 preferred,
                 origin_node.as_deref(),
                 &attempted,
-                &selection_ineligible,
-                &resource_state.ranks,
+                &route_ineligible,
+                &resource_state,
             )
             .await;
             if next_backend.is_some() {
@@ -547,9 +549,76 @@ fn route_allows_backend(
         && backend.workloads.contains(&route.kind)
 }
 
+async fn select_backend_for_route(
+    state: &AppState,
+    route: &WorkloadRoute,
+    preferred: Option<usize>,
+    origin_node: Option<&str>,
+    attempted: &[usize],
+    route_ineligible: &[usize],
+    resource_state: &ResourceSelectionState,
+) -> Option<usize> {
+    if let Some(pools) = state.workload_pools.pools_for(route.kind.as_str()) {
+        for pool in pools {
+            let pool_ineligible = pool_ineligible_backends(&state.backends, pool);
+            let ineligible = selection_ineligible_with_pool(
+                route_ineligible,
+                &resource_state.ineligible,
+                &pool_ineligible,
+            );
+            if let Some(idx) = select_backend_excluding_resource(
+                &state.backends,
+                preferred,
+                origin_node,
+                attempted,
+                &ineligible,
+                &resource_state.ranks,
+            )
+            .await
+            {
+                return Some(idx);
+            }
+        }
+        return None;
+    }
+
+    let ineligible = selection_ineligible(route_ineligible, &resource_state.ineligible);
+    select_backend_excluding_resource(
+        &state.backends,
+        preferred,
+        origin_node,
+        attempted,
+        &ineligible,
+        &resource_state.ranks,
+    )
+    .await
+}
+
+fn pool_ineligible_backends(backends: &[BackendState], pool: &str) -> Vec<usize> {
+    backends
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, backend)| (backend.pool != pool).then_some(idx))
+        .collect()
+}
+
 fn selection_ineligible(route_ineligible: &[usize], resource_ineligible: &[usize]) -> Vec<usize> {
     let mut ineligible = route_ineligible.to_vec();
     for idx in resource_ineligible {
+        if !ineligible.contains(idx) {
+            ineligible.push(*idx);
+        }
+    }
+    ineligible
+}
+
+fn selection_ineligible_with_pool(
+    route_ineligible: &[usize],
+    resource_ineligible: &[usize],
+    pool_ineligible: &[usize],
+) -> Vec<usize> {
+    let mut ineligible = selection_ineligible(route_ineligible, resource_ineligible);
+    for idx in pool_ineligible {
         if !ineligible.contains(idx) {
             ineligible.push(*idx);
         }
@@ -1848,6 +1917,109 @@ mod tests {
             "local"
         );
         assert_eq!(skipped_hits.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn workload_pool_policy_order_precedes_backend_order() {
+        let peer = Router::new().route(
+            "/v1/chat/completions",
+            post(|| async { axum::Json(json!({"source":"peer"})) }),
+        );
+        let local = Router::new().route(
+            "/v1/chat/completions",
+            post(|| async { axum::Json(json!({"source":"local"})) }),
+        );
+        let peer_url = start_mock(peer).await;
+        let local_url = start_mock(local).await;
+        let workload_pools = WorkloadPoolPolicy::new(BTreeMap::from([(
+            "chat_completions".to_string(),
+            vec!["local-llm".to_string(), "peer-llm".to_string()],
+        )]));
+        let fairlead = start_fairlead_with_workload_pools(
+            vec![
+                backend_with_workloads(
+                    peer_url,
+                    "peer-chat",
+                    "peer-llm",
+                    vec![WorkloadKind::ChatCompletions],
+                ),
+                backend_with_workloads(
+                    local_url,
+                    "local-chat",
+                    "local-llm",
+                    vec![WorkloadKind::ChatCompletions],
+                ),
+            ],
+            workload_pools,
+        )
+        .await;
+
+        let resp = reqwest::Client::new()
+            .post(format!("{}/v1/chat/completions", fairlead))
+            .json(&json!({"model":"m","messages":[]}))
+            .send()
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), 200);
+        assert_eq!(
+            resp.json::<serde_json::Value>().await.unwrap()["source"],
+            "local"
+        );
+    }
+
+    #[tokio::test]
+    async fn workload_pool_policy_falls_back_to_later_pool_when_earlier_pool_open() {
+        let local = Router::new().route(
+            "/v1/chat/completions",
+            post(|| async { axum::Json(json!({"source":"local"})) }),
+        );
+        let peer = Router::new().route(
+            "/v1/chat/completions",
+            post(|| async { axum::Json(json!({"source":"peer"})) }),
+        );
+        let local_url = start_mock(local).await;
+        let peer_url = start_mock(peer).await;
+        let local_backend = backend_with_workloads(
+            local_url,
+            "local-chat",
+            "local-llm",
+            vec![WorkloadKind::ChatCompletions],
+        );
+        for _ in 0..10 {
+            local_backend.circuit.write().await.record_failure();
+        }
+
+        let workload_pools = WorkloadPoolPolicy::new(BTreeMap::from([(
+            "chat_completions".to_string(),
+            vec!["local-llm".to_string(), "peer-llm".to_string()],
+        )]));
+        let fairlead = start_fairlead_with_workload_pools(
+            vec![
+                local_backend,
+                backend_with_workloads(
+                    peer_url,
+                    "peer-chat",
+                    "peer-llm",
+                    vec![WorkloadKind::ChatCompletions],
+                ),
+            ],
+            workload_pools,
+        )
+        .await;
+
+        let resp = reqwest::Client::new()
+            .post(format!("{}/v1/chat/completions", fairlead))
+            .json(&json!({"model":"m","messages":[]}))
+            .send()
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), 200);
+        assert_eq!(
+            resp.json::<serde_json::Value>().await.unwrap()["source"],
+            "peer"
+        );
     }
 
     #[tokio::test]

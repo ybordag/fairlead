@@ -801,10 +801,9 @@ async workers.
 
 - [x] Route OpenAI-compatible chat and embedding requests through workload-selected
   backend pools.
-- [ ] Add ordered pool fallback chains, such as local GPU pool -> peer GPU pool.
-  Current Phase 7B behavior is an allowlist: when several pools are allowed,
-  existing locality, affinity, resource ranking, and backend order choose among
-  those candidates.
+- [x] Add ordered pool fallback chains, such as local GPU pool -> peer GPU pool.
+  Within each pool, existing locality, affinity, resource ranking, and backend
+  order choose the concrete backend.
 - [x] Keep cloud overflow as a future pool target, not an implemented provider path.
 - [ ] Add per-pool synchronous metrics for candidate counts, selected pool/backend,
   fallback reason, and capacity pressure.

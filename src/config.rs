@@ -76,6 +76,10 @@ impl WorkloadPoolPolicy {
             .is_none_or(|pools| pools.iter().any(|allowed| allowed == pool))
     }
 
+    pub fn pools_for(&self, workload: &str) -> Option<&[String]> {
+        self.pools_by_workload.get(workload).map(Vec::as_slice)
+    }
+
     pub fn len(&self) -> usize {
         self.pools_by_workload.len()
     }

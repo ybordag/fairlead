@@ -245,11 +245,13 @@ policy omits a workload, that workload remains permissive for now. If every
 backend is outside the workload's allowed pools, Fairlead returns `503` without
 contacting an upstream backend.
 
-Phase 7B currently implements pool allowlists, not ordered pool fallback chains.
-When multiple pools are allowed, locality, affinity, resource ranking, and
-configured backend order still choose among the allowed candidates. Phase 7C
-will add worker pool metadata and apply the same vocabulary to async worker
-placement.
+For synchronous routing, the workload's pool list is ordered. Fairlead tries the
+first pool's eligible backends, then falls back to the next pool only when no
+backend in the earlier pool can be selected. Within each pool, the existing
+selection rules still apply: origin locality, session affinity, resource
+ranking, circuit state, and configured backend order choose the concrete
+backend. Phase 7C will add worker pool metadata and apply the same vocabulary to
+async worker placement.
 
 ---
 
