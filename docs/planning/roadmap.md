@@ -887,6 +887,8 @@ workload protocols.
   - [x] Add a reusable process harness that starts a real Fairlead binary on an
     isolated local port and verifies `/health`.
   - [x] Add JSON request helpers and a SQLite-backed job restart smoke test.
+  - [x] Add process-level worker registration, claim, completion, and metrics
+    smoke coverage.
   - Add process-level restart e2e harnesses for jobs, leases, callbacks, and
     metrics.
 - Keep Temporal deferred unless application workflows need durable multi-step

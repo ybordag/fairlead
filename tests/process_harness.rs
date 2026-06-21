@@ -108,6 +108,43 @@ impl FairleadProcess {
         json_response(response).await
     }
 
+    async fn get_text(&self, path: &str) -> (StatusCode, String) {
+        let response = reqwest::Client::new()
+            .get(format!("{}{}", self.base_url, path))
+            .send()
+            .await
+            .expect("send GET request to Fairlead process");
+        let status = response.status();
+        let body = response.text().await.expect("read Fairlead response body");
+        (status, body)
+    }
+
+    async fn submit_job(&self, body: Value) -> (StatusCode, Value) {
+        self.post_json("/v1/jobs", body).await
+    }
+
+    async fn register_worker(&self, body: Value) -> (StatusCode, Value) {
+        self.post_json("/v1/workers/register", body).await
+    }
+
+    async fn claim_worker_job(&self, worker_id: &str) -> (StatusCode, Value) {
+        self.post_json(&format!("/v1/workers/{worker_id}/claim"), json!({}))
+            .await
+    }
+
+    async fn complete_worker_job(
+        &self,
+        worker_id: &str,
+        job_id: &str,
+        body: Value,
+    ) -> (StatusCode, Value) {
+        self.post_json(
+            &format!("/v1/workers/{worker_id}/jobs/{job_id}/complete"),
+            body,
+        )
+        .await
+    }
+
     async fn shutdown(&mut self) {
         if self
             .child
@@ -196,15 +233,12 @@ async fn sqlite_job_state_survives_process_restart() {
     fairlead.wait_for_health().await;
 
     let (status, submitted) = fairlead
-        .post_json(
-            "/v1/jobs",
-            json!({
-                "type": "vision_analysis",
-                "priority": "batch",
-                "payload": { "image": "rose.jpg" },
-                "idempotency_key": "rose-1"
-            }),
-        )
+        .submit_job(json!({
+            "type": "vision_analysis",
+            "priority": "batch",
+            "payload": { "image": "rose.jpg" },
+            "idempotency_key": "rose-1"
+        }))
         .await;
     assert_eq!(status, StatusCode::ACCEPTED);
     assert_eq!(submitted["job"]["id"], "job-1");
@@ -220,19 +254,93 @@ async fn sqlite_job_state_survives_process_restart() {
     assert_eq!(fetched["job"]["idempotency_key"], "rose-1");
 
     let (status, duplicate) = fairlead
-        .post_json(
-            "/v1/jobs",
-            json!({
-                "type": "vision_analysis",
-                "priority": "batch",
-                "payload": { "image": "rose.jpg" },
-                "idempotency_key": "rose-1"
-            }),
-        )
+        .submit_job(json!({
+            "type": "vision_analysis",
+            "priority": "batch",
+            "payload": { "image": "rose.jpg" },
+            "idempotency_key": "rose-1"
+        }))
         .await;
     assert_eq!(status, StatusCode::ACCEPTED);
     assert_eq!(duplicate["job"]["id"], "job-1");
 
     fairlead.shutdown().await;
     fs::remove_dir_all(db_dir).expect("remove SQLite process test temp dir");
+}
+
+#[tokio::test]
+async fn worker_can_claim_and_complete_job_over_http() {
+    let mut fairlead = FairleadProcess::spawn(&[]);
+    fairlead.wait_for_health().await;
+
+    let (status, worker) = fairlead
+        .register_worker(json!({
+            "id": "vision-worker",
+            "endpoint_url": "http://vision-worker.local",
+            "node_id": "spark-a",
+            "pool": "default",
+            "job_types": ["vision_analysis"],
+            "max_concurrent_jobs": 1,
+            "available_vram_mb": 4096
+        }))
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(worker["worker"]["id"], "vision-worker");
+    assert_eq!(worker["worker"]["in_flight_jobs"], 0);
+
+    let (status, submitted) = fairlead
+        .submit_job(json!({
+            "type": "vision_analysis",
+            "priority": "batch",
+            "payload": { "image": "rose.jpg" }
+        }))
+        .await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+    assert_eq!(submitted["job"]["id"], "job-1");
+
+    let (status, claim) = fairlead.claim_worker_job("vision-worker").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(claim["job"]["id"], "job-1");
+    assert_eq!(claim["job"]["status"], "running");
+    assert_eq!(claim["job"]["lease"]["worker_id"], "vision-worker");
+    assert_eq!(claim["job"]["attempts"], 1);
+
+    let (status, completed) = fairlead
+        .complete_worker_job(
+            "vision-worker",
+            "job-1",
+            json!({
+                "attempt": 1,
+                "result": { "classification": "healthy" }
+            }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(completed["job"]["status"], "complete");
+    assert_eq!(
+        completed["job"]["result"],
+        json!({ "classification": "healthy" })
+    );
+
+    let (status, fetched) = fairlead.get_json("/v1/jobs/job-1").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(fetched["job"]["status"], "complete");
+    assert_eq!(
+        fetched["job"]["terminal_attempt"]["worker_id"],
+        "vision-worker"
+    );
+    assert_eq!(fetched["job"]["terminal_attempt"]["attempt"], 1);
+
+    let (status, workers) = fairlead.get_json("/v1/workers").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(workers["workers"][0]["id"], "vision-worker");
+    assert_eq!(workers["workers"][0]["in_flight_jobs"], 0);
+
+    let (status, metrics) = fairlead.get_text("/metrics").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(metrics
+        .contains("fairlead_worker_in_flight_jobs{worker=\"vision-worker\",node=\"spark-a\"} 0"));
+    assert!(metrics.contains("fairlead_job_duration_seconds_count{priority=\"batch\",type=\"vision_analysis\",status=\"complete\"} 1"));
+
+    fairlead.shutdown().await;
 }

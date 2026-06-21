@@ -347,7 +347,8 @@ Remaining harness requirements:
 - restart Fairlead with changed environment
 - start fake async workers and callback receivers
 - poll `/health`, `/metrics`, `/v1/jobs`, and `/v1/workers`
-- add typed helpers for workers, pruning, and metrics
+- add typed helpers for worker renew/fail/drain/reactivate/deregister,
+  pruning, and richer metrics assertions
 - assert captured stdout/stderr or structured logs for startup and
   maintenance-loop behavior
 

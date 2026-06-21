@@ -24,11 +24,16 @@ behavior that in-process Rust tests cannot cover.
   SQLite job storage, submits a job over HTTP, restarts the process, fetches the
   same job over HTTP, and verifies submit idempotency still returns the original
   job.
+- Added harness helpers for worker registration, worker claim, worker
+  completion, and text responses such as `/metrics`.
+- Added `worker_can_claim_and_complete_job_over_http`, which exercises the real
+  process HTTP flow for submit -> register worker -> claim -> complete -> fetch
+  final job -> scrape metrics.
 
 ## Next Slices
 
 - Add a callback receiver process or in-test HTTP server for callback e2e
   cases.
-- Add helpers for worker registration, claim, renew, complete, fail, and prune
+- Add helpers for worker renew/fail/drain/reactivate/deregister and prune
   endpoints.
 - Move deferred Phase 8 local-process cases into concrete tests incrementally.
