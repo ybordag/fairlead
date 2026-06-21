@@ -1240,6 +1240,18 @@ fairlead_workers{type="vision_analysis",status="available"} 1
 fairlead_workers{type="embed_batch",status="stale"} 1
 ```
 
+Worker capacity accounting exposes the current leased load per worker:
+
+```text
+fairlead_worker_in_flight_jobs{worker="vision-a",node="spark-a"} 1
+fairlead_worker_max_concurrent_jobs{worker="vision-a",node="spark-a"} 2
+fairlead_worker_available_job_slots{worker="vision-a",node="spark-a"} 1
+```
+
+`max_concurrent_jobs` is optional. Workers without a configured maximum can keep
+claiming compatible jobs, and Fairlead omits the max/available-slot gauges for
+that worker.
+
 `GET /v1/scheduler/preview` asks the scheduler to inspect the in-memory queues
 and registered workers:
 
@@ -1256,17 +1268,20 @@ lease is created, and Fairlead does not call the worker endpoint.
 
 `POST /v1/workers/{id}/claim` is the first mutating worker-pull scheduler path:
 
-1. Fairlead looks up the worker by ID.
-2. If the worker is missing, Fairlead returns `404`.
-3. If the worker is stale, Fairlead returns `409`.
-4. Otherwise, `JobRegistry::requeue_expired_leases()` sweeps running jobs whose
-   leases have expired. Jobs with attempts left return to their priority queue;
-   jobs with exhausted attempts become `failed`.
-5. `JobRegistry::claim_next_for_worker()` scans queued jobs in
+1. Fairlead sweeps expired leases before assigning more work. Jobs with attempts
+   left return to their priority queue; jobs with exhausted attempts become
+   `failed`; the previous worker's in-flight slot is released.
+2. Fairlead looks up the worker by ID.
+3. If the worker is missing, Fairlead returns `404`.
+4. If the worker is stale, Fairlead returns `409`.
+5. If the worker is already at `max_concurrent_jobs`, Fairlead returns `409`.
+6. Otherwise, Fairlead acquires one worker slot.
+7. `JobRegistry::claim_next_for_worker()` scans queued jobs in
    priority/FIFO order for a job type the worker supports.
-6. If a match exists, the job becomes `running`, `attempts` increments, lease
+8. If a match exists, the job becomes `running`, `attempts` increments, lease
    metadata is attached, and the job is removed from queue-depth accounting.
-7. If no compatible queued job exists, Fairlead returns `204`.
+9. If no compatible queued job exists, Fairlead releases the worker slot and
+   returns `204`.
 
 The claim endpoint still does not call the worker process. It only grants the
 worker a bounded lease and returns the job payload to run.
@@ -1293,7 +1308,8 @@ worker a bounded lease and returns the job payload to run.
 3. `JobRegistry::complete_lease()` checks that the job exists, is still
    `running`, and is leased to that worker.
 4. If those checks pass, the job becomes `complete`, the result payload is
-   stored, error state is cleared, and lease metadata is removed.
+   stored, error state is cleared, lease metadata is removed, and the worker's
+   in-flight slot is released.
 5. Missing jobs return `404`; stale workers, wrong workers, expired leases, and
    non-running jobs return `409`.
 
@@ -1307,6 +1323,7 @@ worker a bounded lease and returns the job payload to run.
 5. Retryable failures return the job to its priority queue when attempts remain.
 6. Non-retryable failures, or retryable failures after max attempts, mark the
    job `failed`.
+7. Both requeue and terminal-failure paths release the worker's in-flight slot.
 
 The proxy logs structured fields for the same decision: request ID, workload,
 origin node, affinity key, selected backend, retry count, fallback reason,

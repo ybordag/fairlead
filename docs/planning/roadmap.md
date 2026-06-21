@@ -111,6 +111,8 @@ Fairlead currently provides:
   availability metrics.
 - Non-dispatching scheduler preview endpoint that matches queued jobs to fresh,
   capable workers without leasing or dispatching.
+- Worker-pull claims, lease renewal, completion, failure, retryable requeue, and
+  worker in-flight capacity accounting.
 - Documentation for a manual two-node DGX Spark deployment.
 - Sanitized fixture conventions and ignore rules for private local config.
 
@@ -120,9 +122,8 @@ It does not yet provide:
   policy across sync backends and async workers.
 - CPU resource accounting and richer resource dimensions beyond coarse VRAM/load.
 - Durable priority queues or durable job persistence.
-- Worker leases, worker-pull claims, callback delivery, or async worker
-  execution.
-- Worker deregistration, graceful shutdown, or utilization metrics.
+- Callback delivery or durable async worker execution state.
+- Worker deregistration, graceful shutdown, or job duration metrics.
 
 ## Easy Tasks
 
@@ -409,7 +410,7 @@ Scope:
 - [x] Add queue depth by priority and workload.
 - [x] Add queue wait time by priority and workload.
 - [x] Add worker availability.
-- [ ] Add worker utilization.
+- [x] Add worker utilization.
 - [ ] Add job duration and callback success/failure.
 
 Acceptance criteria:
@@ -723,11 +724,12 @@ observable.
 - [x] Add completion and failure endpoints.
 - [x] Enforce bounded attempts and retry limits for reported worker failures.
 - Enforce per-attempt timeouts.
-- Track worker in-flight counts and capacity usage.
-- Add worker utilization metrics.
+- [x] Track worker in-flight counts and capacity usage.
+- [x] Add worker utilization metrics.
 - Add job duration metrics.
-- Add tests for timeout and utilization accounting.
+- Add tests for timeout and duration accounting.
 - [x] Add tests for success, retryable failure, and retry exhaustion.
+- [x] Add tests for utilization accounting.
 
 ### Phase 6E: Durable Job State and Recovery
 

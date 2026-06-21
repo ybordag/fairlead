@@ -11,7 +11,7 @@ use crate::{
         CompleteJobRequest, FailJobRequest, FinishJobResult, JobFailure, JobRecord, JobRegistry,
         RenewJobLeaseResult,
     },
-    workers::{WorkerRegistry, WorkerSnapshot},
+    workers::{AcquireWorkerSlotResult, WorkerRegistry, WorkerSnapshot},
     AppState,
 };
 
@@ -49,14 +49,20 @@ pub async fn claim_worker_job_handler(
     State(state): State<AppState>,
     Path(worker_id): Path<String>,
 ) -> Response {
-    let Some(worker) = state.workers.get(&worker_id).await else {
-        return (StatusCode::NOT_FOUND, "worker not found").into_response();
-    };
-    if worker.stale {
-        return (StatusCode::CONFLICT, "worker is stale").into_response();
-    }
+    sweep_expired_leases(&state).await;
 
-    state.jobs.requeue_expired_leases().await;
+    let worker = match state.workers.try_acquire_slot(&worker_id).await {
+        AcquireWorkerSlotResult::Acquired(worker) => worker,
+        AcquireWorkerSlotResult::AtCapacity(_) => {
+            return (StatusCode::CONFLICT, "worker is at capacity").into_response();
+        }
+        AcquireWorkerSlotResult::Stale(_) => {
+            return (StatusCode::CONFLICT, "worker is stale").into_response();
+        }
+        AcquireWorkerSlotResult::NotFound => {
+            return (StatusCode::NOT_FOUND, "worker not found").into_response();
+        }
+    };
 
     match state
         .jobs
@@ -64,7 +70,10 @@ pub async fn claim_worker_job_handler(
         .await
     {
         Some(job) => Json(JobClaimResponse { job }).into_response(),
-        None => StatusCode::NO_CONTENT.into_response(),
+        None => {
+            state.workers.release_slot(&worker.id).await;
+            StatusCode::NO_CONTENT.into_response()
+        }
     }
 }
 
@@ -79,7 +88,7 @@ pub async fn renew_worker_job_lease_handler(
         return (StatusCode::CONFLICT, "worker is stale").into_response();
     }
 
-    state.jobs.requeue_expired_leases().await;
+    sweep_expired_leases(&state).await;
 
     match state
         .jobs
@@ -112,14 +121,17 @@ pub async fn complete_worker_job_handler(
         return (StatusCode::CONFLICT, "worker is stale").into_response();
     }
 
-    state.jobs.requeue_expired_leases().await;
+    sweep_expired_leases(&state).await;
 
     match state
         .jobs
         .complete_lease(&job_id, &worker.id, request.result)
         .await
     {
-        FinishJobResult::Completed(job) => Json(JobResultResponse { job }).into_response(),
+        FinishJobResult::Completed(job) => {
+            state.workers.release_slot(&worker.id).await;
+            Json(JobResultResponse { job }).into_response()
+        }
         FinishJobResult::NotRunning(job)
         | FinishJobResult::LeaseNotHeld(job)
         | FinishJobResult::Expired(job) => {
@@ -148,7 +160,7 @@ pub async fn fail_worker_job_handler(
         return (StatusCode::BAD_REQUEST, "error cannot be empty").into_response();
     }
 
-    state.jobs.requeue_expired_leases().await;
+    sweep_expired_leases(&state).await;
 
     let failure = JobFailure {
         message: error.to_string(),
@@ -156,6 +168,7 @@ pub async fn fail_worker_job_handler(
     };
     match state.jobs.fail_lease(&job_id, &worker.id, failure).await {
         FinishJobResult::Requeued(job) | FinishJobResult::Failed(job) => {
+            state.workers.release_slot(&worker.id).await;
             Json(JobResultResponse { job }).into_response()
         }
         FinishJobResult::NotRunning(job)
@@ -165,6 +178,13 @@ pub async fn fail_worker_job_handler(
         }
         FinishJobResult::NotFound => (StatusCode::NOT_FOUND, "job not found").into_response(),
         FinishJobResult::Completed(_) => unreachable!("failure cannot complete a job"),
+    }
+}
+
+pub async fn sweep_expired_leases(state: &AppState) {
+    let report = state.jobs.requeue_expired_leases().await;
+    for worker_id in report.released_workers {
+        state.workers.release_slot(&worker_id).await;
     }
 }
 
@@ -552,6 +572,59 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn worker_claim_endpoint_rejects_worker_at_capacity() {
+        let jobs = JobRegistry::default();
+        let workers = WorkerRegistry::default();
+
+        for _ in 0..2 {
+            jobs.submit(SubmitJobRequest {
+                kind: JobKind::VisionAnalysis,
+                priority: Priority::Batch,
+                payload: Value::Null,
+                callback_url: None,
+            })
+            .await
+            .unwrap();
+        }
+        workers
+            .register(RegisterWorkerRequest {
+                id: "vision-worker".into(),
+                endpoint_url: "http://vision-worker:9000".into(),
+                node_id: None,
+                job_types: vec![JobKind::VisionAnalysis],
+                max_concurrent_jobs: Some(1),
+                available_vram_mb: None,
+            })
+            .await
+            .unwrap();
+
+        let app = build_router(test_state(jobs, workers.clone()));
+        let first = app
+            .clone()
+            .oneshot(
+                Request::post("/v1/workers/vision-worker/claim")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let second = app
+            .oneshot(
+                Request::post("/v1/workers/vision-worker/claim")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(first.status(), StatusCode::OK);
+        assert_eq!(second.status(), StatusCode::CONFLICT);
+        let worker = workers.get("vision-worker").await.unwrap();
+        assert_eq!(worker.in_flight_jobs, 1);
+        assert_eq!(worker.available_job_slots, Some(0));
+    }
+
+    #[tokio::test]
     async fn worker_claim_endpoint_requeues_expired_leases_before_claiming() {
         let jobs = JobRegistry::default();
         let workers = WorkerRegistry::default();
@@ -601,6 +674,204 @@ mod tests {
             jobs.get("job-1").await.unwrap().status,
             crate::jobs::JobStatus::Running
         );
+    }
+
+    #[tokio::test]
+    async fn worker_result_endpoints_release_worker_capacity() {
+        let jobs = JobRegistry::default();
+        let workers = WorkerRegistry::default();
+
+        for _ in 0..2 {
+            jobs.submit(SubmitJobRequest {
+                kind: JobKind::EmbedBatch,
+                priority: Priority::Realtime,
+                payload: Value::Null,
+                callback_url: None,
+            })
+            .await
+            .unwrap();
+        }
+        workers
+            .register(RegisterWorkerRequest {
+                id: "embed-worker".into(),
+                endpoint_url: "http://embed-worker:9000".into(),
+                node_id: None,
+                job_types: vec![JobKind::EmbedBatch],
+                max_concurrent_jobs: Some(1),
+                available_vram_mb: None,
+            })
+            .await
+            .unwrap();
+
+        let app = build_router(test_state(jobs, workers.clone()));
+        let claim = app
+            .clone()
+            .oneshot(
+                Request::post("/v1/workers/embed-worker/claim")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(claim.status(), StatusCode::OK);
+        assert_eq!(workers.get("embed-worker").await.unwrap().in_flight_jobs, 1);
+
+        let complete = app
+            .clone()
+            .oneshot(
+                Request::post("/v1/workers/embed-worker/jobs/job-1/complete")
+                    .header("content-type", "application/json")
+                    .body(Body::from(json!({"result": {"ok": true}}).to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(complete.status(), StatusCode::OK);
+        assert_eq!(workers.get("embed-worker").await.unwrap().in_flight_jobs, 0);
+
+        let second_claim = app
+            .clone()
+            .oneshot(
+                Request::post("/v1/workers/embed-worker/claim")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(second_claim.status(), StatusCode::OK);
+
+        let fail = app
+            .oneshot(
+                Request::post("/v1/workers/embed-worker/jobs/job-2/fail")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({"error": "temporary failure", "retryable": true}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(fail.status(), StatusCode::OK);
+        assert_eq!(workers.get("embed-worker").await.unwrap().in_flight_jobs, 0);
+    }
+
+    #[tokio::test]
+    async fn cancelling_leased_job_releases_worker_capacity() {
+        let jobs = JobRegistry::default();
+        let workers = WorkerRegistry::default();
+
+        jobs.submit(SubmitJobRequest {
+            kind: JobKind::VisionAnalysis,
+            priority: Priority::Batch,
+            payload: Value::Null,
+            callback_url: None,
+        })
+        .await
+        .unwrap();
+        workers
+            .register(RegisterWorkerRequest {
+                id: "vision-worker".into(),
+                endpoint_url: "http://vision-worker:9000".into(),
+                node_id: None,
+                job_types: vec![JobKind::VisionAnalysis],
+                max_concurrent_jobs: Some(1),
+                available_vram_mb: None,
+            })
+            .await
+            .unwrap();
+
+        let app = build_router(test_state(jobs, workers.clone()));
+        let claim = app
+            .clone()
+            .oneshot(
+                Request::post("/v1/workers/vision-worker/claim")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(claim.status(), StatusCode::OK);
+        assert_eq!(
+            workers.get("vision-worker").await.unwrap().in_flight_jobs,
+            1
+        );
+
+        let cancel = app
+            .oneshot(
+                Request::delete("/v1/jobs/job-1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(cancel.status(), StatusCode::OK);
+        assert_eq!(
+            workers.get("vision-worker").await.unwrap().in_flight_jobs,
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn expired_lease_sweep_releases_worker_capacity_before_claim() {
+        let jobs = JobRegistry::default();
+        let workers = WorkerRegistry::default();
+
+        jobs.submit(SubmitJobRequest {
+            kind: JobKind::VisionAnalysis,
+            priority: Priority::Batch,
+            payload: Value::Null,
+            callback_url: None,
+        })
+        .await
+        .unwrap();
+        jobs.submit(SubmitJobRequest {
+            kind: JobKind::VisionAnalysis,
+            priority: Priority::Batch,
+            payload: Value::Null,
+            callback_url: None,
+        })
+        .await
+        .unwrap();
+        workers
+            .register(RegisterWorkerRequest {
+                id: "old-worker".into(),
+                endpoint_url: "http://old-worker:9000".into(),
+                node_id: None,
+                job_types: vec![JobKind::VisionAnalysis],
+                max_concurrent_jobs: Some(1),
+                available_vram_mb: None,
+            })
+            .await
+            .unwrap();
+        workers
+            .register(RegisterWorkerRequest {
+                id: "new-worker".into(),
+                endpoint_url: "http://new-worker:9000".into(),
+                node_id: None,
+                job_types: vec![JobKind::VisionAnalysis],
+                max_concurrent_jobs: Some(1),
+                available_vram_mb: None,
+            })
+            .await
+            .unwrap();
+        workers.try_acquire_slot("old-worker").await;
+        jobs.claim_next_for_worker("old-worker", &[JobKind::VisionAnalysis], 0)
+            .await
+            .unwrap();
+
+        let app = build_router(test_state(jobs, workers.clone()));
+        let claim = app
+            .oneshot(
+                Request::post("/v1/workers/new-worker/claim")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(claim.status(), StatusCode::OK);
+        assert_eq!(workers.get("old-worker").await.unwrap().in_flight_jobs, 0);
+        assert_eq!(workers.get("new-worker").await.unwrap().in_flight_jobs, 1);
     }
 
     #[tokio::test]

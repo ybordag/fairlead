@@ -55,8 +55,8 @@ cargo watch -x run
 ## Current status
 
 **Phase 6C complete** (cleat → main). **Phase 6D is in progress on halyard**:
-worker completion/failure reporting, retries, utilization, and job duration
-metrics before durable state and callbacks.
+worker completion/failure reporting, retries, worker capacity accounting, and
+job duration metrics before durable state and callbacks.
 
 | Phase | Branch | Status |
 |---|---|---|
@@ -368,7 +368,8 @@ WORKER_HEARTBEAT_SECS        — interval before a worker is considered stale
 ### Phase 6D+ — Remaining async compute router work
 
 - Worker deregistration API and graceful shutdown semantics.
-- Worker utilization metrics.
+- [x] Worker utilization metrics for in-flight jobs, max concurrency, and
+  available slots.
 - Scheduler policy based on lease availability, VRAM headroom, and load.
 - Job manager: per-attempt timeouts, cancellation, and completed-job pruning.
 - Persistence path: SQLite first for local durable state, Postgres later for

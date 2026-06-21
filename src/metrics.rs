@@ -211,19 +211,45 @@ pub async fn metrics(State(state): State<AppState>) -> Response<String> {
 }
 
 async fn render_worker_metrics(state: &AppState) -> String {
-    let snapshots = state.workers.availability_snapshots().await;
+    let availability_snapshots = state.workers.availability_snapshots().await;
+    let utilization_snapshots = state.workers.utilization_snapshots().await;
     let mut body = String::from(
         "# HELP fairlead_workers Registered workers by job type and status\n\
-         # TYPE fairlead_workers gauge\n",
+         # TYPE fairlead_workers gauge\n\
+         # HELP fairlead_worker_in_flight_jobs Current leased jobs by worker\n\
+         # TYPE fairlead_worker_in_flight_jobs gauge\n\
+         # HELP fairlead_worker_max_concurrent_jobs Configured worker job capacity\n\
+         # TYPE fairlead_worker_max_concurrent_jobs gauge\n\
+         # HELP fairlead_worker_available_job_slots Remaining worker job capacity\n\
+         # TYPE fairlead_worker_available_job_slots gauge\n",
     );
 
-    for snapshot in snapshots {
+    for snapshot in availability_snapshots {
         let job_type = prometheus_escape(snapshot.job_type);
         let status = prometheus_escape(snapshot.status);
         body.push_str(&format!(
             "fairlead_workers{{type=\"{job_type}\",status=\"{status}\"}} {}\n",
             snapshot.count,
         ));
+    }
+
+    for snapshot in utilization_snapshots {
+        let worker = prometheus_escape(&snapshot.worker_id);
+        let node = prometheus_escape(snapshot.node_id.as_deref().unwrap_or(""));
+        body.push_str(&format!(
+            "fairlead_worker_in_flight_jobs{{worker=\"{worker}\",node=\"{node}\"}} {}\n",
+            snapshot.in_flight_jobs,
+        ));
+        if let Some(max_concurrent_jobs) = snapshot.max_concurrent_jobs {
+            body.push_str(&format!(
+                "fairlead_worker_max_concurrent_jobs{{worker=\"{worker}\",node=\"{node}\"}} {max_concurrent_jobs}\n",
+            ));
+        }
+        if let Some(available_job_slots) = snapshot.available_job_slots {
+            body.push_str(&format!(
+                "fairlead_worker_available_job_slots{{worker=\"{worker}\",node=\"{node}\"}} {available_job_slots}\n",
+            ));
+        }
     }
 
     body

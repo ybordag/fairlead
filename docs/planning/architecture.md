@@ -238,11 +238,12 @@ request arrives
 Phase 6B implements the HTTP job surface, non-dispatching worker registration,
 queue visibility, and scheduler preview with in-memory state. Phase 6C adds the
 first worker-pull claim path: Fairlead grants a bounded lease, marks the job
-running, and returns it to the worker. Fairlead also opportunistically requeues
-expired running leases before fresh workers claim more work. Worker execution,
-persistence, and callback delivery are later Phase 6 work. The design belongs
-in the architecture because it defines Fairlead's boundary: Fairlead should be a
-compute control plane, not a general-purpose workflow engine.
+running, and returns it to the worker. Phase 6D adds worker completion/failure,
+retryable requeue, and worker capacity accounting. Fairlead also
+opportunistically requeues expired running leases before fresh workers claim more
+work. Persistence and callback delivery are later Phase 6 work. The design
+belongs in the architecture because it defines Fairlead's boundary: Fairlead
+should be a compute control plane, not a general-purpose workflow engine.
 
 ```
 POST /v1/jobs        — submit, get job_id immediately
@@ -272,25 +273,33 @@ Current Phase 6B/6C/6D behavior:
 - cancellation removes queued jobs from queue depth and wait-time accounting
 - registered workers are listed with stale status
 - `/metrics` exposes `fairlead_workers{type,status}`
+- worker snapshots track `in_flight_jobs`, optional `max_concurrent_jobs`, and
+  optional `available_job_slots`
+- `/metrics` exposes `fairlead_worker_in_flight_jobs{worker,node}`,
+  `fairlead_worker_max_concurrent_jobs{worker,node}`, and
+  `fairlead_worker_available_job_slots{worker,node}`
 - `GET /v1/scheduler/preview` selects the next queued job and fresh compatible
   worker without changing job state
 - `POST /v1/workers/{id}/claim` validates the worker, grants a lease for a
-  compatible queued job, marks it `running`, and removes it from queue metrics
+  compatible queued job only if the worker has capacity, marks it `running`,
+  increments worker in-flight accounting, and removes it from queue metrics
 - worker claims first sweep expired leases: expired jobs reenter their priority
-  queue if attempts remain, otherwise they become `failed`
+  queue if attempts remain, otherwise they become `failed`; expired leases also
+  release the previous worker's in-flight slot
 - `POST /v1/workers/{worker_id}/jobs/{job_id}/renew` validates the worker,
   sweeps expired leases, and extends the lease only if that worker still holds
   the running job
 - `POST /v1/workers/{worker_id}/jobs/{job_id}/complete` validates the worker
-  and lease, then marks the job `complete` with a result payload
+  and lease, then marks the job `complete` with a result payload and releases
+  worker capacity
 - `POST /v1/workers/{worker_id}/jobs/{job_id}/fail` validates the worker and
   lease, records an error, then requeues retryable failures when attempts remain
-  or marks the job `failed`
+  or marks the job `failed`; both paths release worker capacity
 - no job is dispatched to a worker yet
 - no callback is delivered yet
 - no durable queue or background scheduler loop exists yet
 
-Future Phase 6C+ behavior after lease expiry and execution support:
+Current worker-pull execution flow:
 
 ```
 job submitted
@@ -299,7 +308,8 @@ job submitted
   → Fairlead records a bounded lease for the running attempt
   → worker processes async
   → worker completes or renews the job lease before it expires
-  → callback fires to caller on completion
+  → Fairlead records completion/failure and releases worker capacity
+  → future phase: callback fires to caller on completion
 ```
 
 **Job types:**
@@ -319,7 +329,8 @@ job submitted
 - `POST /v1/workers/{worker_id}/jobs/{job_id}/fail` — Phase 6D failure/retry
 - `POST /v1/resources/report` — GPU consumers and workers report capacity
 - `GET /v1/resources` — current resource control-plane state
-- `GET /metrics` — Prometheus: queue depth/wait, circuit states, VRAM per node
+- `GET /metrics` — Prometheus: queue depth/wait, circuit states, VRAM per node,
+  worker availability, and worker in-flight capacity
 - Persistent job state for running attempts, retries, callbacks, and pruning.
 
 ### Worker-pull claim decision

@@ -52,7 +52,33 @@ Implemented:
 
 Remaining likely Halyard work:
 
-- Worker in-flight and capacity accounting.
-- Worker utilization metrics.
+- Job duration metrics.
+- Per-attempt timeout behavior.
+
+## Second Slice
+
+Implemented:
+
+- Added worker in-flight accounting to the worker registry.
+- Preserved in-flight counts across worker registration upserts.
+- Added worker slot acquisition and release helpers around
+  `max_concurrent_jobs`.
+- Extended worker snapshots with `in_flight_jobs` and
+  `available_job_slots`.
+- Made `POST /v1/workers/{id}/claim` acquire worker capacity before leasing a
+  job.
+- Return `409` when a fresh worker is already at capacity.
+- Release worker capacity when a leased job completes, fails, is cancelled, or
+  is swept as expired.
+- Added worker utilization metrics:
+  `fairlead_worker_in_flight_jobs`,
+  `fairlead_worker_max_concurrent_jobs`, and
+  `fairlead_worker_available_job_slots`.
+- Added tests for capacity acquisition/release, registration upserts,
+  claim-time capacity rejection, result-time release, cancellation-time release,
+  expiry-sweep release, and metric output.
+
+Remaining likely Halyard work:
+
 - Job duration metrics.
 - Per-attempt timeout behavior.

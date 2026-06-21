@@ -136,10 +136,11 @@ pub struct JobQueueWaitSnapshot {
     pub wait_seconds_max: f64,
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct LeaseExpiryReport {
     pub requeued: usize,
     pub failed: usize,
+    pub released_workers: Vec<String>,
 }
 
 #[derive(Clone, Default)]
@@ -376,6 +377,7 @@ impl JobRegistry {
                 continue;
             }
 
+            report.released_workers.push(lease.worker_id.clone());
             job.lease = None;
             job.updated_at_unix_ms = now;
 
@@ -583,7 +585,12 @@ pub async fn get_job(State(state): State<AppState>, Path(id): Path<String>) -> R
 
 pub async fn cancel_job(State(state): State<AppState>, Path(id): Path<String>) -> Response {
     match state.jobs.cancel(&id).await {
-        CancelJobResult::Cancelled(job) => Json(JobResponse { job }).into_response(),
+        CancelJobResult::Cancelled(job) => {
+            if let Some(lease) = &job.lease {
+                state.workers.release_slot(&lease.worker_id).await;
+            }
+            Json(JobResponse { job }).into_response()
+        }
         CancelJobResult::AlreadyTerminal(job) => {
             (StatusCode::CONFLICT, Json(JobResponse { job })).into_response()
         }
@@ -1059,6 +1066,7 @@ mod tests {
             LeaseExpiryReport {
                 requeued: 1,
                 failed: 0,
+                released_workers: vec!["worker-a".into()],
             }
         );
 
@@ -1114,6 +1122,7 @@ mod tests {
             LeaseExpiryReport {
                 requeued: 0,
                 failed: 1,
+                released_workers: vec!["worker-a".into()],
             }
         );
 

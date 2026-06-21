@@ -85,10 +85,13 @@ Implemented generalization work includes:
 - **Initial worker result reporting** so the lease holder can complete a job
   with a result or report failure, with retryable failures requeued while
   attempts remain.
+- **Worker capacity accounting** so claims respect `max_concurrent_jobs` and
+  release in-flight slots on completion, failure, cancellation, or expired
+  leases.
 
-Future Phase 6 subphases add worker utilization metrics, durable job state,
-callback delivery, and async completion metrics. Later phases add complete
-pool-aware routing, adapter boundaries, and cloud fallback.
+Future Phase 6 subphases add job duration metrics, per-attempt timeout behavior,
+durable job state, callback delivery, and async completion metrics. Later phases
+add complete pool-aware routing, adapter boundaries, and cloud fallback.
 
 See [`docs/planning/roadmap.md`](docs/planning/roadmap.md) for the
 implementation plan and acceptance criteria.
