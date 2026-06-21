@@ -18,8 +18,6 @@ detail.
 - [`design.md`](design.md) — design horizon and longer-term product shape.
 - [`roadmap.md`](roadmap.md) — completed phases, current Trim scope, future
   phases, acceptance criteria, and deferred work.
-- [`job_scheduler_and_temporal.md`](job_scheduler_and_temporal.md) — async
-  scheduler boundary and why Temporal is deferred.
 
 ## Running And Demonstrating
 
@@ -38,7 +36,7 @@ detail.
 ## Maintenance Rule
 
 Keep current behavior in `README.md`, `architecture.md`, and
-`code_walkthrough.md`. Keep future work in `design.md`, `roadmap.md`, and
-`job_scheduler_and_temporal.md`. If a feature graduates from planned to
-implemented, update both the implementation docs and the roadmap in the same
-change.
+`code_walkthrough.md`. Keep future product direction in `design.md` and
+`roadmap.md`; keep architectural boundaries for future systems in
+`architecture.md`. If a feature graduates from planned to implemented, update
+both the implementation docs and the roadmap in the same change.

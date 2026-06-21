@@ -285,8 +285,6 @@ Start with [`docs/README.md`](docs/README.md) for the full documentation map.
   deployment notes for two DGX Spark nodes connected over InfiniBand.
 - [`docs/fixture_examples.md`](docs/fixture_examples.md) — conventions for
   sanitized test fixtures and ignored local deployment config.
-- [`docs/job_scheduler_and_temporal.md`](docs/job_scheduler_and_temporal.md) —
-  Fairlead's async compute scheduler boundary and why Temporal is deferred.
 - [`demo/README.md`](demo/README.md) — GPU-free routing demo.
 - [`docs/deferred_tests.md`](docs/deferred_tests.md) — known test gaps.
 

@@ -509,8 +509,8 @@ Early implementation scope:
 - Defer Temporal until product workflows need durable multi-step orchestration,
   fanout/fanin, long waits, or compensation logic.
 
-See `docs/job_scheduler_and_temporal.md` for the scheduler boundary and
-persistence rationale.
+See `docs/architecture.md` for the scheduler boundary, persistence rationale,
+and Temporal deferral rule.
 
 ### Worker Registration
 
