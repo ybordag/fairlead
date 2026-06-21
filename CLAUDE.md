@@ -7,9 +7,10 @@ routes synchronous OpenAI-compatible inference requests across local GPU nodes,
 manages circuit breaking and session failover, and tracks cooperative VRAM/load
 reports from model servers and other GPU consumers.
 
-It exposes an OpenAI-compatible inference API. A generic async job API is planned
-for a later phase. The inference path is synchronous (request → response). The
-future job path is async (submit → job_id → callback on completion).
+It exposes an OpenAI-compatible inference API and a first-slice generic async
+job API. The inference path is synchronous (request → response). The job path is
+currently submit → job_id → poll/cancel; worker dispatch, leases, durable queues,
+and callbacks are still planned Phase 6B work.
 
 See `docs/planning/design.md` for the design horizon and
 `docs/planning/architecture.md` for the current architecture.
@@ -17,7 +18,8 @@ See `docs/planning/design.md` for the design horizon and
 ## Related repos
 
 - **Rhizome** (Python) — the agent. Points its model client at Fairlead `/v1`.
-  Will submit async compute jobs to Fairlead once the Phase 6B job API exists.
+  Can submit async compute jobs to Fairlead's Phase 6B job API once Rhizome has
+  matching job schemas.
 - **Cambium** (Go) — the API gateway. Calls Rhizome; Rhizome calls Fairlead.
 - **Fairlead** (this repo, Rust) — routes to vLLM on spark-a/spark-b; cloud
   fallback is a future phase.
@@ -51,10 +53,9 @@ cargo watch -x run
 
 ## Current status
 
-**Phase 5 complete** (trim → main). **Phase 6A is implementation-complete on
-clew and in final review**: synchronous surface cleanup, including workload
-metadata, backend-pool metadata, header forwarding policy, and configured model
-metadata.
+**Phase 6A complete** (clew → main). **Phase 6B is in progress on tackle**:
+async compute routing, starting with an in-memory job API before durable queues,
+workers, leases, callbacks, and persistence.
 
 | Phase | Branch | Status |
 |---|---|---|
@@ -63,14 +64,14 @@ metadata.
 | 3 — Circuit breaker + health | batten → main | ✅ complete |
 | 4 — Fallback chain + session affinity | spinnaker → main | ✅ complete |
 | 5 — VRAM accounting + priority admission | trim → main | ✅ complete |
-| 6A — Synchronous surface cleanup | clew | final review |
-| 6B — Async job dispatch | — | pending |
+| 6A — Synchronous surface cleanup | clew → main | ✅ complete |
+| 6B — Async job dispatch | tackle | in progress |
 | 7A — Pool-aware routing + placement | — | pending |
 | 7 — Advanced compute + full metrics | — | pending |
 
 ## Project layout
 
-**What exists now (Phases 1–6A):**
+**What exists now (Phases 1–6B first slice):**
 
 ```
 src/
@@ -78,6 +79,7 @@ src/
   config.rs         — Config from env, backend metadata, workload route metadata
   error.rs          — FairleadError enum with IntoResponse impl
   health.rs         — GET /health → {"status":"ok"}
+  jobs.rs           — in-memory async job API: submit, get, cancel
   metrics.rs        — GET /metrics → Prometheus circuit_state gauge per backend
   models.rs         — GET /v1/models → configured backend/model metadata
   priority.rs       — per-priority synchronous admission limiter
@@ -125,13 +127,17 @@ POST /v1/embeddings          — OpenAI-compatible embedding generation
 GET  /v1/models              — list available backends/models
 ```
 
-### Planned async jobs
+### Async jobs
 
 ```
-POST   /v1/jobs              — submit a job, returns job_id immediately
+POST   /v1/jobs              — submit a job, returns queued in-memory job record
 GET    /v1/jobs/{id}         — check status: queued | running | complete | failed
 DELETE /v1/jobs/{id}         — cancel a queued job
 ```
+
+The first Phase 6B slice stores job records in memory only. Worker dispatch,
+durable queues, leases, callback delivery, and SQLite-backed persistence are
+still planned.
 
 Job request body:
 ```json
@@ -312,7 +318,8 @@ WORKER_HEARTBEAT_SECS        — interval before a worker is considered stale
 
 ### Phase 6B — Async job dispatch
 
-- Job API: `POST /v1/jobs`, `GET /v1/jobs/{id}`, `DELETE /v1/jobs/{id}`
+- [x] First-slice in-memory job API: `POST /v1/jobs`,
+  `GET /v1/jobs/{id}`, `DELETE /v1/jobs/{id}`
 - Durable priority queues with queue depth and queue wait-time metrics
 - Worker registration API: `POST /v1/workers/register`, heartbeat, deregister
 - Worker availability and utilization metrics

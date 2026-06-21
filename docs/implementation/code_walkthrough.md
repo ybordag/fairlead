@@ -37,7 +37,7 @@ flowchart TD
     probes --> probe_loop["background health loop\nGET backend health URL"]
     probe_loop --> circuit
 
-    main --> app_state["AppState\nclient + backends + affinity + resources + priority limiter"]
+    main --> app_state["AppState\nclient + backends + affinity + resources + jobs"]
     app_state --> router_build["build_router()"]
 
     router_build --> health_route["GET /health\nhealth::health()"]
@@ -100,6 +100,7 @@ At the top of `src/main.rs`:
 mod config;
 mod error;
 mod health;
+mod jobs;
 mod metrics;
 mod models;
 mod priority;
@@ -112,6 +113,7 @@ These lines tell the Rust compiler to compile files or directories with those
 names:
 
 - `mod config;` loads `src/config.rs`.
+- `mod jobs;` loads `src/jobs.rs`.
 - `mod priority;` loads `src/priority.rs`.
 - `mod proxy;` loads `src/proxy/mod.rs`.
 - `mod resources;` loads `src/resources.rs`.
@@ -298,6 +300,7 @@ pub struct AppState {
     pub resources: ResourceRegistry,
     pub resource_policy: ResourceRoutingPolicy,
     pub priority_limiter: PriorityLimiter,
+    pub jobs: JobRegistry,
 }
 ```
 
@@ -376,6 +379,7 @@ The program starts in `src/main.rs`.
 mod config;
 mod error;
 mod health;
+mod jobs;
 mod metrics;
 mod models;
 mod priority;
@@ -411,6 +415,7 @@ pub struct AppState {
 - `resources` stores cooperative VRAM/load reports.
 - `resource_policy` controls whether resource-aware eligibility is active.
 - `priority_limiter` stores per-priority synchronous admission limits.
+- `jobs` stores first-slice in-memory async job records.
 
 `#[derive(Clone)]` asks Rust to generate a `clone()` implementation. Axum clones
 state handles into request handlers. This is cheap here because the expensive
@@ -594,12 +599,13 @@ let state = AppState {
         cfg.priority_batch_limit,
         cfg.priority_background_limit,
     ),
+    jobs: JobRegistry::default(),
 };
 ```
 
 This packages the HTTP client, backend list, empty affinity map, metrics,
-resource registry, resource policy, and priority limiter into one value that Axum
-can pass to handlers.
+resource registry, resource policy, priority limiter, and in-memory job registry
+into one value that Axum can pass to handlers.
 
 ### 10. Build the HTTP Router
 
@@ -616,6 +622,8 @@ Router::new()
     .route("/v1/models", get(models::list_models))
     .route("/v1/resources", get(resources::list_resources))
     .route("/v1/resources/report", post(resources::report_resources))
+    .route("/v1/jobs", post(jobs::submit_job))
+    .route("/v1/jobs/:id", get(jobs::get_job).delete(jobs::cancel_job))
     .route("/v1/chat/completions", post(proxy::chat_completions))
     .route("/v1/embeddings", post(proxy::embeddings))
     .with_state(state)
@@ -628,6 +636,9 @@ This means:
 - `GET /v1/models` calls `models::list_models`.
 - `GET /v1/resources` calls `resources::list_resources`.
 - `POST /v1/resources/report` calls `resources::report_resources`.
+- `POST /v1/jobs` calls `jobs::submit_job`.
+- `GET /v1/jobs/{id}` calls `jobs::get_job`.
+- `DELETE /v1/jobs/{id}` calls `jobs::cancel_job`.
 - `POST /v1/chat/completions` calls `proxy::chat_completions`.
 - `POST /v1/embeddings` calls `proxy::embeddings`.
 

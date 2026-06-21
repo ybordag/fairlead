@@ -233,16 +233,26 @@ request arrives
 
 ### Surface 2: Async job dispatch
 
-This is planned for Phase 6B, not implemented in the current synchronous proxy.
-The design belongs in the architecture because it defines Fairlead's boundary:
-Fairlead should be a compute control plane, not a general-purpose workflow
-engine.
+The first Phase 6B slice implements the HTTP job surface with in-memory state.
+Scheduler dispatch, worker registration, leases, persistence, callback delivery,
+and queue metrics are still future Phase 6B slices. The design belongs in the
+architecture because it defines Fairlead's boundary: Fairlead should be a
+compute control plane, not a general-purpose workflow engine.
 
 ```
 POST /v1/jobs        — submit, get job_id immediately
 GET  /v1/jobs/{id}   — poll status
 DELETE /v1/jobs/{id} — cancel queued or running work when supported
 ```
+
+Current first-slice behavior:
+
+- submitted jobs enter `queued`
+- job state is in memory and is lost on process restart
+- cancellation marks queued jobs `cancelled`
+- no worker is selected yet
+- no callback is delivered yet
+- no durable queue or scheduler loop exists yet
 
 ```
 job submitted

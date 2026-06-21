@@ -38,7 +38,7 @@ Completed generalized proxy scope includes:
 - A repeatable small-cluster or mock demo.
 - Documentation for local/edge deployment and sanitized fixtures.
 
-The completed generalized proxy scope does not include:
+At the time, the completed generalized proxy scope did not include:
 
 - Resource registry or VRAM-aware scheduling.
 - Resource-aware backend selection.
@@ -47,8 +47,9 @@ The completed generalized proxy scope does not include:
 - Cloud-provider fallback and provider credential policy.
 - Full adapter implementations for non-OpenAI-compatible protocols.
 
-Those deferred items belong to later branches/phases so each branch stays a
-coherent milestone.
+Some of those items have since landed in Trim, Clew, and Tackle. This boundary
+is kept as historical context for why the generalization work was split across
+small branches.
 
 ## Trim Scope Boundary
 
@@ -112,7 +113,8 @@ It does not yet provide:
   policy across sync backends and async workers.
 - CPU resource accounting and richer resource dimensions beyond coarse VRAM/load.
 - Durable priority queues.
-- Async job submission, status, cancellation, worker registration, or callbacks.
+- Worker registration, leases, callback delivery, durable job persistence, and
+  async scheduler dispatch.
 
 ## Easy Tasks
 
@@ -648,7 +650,7 @@ It should not introduce queues, workers, or job state.
 
 ### Phase 6B: Async Compute Router
 
-- Add job API: submit, status, and cancellation.
+- [x] Add first-slice in-memory job API: submit, status, and cancellation.
 - Add durable priority queues.
 - Add queue depth and queue wait-time metrics by priority and workload.
 - Add worker registration and heartbeat.

@@ -74,6 +74,7 @@ mod tests {
             resources: ResourceRegistry::default(),
             resource_policy: ResourceRoutingPolicy::default(),
             priority_limiter: PriorityLimiter::default(),
+            jobs: crate::jobs::JobRegistry::default(),
         }
     }
 

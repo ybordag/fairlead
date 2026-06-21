@@ -7,9 +7,9 @@ health, circuit state, and session affinity.
 
 The name comes from sailing: a fairlead is a fitting that guides lines in exactly the right direction without friction or fouling.
 
-**Status:** Phase 6A is implementation-complete on the `clew` branch and is in
-final review. Fairlead currently runs as an Axum HTTP service with `/health`,
-`/metrics`, `/v1/models`, `/v1/resources`, `/v1/resources/report`,
+**Status:** Phase 6B is in progress on the `tackle` branch. Fairlead currently
+runs as an Axum HTTP service with `/health`, `/metrics`, `/v1/models`,
+`/v1/resources`, `/v1/resources/report`, `/v1/jobs`, `/v1/jobs/{id}`,
 `/v1/chat/completions`, and `/v1/embeddings`.
 
 ---
@@ -68,10 +68,12 @@ Implemented generalization work includes:
   instead of overloading a saturated priority bucket.
 - **Workload-aware observability** for selected backend, fallback reason,
   latency, priority admission, and resource state.
+- **Initial async job API** with in-memory submission, polling, cancellation, job
+  type, priority, payload, and callback metadata.
 
-Future phases add durable priority queues, async jobs, worker registration,
-complete pool-aware routing, adapter boundaries, queue wait-time metrics, and
-cloud fallback.
+Future phases add durable priority queues, worker registration, complete
+pool-aware routing, adapter boundaries, queue wait-time metrics, callback
+delivery, and cloud fallback.
 
 See [`docs/planning/roadmap.md`](docs/planning/roadmap.md) for the
 implementation plan and acceptance criteria.

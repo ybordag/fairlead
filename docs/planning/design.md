@@ -30,9 +30,9 @@ An AI agent application that makes LLM calls against local hardware faces severa
 - **No cloud fallback.** When local hardware is saturated, requests queue indefinitely or are dropped.
 - **No VRAM awareness.** Multiple GPU consumers (LLM serving, vision sidecars, embedding servers) compete for memory with no coordination, causing OOM failures.
 - **No session continuity.** A mid-session node failure has no recovery path.
-- **No compute-worker dispatch.** The application has no infrastructure-level
-  way to submit bounded compute jobs, select eligible workers, enforce leases,
-  or retry failed attempts.
+- **No compute-worker dispatch.** The application needs an infrastructure-level
+  way to select eligible workers, enforce leases, and retry failed attempts for
+  bounded async jobs.
 
 Solving these problems inside the application couples infrastructure concerns to business logic. Fairlead solves them as a separate infrastructure layer.
 
@@ -50,6 +50,9 @@ Current implemented endpoints:
 POST /v1/chat/completions
 POST /v1/embeddings
 GET  /v1/models
+POST /v1/jobs
+GET  /v1/jobs/{id}
+DELETE /v1/jobs/{id}
 GET  /health
 GET  /metrics
 POST /v1/resources/report
@@ -59,8 +62,6 @@ GET  /v1/resources
 Planned endpoints:
 
 ```text
-POST /v1/jobs
-GET  /v1/jobs/{id}
 POST /v1/workers/register
 ```
 

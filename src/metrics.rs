@@ -298,6 +298,7 @@ mod tests {
             resources: crate::resources::ResourceRegistry::default(),
             resource_policy: crate::resources::ResourceRoutingPolicy::default(),
             priority_limiter: crate::priority::PriorityLimiter::default(),
+            jobs: crate::jobs::JobRegistry::default(),
         };
         router_with_state(state)
     }
@@ -525,6 +526,7 @@ mod tests {
             resources: crate::resources::ResourceRegistry::default(),
             resource_policy: crate::resources::ResourceRoutingPolicy::default(),
             priority_limiter,
+            jobs: crate::jobs::JobRegistry::default(),
         };
         let app = router_with_state(state);
         let resp = app
@@ -566,6 +568,7 @@ mod tests {
             resources,
             resource_policy: crate::resources::ResourceRoutingPolicy::default(),
             priority_limiter: crate::priority::PriorityLimiter::default(),
+            jobs: crate::jobs::JobRegistry::default(),
         };
         let app = router_with_state(state);
         let resp = app
