@@ -454,6 +454,8 @@ environment variables:
 - `LOG_FORMAT`
 - `BACKENDS`
 - `BACKENDS_JSON`
+- `POOLS_JSON`
+- `WORKLOAD_POOLS_JSON`
 - `CIRCUIT_FAILURE_THRESHOLD`
 - `CIRCUIT_COOLDOWN_SECS`
 - `HEALTH_PROBE_INTERVAL_SECS`
@@ -488,6 +490,26 @@ IDs, node IDs, pools, supported workloads, and optional health probe paths:
 ```
 
 If parsing fails, `?` returns the error and the process exits.
+
+Phase 7A adds explicit placement policy config:
+
+```json
+["local-llm", "peer-llm", {"id": "vision"}]
+```
+
+That is the shape of `POOLS_JSON`. `WORKLOAD_POOLS_JSON` maps workload names to
+eligible pools:
+
+```json
+{
+  "chat_completions": ["local-llm", "peer-llm"],
+  "vision_analysis": ["vision"]
+}
+```
+
+At this stage the policy is parsed and validated but not yet applied to dispatch.
+If the pool list is omitted, Fairlead derives pools from backend metadata and
+keeps the `default` pool for compatibility with simple `BACKENDS` setup.
 
 ### 5. Initialize Tracing
 

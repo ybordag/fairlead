@@ -212,6 +212,38 @@ eligible candidates by lower reported load, higher available VRAM, and
 configured order. It does not yet implement backend-pool selection, durable
 queueing, or cloud fallback.
 
+### Pool Policy Model
+
+Phase 7 introduces pools as named placement boundaries shared by synchronous
+backends and async workers. A pool is not a scheduler by itself; it is a policy
+label such as `local-llm`, `peer-llm`, `vision`, or future `cloud-overflow`.
+Workloads then declare which pools they are allowed to use.
+
+Phase 7A adds the configuration and validation layer:
+
+```bash
+POOLS_JSON='["local-llm", "peer-llm", {"id": "vision"}]'
+WORKLOAD_POOLS_JSON='{
+  "chat_completions": ["local-llm", "peer-llm"],
+  "embeddings": ["local-llm", "peer-llm"],
+  "vision_analysis": ["vision"]
+}'
+```
+
+If `POOLS_JSON` is absent, Fairlead derives pools from backend metadata and
+always includes `default` for backward compatibility with simple `BACKENDS`
+configuration. If `WORKLOAD_POOLS_JSON` is absent, Fairlead creates a permissive
+default policy where every known workload can use every configured pool. Startup
+validation rejects empty pool IDs, duplicate pool IDs, backends that reference
+undeclared pools, unknown workload names, empty workload pool lists, duplicate
+pool references, and workload policies that reference undeclared pools.
+
+Phase 7A intentionally does not change dispatch. Synchronous routing still uses
+existing workload support and backend health/resource eligibility. Phase 7B
+will apply this validated policy to synchronous backend selection and fallback
+chains. Phase 7C will add worker pool metadata and apply the same vocabulary to
+async worker placement.
+
 ---
 
 ## What Fairlead does

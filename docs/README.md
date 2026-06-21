@@ -36,6 +36,8 @@ detail.
 
 ## Current Work
 
+- [`current_work/phase_7a_helm.md`](current_work/phase_7a_helm.md) — active
+  Phase 7A pool model and validation notes.
 - [`current_work/phase_6f_stay.md`](current_work/phase_6f_stay.md) — completed
   Phase 6F callback delivery and finalization notes.
 - [`current_work/phase_6e_shackle.md`](current_work/phase_6e_shackle.md) —

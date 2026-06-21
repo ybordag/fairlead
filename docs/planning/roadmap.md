@@ -787,11 +787,15 @@ async workers.
 
 #### Phase 7A: Pool Model and Validation
 
-- Add named backend and worker pools as first-class placement boundaries.
-- Preserve the default pool behavior for simple `BACKENDS` configuration.
-- Let workloads target one or more pools.
-- Validate missing, empty, misspelled, or unsupported pool references at startup
-  or request/job submission boundaries.
+- [x] Add named placement pools as the shared vocabulary for synchronous
+  backends and future async workers.
+- [x] Preserve the default pool behavior for simple `BACKENDS` configuration.
+- [x] Let workloads target one or more pools through validated
+  `WORKLOAD_POOLS_JSON` policy.
+- [x] Validate missing, empty, misspelled, duplicate, or unsupported pool
+  references at startup.
+- [x] Keep runtime dispatch behavior unchanged until Phase 7B and 7C consume
+  the validated policy.
 
 #### Phase 7B: Synchronous Backend Pool Routing
 

@@ -1,6 +1,9 @@
 use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
-use std::env::VarError;
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    env::VarError,
+};
 
 use crate::callbacks::{
     DEFAULT_CALLBACK_MAX_ATTEMPTS, DEFAULT_CALLBACK_RETRY_DELAY_MS, DEFAULT_CALLBACK_TIMEOUT_SECS,
@@ -8,6 +11,15 @@ use crate::callbacks::{
 
 pub const DEFAULT_BACKEND_POOL: &str = "default";
 pub const DEFAULT_JOB_DB_PATH: &str = "fairlead_jobs.sqlite3";
+
+const KNOWN_POOL_WORKLOADS: &[&str] = &[
+    "chat_completions",
+    "embeddings",
+    "vision_analysis",
+    "embed_batch",
+    "index_build",
+    "cluster",
+];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -34,6 +46,18 @@ pub enum BackendPoolPolicy {
 pub enum JobStoreConfig {
     Memory,
     Sqlite { path: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PoolConfig {
+    pub id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(untagged)]
+enum PoolConfigEntry {
+    Id(String),
+    Object(PoolConfig),
 }
 
 impl BackendPoolPolicy {
@@ -157,6 +181,14 @@ pub struct Config {
     /// `BACKENDS_JSON` enables node-aware metadata. `BACKENDS` remains supported
     /// as a comma-separated URL list and is converted into default-pool backends.
     pub backends: Vec<BackendConfig>,
+    /// Named placement pools shared by sync backends and future async workers.
+    ///
+    /// When `POOLS_JSON` is absent, Fairlead derives pools from configured
+    /// backends and always includes the backward-compatible `default` pool.
+    pub pools: Vec<PoolConfig>,
+    /// Workload-to-pool eligibility policy. Phase 7A validates this shape; later
+    /// Phase 7 slices apply it to synchronous routing and async worker claims.
+    pub workload_pools: BTreeMap<String, Vec<String>>,
     /// Consecutive failures required to open a circuit. Default: 3.
     pub circuit_failure_threshold: u32,
     /// Seconds to wait in Open state before probing again (Half-open). Default: 30.
@@ -195,6 +227,10 @@ impl Config {
     /// Internal constructor that accepts an arbitrary key lookup — used by tests
     /// to avoid touching global process environment state.
     fn from_lookup(get: impl Fn(&str) -> Result<String, VarError>) -> Result<Self> {
+        let backends = parse_backends(&get)?;
+        let pools = parse_pools(&get, &backends)?;
+        let workload_pools = parse_workload_pools(&get, &pools)?;
+
         Ok(Config {
             port: get("PORT")
                 .unwrap_or_else(|_| "7000".to_string())
@@ -207,7 +243,11 @@ impl Config {
                 .map(|v| v.to_lowercase() == "json")
                 .unwrap_or(false),
 
-            backends: parse_backends(&get)?,
+            backends,
+
+            pools,
+
+            workload_pools,
 
             circuit_failure_threshold: get("CIRCUIT_FAILURE_THRESHOLD")
                 .unwrap_or_else(|_| "3".to_string())
@@ -348,6 +388,51 @@ fn parse_backends(get: &impl Fn(&str) -> Result<String, VarError>) -> Result<Vec
     }
 }
 
+fn parse_pools(
+    get: &impl Fn(&str) -> Result<String, VarError>,
+    backends: &[BackendConfig],
+) -> Result<Vec<PoolConfig>> {
+    match get("POOLS_JSON") {
+        Ok(raw) => {
+            let entries: Vec<PoolConfigEntry> =
+                serde_json::from_str(&raw).map_err(|e| anyhow!("invalid POOLS_JSON: {}", e))?;
+            let pools = entries
+                .into_iter()
+                .map(|entry| match entry {
+                    PoolConfigEntry::Id(id) => PoolConfig { id },
+                    PoolConfigEntry::Object(pool) => pool,
+                })
+                .collect::<Vec<_>>();
+            validate_pools(&pools)?;
+            validate_backend_pool_refs(backends, &pools)?;
+            Ok(normalize_pools(pools))
+        }
+        Err(_) => {
+            let mut ids = BTreeSet::from([DEFAULT_BACKEND_POOL.to_string()]);
+            ids.extend(
+                backends
+                    .iter()
+                    .map(|backend| backend.pool.trim().to_string()),
+            );
+            Ok(ids.into_iter().map(|id| PoolConfig { id }).collect())
+        }
+    }
+}
+
+fn parse_workload_pools(
+    get: &impl Fn(&str) -> Result<String, VarError>,
+    pools: &[PoolConfig],
+) -> Result<BTreeMap<String, Vec<String>>> {
+    match get("WORKLOAD_POOLS_JSON") {
+        Ok(raw) => {
+            let parsed: BTreeMap<String, Vec<String>> = serde_json::from_str(&raw)
+                .map_err(|e| anyhow!("invalid WORKLOAD_POOLS_JSON: {}", e))?;
+            validate_workload_pools(parsed, pools)
+        }
+        Err(_) => Ok(default_workload_pools(pools)),
+    }
+}
+
 fn validate_backends(backends: &[BackendConfig]) -> Result<()> {
     for backend in backends {
         if backend.id.trim().is_empty() {
@@ -398,6 +483,129 @@ fn validate_backends(backends: &[BackendConfig]) -> Result<()> {
     Ok(())
 }
 
+fn validate_pools(pools: &[PoolConfig]) -> Result<()> {
+    if pools.is_empty() {
+        return Err(anyhow!("invalid POOLS_JSON: at least one pool is required"));
+    }
+
+    let mut seen = BTreeSet::new();
+    for pool in pools {
+        let id = pool.id.trim();
+        if id.is_empty() {
+            return Err(anyhow!("invalid POOLS_JSON: pool id cannot be empty"));
+        }
+        if !seen.insert(id.to_string()) {
+            return Err(anyhow!("invalid POOLS_JSON: duplicate pool id '{}'", id));
+        }
+    }
+
+    Ok(())
+}
+
+fn validate_backend_pool_refs(backends: &[BackendConfig], pools: &[PoolConfig]) -> Result<()> {
+    let pool_ids = pool_id_set(pools);
+    for backend in backends {
+        if !pool_ids.contains(backend.pool.trim()) {
+            return Err(anyhow!(
+                "invalid BACKENDS_JSON: backend '{}' references unknown pool '{}'",
+                backend.id,
+                backend.pool
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_workload_pools(
+    parsed: BTreeMap<String, Vec<String>>,
+    pools: &[PoolConfig],
+) -> Result<BTreeMap<String, Vec<String>>> {
+    if parsed.is_empty() {
+        return Err(anyhow!(
+            "invalid WORKLOAD_POOLS_JSON: at least one workload policy is required"
+        ));
+    }
+
+    let known_workloads = known_pool_workloads();
+    let pool_ids = pool_id_set(pools);
+    let mut normalized = BTreeMap::new();
+
+    for (workload, pools) in parsed {
+        let workload = workload.trim().to_string();
+        if !known_workloads.contains(workload.as_str()) {
+            return Err(anyhow!(
+                "invalid WORKLOAD_POOLS_JSON: unknown workload '{}'",
+                workload
+            ));
+        }
+        if pools.is_empty() {
+            return Err(anyhow!(
+                "invalid WORKLOAD_POOLS_JSON: workload '{}' must target at least one pool",
+                workload
+            ));
+        }
+
+        let mut seen = BTreeSet::new();
+        let mut normalized_pools = Vec::new();
+        for pool in pools {
+            let pool = pool.trim().to_string();
+            if pool.is_empty() {
+                return Err(anyhow!(
+                    "invalid WORKLOAD_POOLS_JSON: workload '{}' has an empty pool reference",
+                    workload
+                ));
+            }
+            if !pool_ids.contains(pool.as_str()) {
+                return Err(anyhow!(
+                    "invalid WORKLOAD_POOLS_JSON: workload '{}' references unknown pool '{}'",
+                    workload,
+                    pool
+                ));
+            }
+            if !seen.insert(pool.clone()) {
+                return Err(anyhow!(
+                    "invalid WORKLOAD_POOLS_JSON: workload '{}' references pool '{}' more than once",
+                    workload,
+                    pool
+                ));
+            }
+            normalized_pools.push(pool);
+        }
+
+        normalized.insert(workload, normalized_pools);
+    }
+
+    Ok(normalized)
+}
+
+fn normalize_pools(pools: Vec<PoolConfig>) -> Vec<PoolConfig> {
+    pools
+        .into_iter()
+        .map(|pool| PoolConfig {
+            id: pool.id.trim().to_string(),
+        })
+        .collect()
+}
+
+fn default_workload_pools(pools: &[PoolConfig]) -> BTreeMap<String, Vec<String>> {
+    let pool_ids = pools.iter().map(|pool| pool.id.clone()).collect::<Vec<_>>();
+    known_pool_workloads()
+        .into_iter()
+        .map(|workload| (workload.to_string(), pool_ids.clone()))
+        .collect()
+}
+
+fn known_pool_workloads() -> BTreeSet<&'static str> {
+    KNOWN_POOL_WORKLOADS.iter().copied().collect()
+}
+
+fn pool_id_set(pools: &[PoolConfig]) -> BTreeSet<String> {
+    pools
+        .iter()
+        .map(|pool| pool.id.trim().to_string())
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -412,12 +620,30 @@ mod tests {
         }
     }
 
+    fn pool_ids(cfg: &Config) -> Vec<&str> {
+        cfg.pools.iter().map(|pool| pool.id.as_str()).collect()
+    }
+
     #[test]
     fn defaults_when_env_absent() {
         let cfg = Config::from_lookup(env(&[])).unwrap();
         assert_eq!(cfg.port, 7000);
         assert_eq!(cfg.log_level, "info");
         assert!(!cfg.log_format_json);
+        assert_eq!(pool_ids(&cfg), vec![DEFAULT_BACKEND_POOL]);
+        assert_eq!(
+            cfg.workload_pools.get("chat_completions").unwrap(),
+            &vec![DEFAULT_BACKEND_POOL.to_string()]
+        );
+        let mut expected_workloads = KNOWN_POOL_WORKLOADS
+            .iter()
+            .map(|workload| workload.to_string())
+            .collect::<Vec<_>>();
+        expected_workloads.sort();
+        assert_eq!(
+            cfg.workload_pools.keys().cloned().collect::<Vec<_>>(),
+            expected_workloads
+        );
     }
 
     #[test]
@@ -692,6 +918,7 @@ mod tests {
                 BackendConfig::from_legacy_url(1, "http://node-b:8000/v1".into())
             ]
         );
+        assert_eq!(pool_ids(&cfg), vec![DEFAULT_BACKEND_POOL]);
     }
 
     #[test]
@@ -732,6 +959,7 @@ mod tests {
             cfg.backends[1].workloads,
             vec![WorkloadKind::ChatCompletions]
         );
+        assert_eq!(pool_ids(&cfg), vec![DEFAULT_BACKEND_POOL, "local-llm"]);
     }
 
     #[test]
@@ -839,5 +1067,105 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("health_path cannot be empty"));
+    }
+
+    #[test]
+    fn pools_json_accepts_string_and_object_entries() {
+        let cfg = Config::from_lookup(env(&[
+            (
+                "BACKENDS_JSON",
+                r#"[{"id":"node-a-vllm","url":"http://node-a:8000/v1","pool":"local-llm"}]"#,
+            ),
+            (
+                "POOLS_JSON",
+                r#"["default", {"id": " local-llm "}, {"id": "vision"}]"#,
+            ),
+        ]))
+        .unwrap();
+
+        assert_eq!(pool_ids(&cfg), vec!["default", "local-llm", "vision"]);
+    }
+
+    #[test]
+    fn pools_json_rejects_empty_or_duplicate_pool_ids() {
+        for (raw, expected) in [
+            (r#"[]"#, "at least one pool"),
+            (r#"["default", " "]"#, "pool id cannot be empty"),
+            (r#"["default", {"id": " default "}]"#, "duplicate pool id"),
+        ] {
+            let result = Config::from_lookup(env(&[("POOLS_JSON", raw)]));
+            assert!(result.is_err(), "expected {raw} to fail");
+            assert!(result.unwrap_err().to_string().contains(expected));
+        }
+    }
+
+    #[test]
+    fn explicit_pools_json_rejects_unknown_backend_pool_reference() {
+        let result = Config::from_lookup(env(&[
+            (
+                "BACKENDS_JSON",
+                r#"[{"id":"node-a-vllm","url":"http://node-a:8000/v1","pool":"local-llm"}]"#,
+            ),
+            ("POOLS_JSON", r#"["default"]"#),
+        ]));
+
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("references unknown pool 'local-llm'"));
+    }
+
+    #[test]
+    fn workload_pools_json_parses_known_workload_policy() {
+        let cfg = Config::from_lookup(env(&[
+            ("POOLS_JSON", r#"["local-llm", "vision"]"#),
+            (
+                "WORKLOAD_POOLS_JSON",
+                r#"{
+                    "chat_completions": ["local-llm"],
+                    "vision_analysis": ["vision", "local-llm"]
+                }"#,
+            ),
+        ]))
+        .unwrap();
+
+        assert_eq!(
+            cfg.workload_pools.get("chat_completions").unwrap(),
+            &vec!["local-llm".to_string()]
+        );
+        assert_eq!(
+            cfg.workload_pools.get("vision_analysis").unwrap(),
+            &vec!["vision".to_string(), "local-llm".to_string()]
+        );
+        assert!(!cfg.workload_pools.contains_key("embeddings"));
+    }
+
+    #[test]
+    fn workload_pools_json_rejects_invalid_policy() {
+        for (raw, expected) in [
+            (r#"{}"#, "at least one workload policy"),
+            (r#"{"rerank": ["default"]}"#, "unknown workload 'rerank'"),
+            (
+                r#"{"chat_completions": []}"#,
+                "must target at least one pool",
+            ),
+            (
+                r#"{"chat_completions": ["default", "default"]}"#,
+                "more than once",
+            ),
+            (
+                r#"{"chat_completions": ["missing"]}"#,
+                "references unknown pool 'missing'",
+            ),
+            (
+                r#"{"chat_completions": [" "]}"#,
+                "has an empty pool reference",
+            ),
+        ] {
+            let result = Config::from_lookup(env(&[("WORKLOAD_POOLS_JSON", raw)]));
+            assert!(result.is_err(), "expected {raw} to fail");
+            assert!(result.unwrap_err().to_string().contains(expected));
+        }
     }
 }
