@@ -886,6 +886,7 @@ workload protocols.
 - **8E Reef: Process-Level E2E Harness**
   - [x] Add a reusable process harness that starts a real Fairlead binary on an
     isolated local port and verifies `/health`.
+  - [x] Add JSON request helpers and a SQLite-backed job restart smoke test.
   - Add process-level restart e2e harnesses for jobs, leases, callbacks, and
     metrics.
 - Keep Temporal deferred unless application workflows need durable multi-step

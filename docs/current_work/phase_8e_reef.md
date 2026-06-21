@@ -17,11 +17,18 @@ behavior that in-process Rust tests cannot cover.
   - kills and waits for the process during cleanup
 - Added the first process-level smoke test:
   `fairlead_process_starts_serves_health_and_shuts_down`.
+- Added JSON request helpers for process-level `GET` and `POST` calls.
+- Added restart support that stops and starts Fairlead again with the same
+  port, temp directory, and environment.
+- Added `sqlite_job_state_survives_process_restart`, which starts Fairlead with
+  SQLite job storage, submits a job over HTTP, restarts the process, fetches the
+  same job over HTTP, and verifies submit idempotency still returns the original
+  job.
 
 ## Next Slices
 
-- Add SQLite-backed restart support to the harness.
-- Add helpers for JSON HTTP requests against `/v1/jobs` and `/v1/workers`.
 - Add a callback receiver process or in-test HTTP server for callback e2e
   cases.
+- Add helpers for worker registration, claim, renew, complete, fail, and prune
+  endpoints.
 - Move deferred Phase 8 local-process cases into concrete tests incrementally.

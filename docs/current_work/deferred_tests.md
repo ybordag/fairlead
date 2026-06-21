@@ -344,11 +344,10 @@ full scheduler-hardening harness.
 
 Remaining harness requirements:
 
-- restart Fairlead with the same SQLite DB and changed environment
+- restart Fairlead with changed environment
 - start fake async workers and callback receivers
-- use temporary SQLite job storage
 - poll `/health`, `/metrics`, `/v1/jobs`, and `/v1/workers`
-- add JSON request helpers for jobs, workers, pruning, and metrics
+- add typed helpers for workers, pruning, and metrics
 - assert captured stdout/stderr or structured logs for startup and
   maintenance-loop behavior
 
