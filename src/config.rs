@@ -15,7 +15,23 @@ pub enum WorkloadKind {
 pub struct WorkloadRoute {
     pub kind: WorkloadKind,
     pub upstream_path: &'static str,
+    pub backend_pool: BackendPoolPolicy,
     pub retry_server_errors: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BackendPoolPolicy {
+    Any,
+    Named(&'static str),
+}
+
+impl BackendPoolPolicy {
+    pub fn allows(self, pool: &str) -> bool {
+        match self {
+            Self::Any => true,
+            Self::Named(expected) => pool == expected,
+        }
+    }
 }
 
 impl WorkloadKind {
@@ -35,11 +51,13 @@ impl WorkloadKind {
             Self::ChatCompletions => WorkloadRoute {
                 kind: self,
                 upstream_path: "chat/completions",
+                backend_pool: BackendPoolPolicy::Any,
                 retry_server_errors: true,
             },
             Self::Embeddings => WorkloadRoute {
                 kind: self,
                 upstream_path: "embeddings",
+                backend_pool: BackendPoolPolicy::Any,
                 retry_server_errors: true,
             },
         }
@@ -366,12 +384,21 @@ mod tests {
         let chat = WorkloadKind::ChatCompletions.route();
         assert_eq!(chat.kind, WorkloadKind::ChatCompletions);
         assert_eq!(chat.upstream_path, "chat/completions");
+        assert_eq!(chat.backend_pool, BackendPoolPolicy::Any);
         assert!(chat.retry_server_errors);
 
         let embeddings = WorkloadKind::Embeddings.route();
         assert_eq!(embeddings.kind, WorkloadKind::Embeddings);
         assert_eq!(embeddings.upstream_path, "embeddings");
+        assert_eq!(embeddings.backend_pool, BackendPoolPolicy::Any);
         assert!(embeddings.retry_server_errors);
+    }
+
+    #[test]
+    fn backend_pool_policy_matches_named_or_any_pool() {
+        assert!(BackendPoolPolicy::Any.allows("local-llm"));
+        assert!(BackendPoolPolicy::Named("local-llm").allows("local-llm"));
+        assert!(!BackendPoolPolicy::Named("local-llm").allows("vision"));
     }
 
     #[test]

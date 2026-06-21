@@ -121,7 +121,9 @@ async fn forward(
 
     let mut attempted = Vec::new();
     let mut next_backend = None;
+    let route_ineligible = route_ineligible_backends(&state.backends, &route);
     let resource_state = resource_selection_state(state, &workload_kind).await;
+    let selection_ineligible = selection_ineligible(&route_ineligible, &resource_state.ineligible);
 
     loop {
         let idx = match next_backend.take() {
@@ -132,7 +134,7 @@ async fn forward(
                     preferred,
                     origin_node.as_deref(),
                     &attempted,
-                    &resource_state.ineligible,
+                    &selection_ineligible,
                     &resource_state.ranks,
                 )
                 .await
@@ -145,7 +147,11 @@ async fn forward(
                             None,
                             origin_node.as_deref(),
                             StatusCode::SERVICE_UNAVAILABLE,
-                            unavailable_outcome(&resource_state.ineligible),
+                            unavailable_outcome(
+                                &route_ineligible,
+                                &resource_state.ineligible,
+                                state.backends.len(),
+                            ),
                             started,
                         );
                         info!(
@@ -156,15 +162,26 @@ async fn forward(
                             affinity_key = thread_id.as_deref().unwrap_or(""),
                             selected_backend = "",
                             retry_count = attempted.len(),
-                            fallback_reason =
-                                unavailable_fallback_reason(&resource_state.ineligible),
+                            fallback_reason = unavailable_fallback_reason(
+                                &route_ineligible,
+                                &resource_state.ineligible,
+                                state.backends.len(),
+                            ),
                             status = StatusCode::SERVICE_UNAVAILABLE.as_u16(),
-                            outcome = unavailable_outcome(&resource_state.ineligible),
+                            outcome = unavailable_outcome(
+                                &route_ineligible,
+                                &resource_state.ineligible,
+                                state.backends.len(),
+                            ),
                             "request completed"
                         );
                         return (
                             StatusCode::SERVICE_UNAVAILABLE,
-                            unavailable_message(&resource_state.ineligible),
+                            unavailable_message(
+                                &route_ineligible,
+                                &resource_state.ineligible,
+                                state.backends.len(),
+                            ),
                         )
                             .into_response();
                     }
@@ -203,6 +220,7 @@ async fn forward(
             idx,
             preferred,
             origin_node.as_deref(),
+            &route_ineligible,
             &resource_state.ineligible,
         );
         if let Some(reason) = fallback_reason {
@@ -257,7 +275,7 @@ async fn forward(
                     preferred,
                     origin_node.as_deref(),
                     &attempted,
-                    &resource_state.ineligible,
+                    &selection_ineligible,
                     &resource_state.ranks,
                 )
                 .await;
@@ -321,7 +339,7 @@ async fn forward(
                 preferred,
                 origin_node.as_deref(),
                 &attempted,
-                &resource_state.ineligible,
+                &selection_ineligible,
                 &resource_state.ranks,
             )
             .await;
@@ -399,6 +417,7 @@ fn fallback_reason(
     selected_idx: usize,
     preferred: Option<usize>,
     origin_node: Option<&str>,
+    route_ineligible: &[usize],
     resource_ineligible: &[usize],
 ) -> Option<&'static str> {
     let selected = backends.get(selected_idx)?;
@@ -415,6 +434,12 @@ fn fallback_reason(
         if has_origin_backend && selected.node_id.as_deref() != Some(origin) {
             if origin_indexes
                 .iter()
+                .any(|idx| route_ineligible.contains(idx))
+            {
+                return Some("workload_unavailable");
+            }
+            if origin_indexes
+                .iter()
                 .any(|idx| resource_ineligible.contains(idx))
             {
                 return Some("resource_unavailable");
@@ -425,11 +450,21 @@ fn fallback_reason(
 
     if let Some(preferred_idx) = preferred {
         if preferred_idx != selected_idx && backends.get(preferred_idx).is_some() {
+            if route_ineligible.contains(&preferred_idx) {
+                return Some("workload_unavailable");
+            }
             if resource_ineligible.contains(&preferred_idx) {
                 return Some("resource_unavailable");
             }
             return Some("affinity_unavailable");
         }
+    }
+
+    if route_ineligible
+        .iter()
+        .any(|idx| *idx < selected_idx && backends.get(*idx).is_some())
+    {
+        return Some("workload_unavailable");
     }
 
     if resource_ineligible
@@ -440,6 +475,28 @@ fn fallback_reason(
     }
 
     None
+}
+
+fn route_ineligible_backends(backends: &[BackendState], route: &WorkloadRoute) -> Vec<usize> {
+    backends
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, backend)| (!route_allows_backend(backend, route)).then_some(idx))
+        .collect()
+}
+
+fn route_allows_backend(backend: &BackendState, route: &WorkloadRoute) -> bool {
+    route.backend_pool.allows(&backend.pool) && backend.workloads.contains(&route.kind)
+}
+
+fn selection_ineligible(route_ineligible: &[usize], resource_ineligible: &[usize]) -> Vec<usize> {
+    let mut ineligible = route_ineligible.to_vec();
+    for idx in resource_ineligible {
+        if !ineligible.contains(idx) {
+            ineligible.push(*idx);
+        }
+    }
+    ineligible
 }
 
 fn parse_priority(headers: &HeaderMap) -> Result<Priority, &'static str> {
@@ -505,27 +562,45 @@ async fn resource_selection_state(
     selection
 }
 
-fn unavailable_outcome(resource_ineligible: &[usize]) -> &'static str {
-    if resource_ineligible.is_empty() {
+fn unavailable_outcome(
+    route_ineligible: &[usize],
+    resource_ineligible: &[usize],
+    backend_count: usize,
+) -> &'static str {
+    if backend_count > 0 && route_ineligible.len() == backend_count {
+        "unsupported_workload"
+    } else if !resource_ineligible.is_empty() {
+        "resource_unavailable"
+    } else {
         "unavailable"
-    } else {
-        "resource_unavailable"
     }
 }
 
-fn unavailable_fallback_reason(resource_ineligible: &[usize]) -> &'static str {
-    if resource_ineligible.is_empty() {
+fn unavailable_fallback_reason(
+    route_ineligible: &[usize],
+    resource_ineligible: &[usize],
+    backend_count: usize,
+) -> &'static str {
+    if backend_count > 0 && route_ineligible.len() == backend_count {
+        "workload_unavailable"
+    } else if !resource_ineligible.is_empty() {
+        "resource_unavailable"
+    } else {
         ""
-    } else {
-        "resource_unavailable"
     }
 }
 
-fn unavailable_message(resource_ineligible: &[usize]) -> &'static str {
-    if resource_ineligible.is_empty() {
-        "all backends unavailable (circuits open)"
-    } else {
+fn unavailable_message(
+    route_ineligible: &[usize],
+    resource_ineligible: &[usize],
+    backend_count: usize,
+) -> &'static str {
+    if backend_count > 0 && route_ineligible.len() == backend_count {
+        "no backends configured for workload"
+    } else if !resource_ineligible.is_empty() {
         "all backends unavailable (circuits open or insufficient resources)"
+    } else {
+        "all backends unavailable (circuits open)"
     }
 }
 
@@ -796,13 +871,22 @@ mod tests {
     }
 
     fn backend_with_id(url: String, id: &str) -> BackendState {
+        backend_with_workloads(url, id, "default", WorkloadKind::default_proxy_workloads())
+    }
+
+    fn backend_with_workloads(
+        url: String,
+        id: &str,
+        pool: &str,
+        workloads: Vec<WorkloadKind>,
+    ) -> BackendState {
         BackendState::from_config(
             BackendConfig {
                 id: id.to_string(),
                 url,
                 node_id: None,
-                pool: "default".into(),
-                workloads: WorkloadKind::default_proxy_workloads(),
+                pool: pool.to_string(),
+                workloads,
                 health_path: None,
             },
             10,
@@ -1407,6 +1491,160 @@ mod tests {
         assert_eq!(resp.status(), 200);
         let received: serde_json::Value = resp.json().await.unwrap();
         assert_eq!(received["data"][0]["embedding"][0], 0.1);
+    }
+
+    #[tokio::test]
+    async fn chat_completions_skips_backend_without_chat_workload() {
+        let skipped_hits = Arc::new(AtomicUsize::new(0));
+        let skipped_hits_for_route = skipped_hits.clone();
+        let skipped = Router::new().route(
+            "/v1/chat/completions",
+            post(move || {
+                let hits = skipped_hits_for_route.clone();
+                async move {
+                    hits.fetch_add(1, Ordering::SeqCst);
+                    axum::Json(json!({"source":"wrong-workload"}))
+                }
+            }),
+        );
+        let selected = Router::new().route(
+            "/v1/chat/completions",
+            post(|| async { axum::Json(json!({"source":"chat"})) }),
+        );
+        let skipped_url = start_mock(skipped).await;
+        let selected_url = start_mock(selected).await;
+        let fairlead = start_fairlead_with_backends(vec![
+            backend_with_workloads(
+                skipped_url,
+                "embedding-only",
+                "local-llm",
+                vec![WorkloadKind::Embeddings],
+            ),
+            backend_with_workloads(
+                selected_url,
+                "chat",
+                "local-llm",
+                vec![WorkloadKind::ChatCompletions],
+            ),
+        ])
+        .await;
+
+        let resp = reqwest::Client::new()
+            .post(format!("{}/v1/chat/completions", fairlead))
+            .json(&json!({"model":"m","messages":[]}))
+            .send()
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), 200);
+        assert_eq!(
+            resp.json::<serde_json::Value>().await.unwrap()["source"],
+            "chat"
+        );
+        assert_eq!(skipped_hits.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn embeddings_skips_backend_without_embeddings_workload() {
+        let skipped_hits = Arc::new(AtomicUsize::new(0));
+        let skipped_hits_for_route = skipped_hits.clone();
+        let skipped = Router::new().route(
+            "/v1/embeddings",
+            post(move || {
+                let hits = skipped_hits_for_route.clone();
+                async move {
+                    hits.fetch_add(1, Ordering::SeqCst);
+                    axum::Json(json!({
+                        "object":"list",
+                        "data":[{"object":"embedding","index":0,"embedding":[9.9]}],
+                        "model":"wrong-workload"
+                    }))
+                }
+            }),
+        );
+        let selected = Router::new().route(
+            "/v1/embeddings",
+            post(|| async {
+                axum::Json(json!({
+                    "object":"list",
+                    "data":[{"object":"embedding","index":0,"embedding":[0.2]}],
+                    "model":"embedding"
+                }))
+            }),
+        );
+        let skipped_url = start_mock(skipped).await;
+        let selected_url = start_mock(selected).await;
+        let fairlead = start_fairlead_with_backends(vec![
+            backend_with_workloads(
+                skipped_url,
+                "chat-only",
+                "local-llm",
+                vec![WorkloadKind::ChatCompletions],
+            ),
+            backend_with_workloads(
+                selected_url,
+                "embedding",
+                "local-llm",
+                vec![WorkloadKind::Embeddings],
+            ),
+        ])
+        .await;
+
+        let resp = reqwest::Client::new()
+            .post(format!("{}/v1/embeddings", fairlead))
+            .json(&json!({"model":"m","input":"hello"}))
+            .send()
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), 200);
+        assert_eq!(
+            resp.json::<serde_json::Value>().await.unwrap()["model"],
+            "embedding"
+        );
+        assert_eq!(skipped_hits.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn unsupported_workload_returns_503_without_trying_backend() {
+        let hits = Arc::new(AtomicUsize::new(0));
+        let hits_for_route = hits.clone();
+        let backend = Router::new().route(
+            "/v1/embeddings",
+            post(move || {
+                let hits = hits_for_route.clone();
+                async move {
+                    hits.fetch_add(1, Ordering::SeqCst);
+                    axum::Json(json!({
+                        "object":"list",
+                        "data":[{"object":"embedding","index":0,"embedding":[9.9]}],
+                        "model":"wrong-workload"
+                    }))
+                }
+            }),
+        );
+        let backend_url = start_mock(backend).await;
+        let fairlead = start_fairlead_with_backends(vec![backend_with_workloads(
+            backend_url,
+            "chat-only",
+            "local-llm",
+            vec![WorkloadKind::ChatCompletions],
+        )])
+        .await;
+
+        let resp = reqwest::Client::new()
+            .post(format!("{}/v1/embeddings", fairlead))
+            .json(&json!({"model":"m","input":"hello"}))
+            .send()
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            resp.text().await.unwrap(),
+            "no backends configured for workload"
+        );
+        assert_eq!(hits.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test]

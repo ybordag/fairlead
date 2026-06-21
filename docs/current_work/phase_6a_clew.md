@@ -38,7 +38,19 @@ Implemented:
 - Kept current runtime behavior unchanged: both routes still retry upstream
   server errors before response bytes are streamed.
 
+## Second Slice
+
+Implemented:
+
+- Added route-level backend pool policy.
+- Preserved compatibility by letting current chat and embeddings routes accept
+  any configured pool.
+- Enforced workload eligibility so chat requests skip embeddings-only backends
+  and embeddings requests skip chat-only backends.
+- Return `503` without touching an upstream backend when no backend supports the
+  requested workload.
+
 Next likely slice:
 
-- Add backend-pool eligibility to route metadata and selection.
-- Decide whether the current default pool remains implicit for legacy `BACKENDS`.
+- Decide whether session affinity should be global, per workload, or per backend
+  pool, then encode that policy in the routing path.
