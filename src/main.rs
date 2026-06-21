@@ -2,6 +2,7 @@ mod config;
 mod error;
 mod health;
 mod metrics;
+mod models;
 mod priority;
 mod proxy;
 mod resources;
@@ -106,6 +107,7 @@ pub(crate) fn build_router(state: AppState) -> Router {
         .route("/metrics", get(metrics::metrics))
         .route("/v1/resources", get(resources::list_resources))
         .route("/v1/resources/report", post(resources::report_resources))
+        .route("/v1/models", get(models::list_models))
         .route("/v1/chat/completions", post(proxy::chat_completions))
         .route("/v1/embeddings", post(proxy::embeddings))
         .with_state(state)

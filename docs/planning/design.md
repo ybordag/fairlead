@@ -49,6 +49,7 @@ Current implemented endpoints:
 ```
 POST /v1/chat/completions
 POST /v1/embeddings
+GET  /v1/models
 GET  /health
 GET  /metrics
 POST /v1/resources/report
@@ -58,7 +59,6 @@ GET  /v1/resources
 Planned endpoints:
 
 ```text
-GET  /v1/models
 POST /v1/jobs
 GET  /v1/jobs/{id}
 POST /v1/workers/register

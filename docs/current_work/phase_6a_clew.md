@@ -78,6 +78,17 @@ Implemented:
   `x-fairlead-thread-id`, `x-fairlead-origin-node`, and
   `x-fairlead-priority`.
 
+## Fifth Slice
+
+Implemented:
+
+- Added `GET /v1/models`.
+- Return an OpenAI-style model list with one entry per configured backend.
+- Include Fairlead backend metadata: backend ID, backend URL, health URL, node
+  ID, pool, and supported workloads.
+- Do not fan out to upstream backends or infer actual served model names.
+
 Next likely slice:
 
-- Add `GET /v1/models` from configured workloads and backend metadata.
+- Audit Phase 6A scope for any remaining synchronous cleanup before deciding
+  whether to close Clew or continue into adapter-boundary groundwork.

@@ -146,9 +146,9 @@ system.
 
 - [x] Introduce a `WorkloadKind` enum for synchronous proxy workloads, starting
   with `chat_completions` and `embeddings`.
-- [ ] Move route-specific behavior out of the stringly typed
+- [x] Move route-specific behavior out of the stringly typed
   `forward(state, path, headers, body)` call and into workload metadata.
-- [ ] Add route metadata for:
+- [x] Add route metadata for:
   path,
   allowed HTTP method,
   streaming behavior,
@@ -158,17 +158,17 @@ system.
 - [ ] Split backend configuration by pool so different workloads can target
   different backend sets.
 - [x] Preserve a default backend pool for today's simple `BACKENDS` config.
-- [ ] Add provider/header forwarding policy:
+- [x] Add provider/header forwarding policy:
   content type,
   authorization,
   organization/project headers,
   and provider-specific opt-in headers.
-- [ ] Add `/v1/models` for the synchronous proxy surface, backed by configured
+- [x] Add `/v1/models` for the synchronous proxy surface, backed by configured
   workloads and backend metadata.
 - [ ] Add an adapter boundary for non-OpenAI-compatible synchronous endpoints,
   such as `/v1/rerank` or `/v1/images/generations`.
 - [x] Add metrics labels for workload kind and selected backend.
-- [ ] Decide whether session affinity should be keyed globally, per workload, or
+- [x] Decide whether session affinity should be keyed globally, per workload, or
   per backend pool.
 - [x] Make health probes target an explicit backend health endpoint such as
   `/health` or `/v1/models`, rather than relying on the backend base URL.
@@ -610,12 +610,10 @@ Docker, or the provider accounts themselves.
 - [x] Add basic same-request retry for safe synchronous upstream failures.
 - [x] Add workload-aware routing metrics and retry/fallback counters.
 - [x] Add a repeatable local mock demo.
-- [ ] Move route-specific behavior into workload metadata. Deferred to
-  **Phase 6A: Synchronous Surface Cleanup**.
+- [x] Move route-specific behavior into workload metadata.
 - [ ] Add backend pools. Deferred to **Phase 6A: Synchronous Surface Cleanup**.
-- [ ] Add provider/header policy. Deferred to **Phase 6A: Synchronous Surface
-  Cleanup**.
-- [ ] Add `/v1/models`. Deferred to **Phase 6A: Synchronous Surface Cleanup**.
+- [x] Add provider/header policy.
+- [x] Add `/v1/models`.
 
 ### Phase 5/Trim: Resource-Aware Routing and Priority Admission
 
@@ -631,16 +629,16 @@ Docker, or the provider accounts themselves.
 This phase keeps the synchronous proxy surface clean before adding async jobs.
 It should not introduce queues, workers, or job state.
 
-- Move route-specific behavior out of `forward(state, path, headers, body)` and
+- [x] Move route-specific behavior out of `forward(state, path, headers, body)` and
   into workload metadata.
-- Add route metadata for path, method, streaming behavior, retry policy, backend
+- [x] Add route metadata for path, method, streaming behavior, retry policy, backend
   pool, and metric labels.
-- Split backend configuration by pool so different synchronous workloads can
+- [ ] Split backend configuration by pool so different synchronous workloads can
   target different backend sets.
-- Decide whether session affinity is global, per workload, or per backend pool.
-- Add provider/header forwarding policy for content type, authorization,
+- [x] Decide whether session affinity is global, per workload, or per backend pool.
+- [x] Add provider/header forwarding policy for content type, authorization,
   organization/project headers, and provider-specific opt-in headers.
-- Add `GET /v1/models` backed by configured workloads and backend metadata.
+- [x] Add `GET /v1/models` backed by configured workloads and backend metadata.
 - Keep cloud-provider fallback and provider credentials deferred unless a clear
   demo need appears.
 

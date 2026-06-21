@@ -215,11 +215,6 @@ Two distinct surfaces.
 ```
 POST /v1/chat/completions   — receive, select backend, proxy, stream back
 POST /v1/embeddings         — same pattern for embedding requests
-```
-
-Planned synchronous surface:
-
-```text
 GET /v1/models              — list configured backend/model metadata
 ```
 
