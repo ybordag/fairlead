@@ -31,8 +31,11 @@ The current service provides:
   timeouts, and 5xx responses before response bytes are streamed.
 - **Cooperative resource reporting** through `/v1/resources/report` and
   `/v1/resources`, with stale-report detection.
+- **Priority metadata** through `X-Fairlead-Priority` with `realtime`, `batch`,
+  and `background` values. Missing priority defaults to `realtime`.
 - **Prometheus-style metrics** for backend circuit state, request outcomes,
-  latency, fallback reasons, retry reasons, and reported resource state.
+  latency, fallback reasons, retry reasons, priority, and reported resource
+  state.
 
 Fairlead does **not** run inference itself. It routes requests to model servers
 such as vLLM. vLLM owns model loading, GPU execution, KV cache management, and
@@ -192,6 +195,7 @@ curl http://localhost:7000/v1/chat/completions \
   -H 'content-type: application/json' \
   -H 'X-Fairlead-Origin-Node: spark-a' \
   -H 'X-Fairlead-Thread-Id: demo-thread' \
+  -H 'X-Fairlead-Priority: realtime' \
   -d '{"model":"local-model","messages":[{"role":"user","content":"hello"}]}'
 ```
 

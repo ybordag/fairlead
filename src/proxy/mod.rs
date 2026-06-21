@@ -11,7 +11,7 @@ use std::time::Instant;
 use tracing::{info, warn};
 
 use crate::{
-    config::WorkloadKind,
+    config::{Priority, WorkloadKind},
     metrics::{FallbackLabels, RequestLabels, RetryLabels},
     router::{select_backend_excluding_resource, BackendState, ResourceRank},
     AppState,
@@ -56,10 +56,15 @@ async fn forward(
 ) -> Response {
     let workload = workload_kind.as_str();
     let started = Instant::now();
+    let priority = match parse_priority(headers) {
+        Ok(priority) => priority,
+        Err(message) => return (StatusCode::BAD_REQUEST, message).into_response(),
+    };
     if state.backends.is_empty() {
         record_request(
             state,
             workload,
+            priority,
             None,
             None,
             StatusCode::SERVICE_UNAVAILABLE,
@@ -115,6 +120,7 @@ async fn forward(
                         record_request(
                             state,
                             workload,
+                            priority,
                             None,
                             origin_node.as_deref(),
                             StatusCode::SERVICE_UNAVAILABLE,
@@ -124,6 +130,7 @@ async fn forward(
                         info!(
                             request_id,
                             workload,
+                            priority = priority.as_str(),
                             origin_node = origin_node.as_deref().unwrap_or(""),
                             affinity_key = thread_id.as_deref().unwrap_or(""),
                             selected_backend = "",
@@ -143,6 +150,7 @@ async fn forward(
                     record_request(
                         state,
                         workload,
+                        priority,
                         None,
                         origin_node.as_deref(),
                         StatusCode::BAD_GATEWAY,
@@ -152,6 +160,7 @@ async fn forward(
                     info!(
                         request_id,
                         workload,
+                        priority = priority.as_str(),
                         origin_node = origin_node.as_deref().unwrap_or(""),
                         affinity_key = thread_id.as_deref().unwrap_or(""),
                         selected_backend = "",
@@ -176,7 +185,14 @@ async fn forward(
             &resource_state.ineligible,
         );
         if let Some(reason) = fallback_reason {
-            record_fallback(state, workload, backend, origin_node.as_deref(), reason);
+            record_fallback(
+                state,
+                workload,
+                priority,
+                backend,
+                origin_node.as_deref(),
+                reason,
+            );
         }
         let url = format!("{}/{}", backend.url.trim_end_matches('/'), path);
 
@@ -194,6 +210,7 @@ async fn forward(
                 record_retry(
                     state,
                     workload,
+                    priority,
                     backend,
                     origin_node.as_deref(),
                     "connection_error",
@@ -201,6 +218,7 @@ async fn forward(
                 warn!(
                     request_id,
                     workload,
+                    priority = priority.as_str(),
                     origin_node = origin_node.as_deref().unwrap_or(""),
                     affinity_key = thread_id.as_deref().unwrap_or(""),
                     failed_backend = backend.id,
@@ -224,6 +242,7 @@ async fn forward(
                 record_request(
                     state,
                     workload,
+                    priority,
                     Some(backend),
                     origin_node.as_deref(),
                     StatusCode::BAD_GATEWAY,
@@ -233,6 +252,7 @@ async fn forward(
                 info!(
                     request_id,
                     workload,
+                    priority = priority.as_str(),
                     origin_node = origin_node.as_deref().unwrap_or(""),
                     affinity_key = thread_id.as_deref().unwrap_or(""),
                     selected_backend = backend.id,
@@ -253,6 +273,7 @@ async fn forward(
             record_retry(
                 state,
                 workload,
+                priority,
                 backend,
                 origin_node.as_deref(),
                 "server_error",
@@ -260,6 +281,7 @@ async fn forward(
             warn!(
                 request_id,
                 workload,
+                priority = priority.as_str(),
                 origin_node = origin_node.as_deref().unwrap_or(""),
                 affinity_key = thread_id.as_deref().unwrap_or(""),
                 failed_backend = backend.id,
@@ -284,6 +306,7 @@ async fn forward(
             record_request(
                 state,
                 workload,
+                priority,
                 Some(backend),
                 origin_node.as_deref(),
                 status,
@@ -293,6 +316,7 @@ async fn forward(
             info!(
                 request_id,
                 workload,
+                priority = priority.as_str(),
                 origin_node = origin_node.as_deref().unwrap_or(""),
                 affinity_key = thread_id.as_deref().unwrap_or(""),
                 selected_backend = backend.id,
@@ -320,6 +344,7 @@ async fn forward(
         record_request(
             state,
             workload,
+            priority,
             Some(backend),
             origin_node.as_deref(),
             status,
@@ -329,6 +354,7 @@ async fn forward(
         info!(
             request_id,
             workload,
+            priority = priority.as_str(),
             origin_node = origin_node.as_deref().unwrap_or(""),
             affinity_key = thread_id.as_deref().unwrap_or(""),
             selected_backend = backend.id,
@@ -389,6 +415,19 @@ fn fallback_reason(
     }
 
     None
+}
+
+fn parse_priority(headers: &HeaderMap) -> Result<Priority, &'static str> {
+    let Some(value) = headers.get("x-fairlead-priority") else {
+        return Ok(Priority::default());
+    };
+
+    let value = value
+        .to_str()
+        .map_err(|_| "invalid X-Fairlead-Priority header")?;
+
+    Priority::parse(value)
+        .ok_or("invalid X-Fairlead-Priority: expected realtime, batch, or background")
 }
 
 #[derive(Default)]
@@ -465,9 +504,14 @@ fn unavailable_message(resource_ineligible: &[usize]) -> &'static str {
     }
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "request metrics map directly to Prometheus label dimensions"
+)]
 fn record_request(
     state: &AppState,
     workload: &str,
+    priority: Priority,
     backend: Option<&BackendState>,
     origin_node: Option<&str>,
     status: StatusCode,
@@ -476,6 +520,7 @@ fn record_request(
 ) {
     let labels = RequestLabels {
         workload: workload.to_string(),
+        priority: priority.as_str().to_string(),
         backend: backend.map(|b| b.id.clone()).unwrap_or_default(),
         node: backend.and_then(|b| b.node_id.clone()).unwrap_or_default(),
         pool: backend.map(|b| b.pool.clone()).unwrap_or_default(),
@@ -489,12 +534,14 @@ fn record_request(
 fn record_fallback(
     state: &AppState,
     workload: &str,
+    priority: Priority,
     backend: &BackendState,
     origin_node: Option<&str>,
     reason: &str,
 ) {
     let labels = FallbackLabels {
         workload: workload.to_string(),
+        priority: priority.as_str().to_string(),
         backend: backend.id.clone(),
         node: backend.node_id.clone().unwrap_or_default(),
         pool: backend.pool.clone(),
@@ -507,12 +554,14 @@ fn record_fallback(
 fn record_retry(
     state: &AppState,
     workload: &str,
+    priority: Priority,
     backend: &BackendState,
     origin_node: Option<&str>,
     reason: &str,
 ) {
     let labels = RetryLabels {
         workload: workload.to_string(),
+        priority: priority.as_str().to_string(),
         backend: backend.id.clone(),
         node: backend.node_id.clone().unwrap_or_default(),
         pool: backend.pool.clone(),
@@ -773,6 +822,86 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn missing_priority_defaults_to_realtime_metric_label() {
+        let mock = Router::new().route(
+            "/v1/chat/completions",
+            post(|| async { axum::Json(json!({"source":"default-priority"})) }),
+        );
+        let backend = start_mock(mock).await;
+        let fairlead = start_fairlead(&[&backend]).await;
+
+        let client = reqwest::Client::new();
+        let resp = client
+            .post(format!("{}/v1/chat/completions", fairlead))
+            .json(&json!({"model":"m","messages":[]}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+
+        let metrics = client
+            .get(format!("{}/metrics", fairlead))
+            .send()
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap();
+        assert!(metrics.contains("priority=\"realtime\""));
+    }
+
+    #[tokio::test]
+    async fn explicit_batch_priority_is_recorded_in_metrics() {
+        let mock = Router::new().route(
+            "/v1/chat/completions",
+            post(|| async { axum::Json(json!({"source":"batch-priority"})) }),
+        );
+        let backend = start_mock(mock).await;
+        let fairlead = start_fairlead(&[&backend]).await;
+
+        let client = reqwest::Client::new();
+        let resp = client
+            .post(format!("{}/v1/chat/completions", fairlead))
+            .header("x-fairlead-priority", "batch")
+            .json(&json!({"model":"m","messages":[]}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+
+        let metrics = client
+            .get(format!("{}/metrics", fairlead))
+            .send()
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap();
+        assert!(metrics.contains("priority=\"batch\""));
+    }
+
+    #[tokio::test]
+    async fn invalid_priority_returns_400() {
+        let mock = Router::new().route(
+            "/v1/chat/completions",
+            post(|| async { axum::Json(json!({"source":"unused"})) }),
+        );
+        let backend = start_mock(mock).await;
+        let fairlead = start_fairlead(&[&backend]).await;
+
+        let resp = reqwest::Client::new()
+            .post(format!("{}/v1/chat/completions", fairlead))
+            .header("x-fairlead-priority", "urgent")
+            .json(&json!({"model":"m","messages":[]}))
+            .send()
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), 400);
+        assert!(resp.text().await.unwrap().contains("X-Fairlead-Priority"));
+    }
+
+    #[tokio::test]
     async fn streaming_completion_proxied() {
         let sse_body = "data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Hi\"},\"finish_reason\":null}]}\n\ndata: [DONE]\n\n";
         let mock = Router::new().route(
@@ -910,10 +1039,10 @@ mod tests {
             .await
             .unwrap();
         assert!(metrics.contains(
-            "fairlead_retries_total{workload=\"chat_completions\",backend=\"dead\",node=\"\",pool=\"default\",origin_node=\"\",reason=\"connection_error\"} 1"
+            "fairlead_retries_total{workload=\"chat_completions\",priority=\"realtime\",backend=\"dead\",node=\"\",pool=\"default\",origin_node=\"\",reason=\"connection_error\"} 1"
         ));
         assert!(metrics.contains(
-            "fairlead_requests_total{workload=\"chat_completions\",backend=\"healthy\",node=\"\",pool=\"default\",origin_node=\"\",status=\"200\",outcome=\"retried_success\"} 1"
+            "fairlead_requests_total{workload=\"chat_completions\",priority=\"realtime\",backend=\"healthy\",node=\"\",pool=\"default\",origin_node=\"\",status=\"200\",outcome=\"retried_success\"} 1"
         ));
     }
 
@@ -977,10 +1106,10 @@ mod tests {
             .await
             .unwrap();
         assert!(metrics.contains(
-            "fairlead_retries_total{workload=\"chat_completions\",backend=\"primary\",node=\"\",pool=\"default\",origin_node=\"\",reason=\"server_error\"} 1"
+            "fairlead_retries_total{workload=\"chat_completions\",priority=\"realtime\",backend=\"primary\",node=\"\",pool=\"default\",origin_node=\"\",reason=\"server_error\"} 1"
         ));
         assert!(metrics.contains(
-            "fairlead_requests_total{workload=\"chat_completions\",backend=\"secondary\",node=\"\",pool=\"default\",origin_node=\"\",status=\"200\",outcome=\"retried_success\"} 1"
+            "fairlead_requests_total{workload=\"chat_completions\",priority=\"realtime\",backend=\"secondary\",node=\"\",pool=\"default\",origin_node=\"\",status=\"200\",outcome=\"retried_success\"} 1"
         ));
     }
 
@@ -1120,10 +1249,10 @@ mod tests {
             .unwrap();
 
         assert!(metrics.contains(
-            "fairlead_requests_total{workload=\"chat_completions\",backend=\"node-a-vllm\",node=\"node-a\",pool=\"local-llm\",origin_node=\"node-a\",status=\"200\",outcome=\"completed\"} 1"
+            "fairlead_requests_total{workload=\"chat_completions\",priority=\"realtime\",backend=\"node-a-vllm\",node=\"node-a\",pool=\"local-llm\",origin_node=\"node-a\",status=\"200\",outcome=\"completed\"} 1"
         ));
         assert!(metrics.contains(
-            "fairlead_request_latency_seconds_count{workload=\"chat_completions\",backend=\"node-a-vllm\",node=\"node-a\",pool=\"local-llm\",origin_node=\"node-a\",status=\"200\",outcome=\"completed\"} 1"
+            "fairlead_request_latency_seconds_count{workload=\"chat_completions\",priority=\"realtime\",backend=\"node-a-vllm\",node=\"node-a\",pool=\"local-llm\",origin_node=\"node-a\",status=\"200\",outcome=\"completed\"} 1"
         ));
     }
 
@@ -1486,7 +1615,7 @@ mod tests {
             .await
             .unwrap();
         assert!(metrics.contains(
-            "fairlead_fallbacks_total{workload=\"chat_completions\",backend=\"node-b-vllm\",node=\"node-b\",pool=\"local-llm\",origin_node=\"node-a\",reason=\"origin_unavailable\"} 1"
+            "fairlead_fallbacks_total{workload=\"chat_completions\",priority=\"realtime\",backend=\"node-b-vllm\",node=\"node-b\",pool=\"local-llm\",origin_node=\"node-a\",reason=\"origin_unavailable\"} 1"
         ));
     }
 
@@ -1564,7 +1693,7 @@ mod tests {
             .await
             .unwrap();
         assert!(metrics.contains(
-            "fairlead_fallbacks_total{workload=\"chat_completions\",backend=\"node-b-vllm\",node=\"node-b\",pool=\"local-llm\",origin_node=\"node-a\",reason=\"resource_unavailable\"} 1"
+            "fairlead_fallbacks_total{workload=\"chat_completions\",priority=\"realtime\",backend=\"node-b-vllm\",node=\"node-b\",pool=\"local-llm\",origin_node=\"node-a\",reason=\"resource_unavailable\"} 1"
         ));
     }
 

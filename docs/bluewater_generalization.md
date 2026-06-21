@@ -403,6 +403,15 @@ Priority levels:
 - `batch`: user-triggered async work, such as vision analysis.
 - `background`: ingestion, index builds, clustering, cleanup.
 
+Implemented groundwork:
+
+- [x] Define the priority values.
+- [x] Parse `X-Fairlead-Priority` on synchronous requests.
+- [x] Default missing priority to `realtime`.
+- [x] Return `400` for unknown priority values.
+- [x] Add priority labels to synchronous request, retry, fallback, and latency
+  metrics.
+
 Hard parts:
 
 - Avoid starving background work forever during heavy realtime use.

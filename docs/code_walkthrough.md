@@ -992,16 +992,16 @@ The same endpoint also renders synchronous routing metrics recorded by
 `proxy::forward`:
 
 ```text
-fairlead_requests_total{workload="chat_completions",backend="spark-a-vllm",node="spark-a",pool="local-llm",origin_node="spark-a",status="200",outcome="completed"} 1
-fairlead_request_latency_seconds_count{workload="chat_completions",backend="spark-a-vllm",node="spark-a",pool="local-llm",origin_node="spark-a",status="200",outcome="completed"} 1
-fairlead_request_latency_seconds_sum{workload="chat_completions",backend="spark-a-vllm",node="spark-a",pool="local-llm",origin_node="spark-a",status="200",outcome="completed"} 0.012345
+fairlead_requests_total{workload="chat_completions",priority="realtime",backend="spark-a-vllm",node="spark-a",pool="local-llm",origin_node="spark-a",status="200",outcome="completed"} 1
+fairlead_request_latency_seconds_count{workload="chat_completions",priority="realtime",backend="spark-a-vllm",node="spark-a",pool="local-llm",origin_node="spark-a",status="200",outcome="completed"} 1
+fairlead_request_latency_seconds_sum{workload="chat_completions",priority="realtime",backend="spark-a-vllm",node="spark-a",pool="local-llm",origin_node="spark-a",status="200",outcome="completed"} 0.012345
 ```
 
 Fallback and retry decisions have separate counters:
 
 ```text
-fairlead_fallbacks_total{workload="chat_completions",backend="spark-b-vllm",node="spark-b",pool="local-llm",origin_node="spark-a",reason="origin_unavailable"} 1
-fairlead_retries_total{workload="chat_completions",backend="spark-a-vllm",node="spark-a",pool="local-llm",origin_node="spark-a",reason="server_error"} 1
+fairlead_fallbacks_total{workload="chat_completions",priority="realtime",backend="spark-b-vllm",node="spark-b",pool="local-llm",origin_node="spark-a",reason="origin_unavailable"} 1
+fairlead_retries_total{workload="chat_completions",priority="realtime",backend="spark-a-vllm",node="spark-a",pool="local-llm",origin_node="spark-a",reason="server_error"} 1
 ```
 
 The proxy logs structured fields for the same decision: request ID, workload,

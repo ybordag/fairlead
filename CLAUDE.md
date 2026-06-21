@@ -258,9 +258,10 @@ LOG_LEVEL                    — tracing level: error, warn, info, debug, trace 
 - Router checks available VRAM before selecting a backend when
   `RESOURCE_AWARE_ROUTING=true`; after locality and affinity, it prefers lower
   reported load and then higher available VRAM
+- Inference requests carry a `X-Fairlead-Priority` header (default:
+  `realtime`); priority is currently metadata and metrics, not queueing
 - Three-tier priority queue with Tokio channels (realtime / batch / background)
 - Scheduler drains higher-priority channels before accepting lower-priority work
-- Inference requests carry a `X-Fairlead-Priority` header (default: `realtime`)
 - Test: backend with insufficient VRAM is skipped; background jobs yield to realtime
 
 ### Phase 6 — Async job dispatch

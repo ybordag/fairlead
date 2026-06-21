@@ -270,6 +270,11 @@ The core scheduling guarantee:
 A background index rebuild that started at midnight will not slow down a user's
 chat response at 9am. This is enforced structurally, not by policy.
 
+Current Fairlead parses `X-Fairlead-Priority` on synchronous requests, defaults
+missing priority to `realtime`, rejects unknown values with `400`, and exposes
+priority on routing metrics. The actual priority queue and concurrency policy
+are still future Phase 5 work.
+
 ---
 
 ## The 7-phase build plan

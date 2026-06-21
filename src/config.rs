@@ -24,6 +24,34 @@ impl WorkloadKind {
     }
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Priority {
+    #[default]
+    Realtime,
+    Batch,
+    Background,
+}
+
+impl Priority {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Realtime => "realtime",
+            Self::Batch => "batch",
+            Self::Background => "background",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_lowercase().as_str() {
+            "realtime" => Some(Self::Realtime),
+            "batch" => Some(Self::Batch),
+            "background" => Some(Self::Background),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BackendConfig {
     /// Stable backend identifier used by metrics, logs, and future routing policy.
@@ -276,6 +304,18 @@ mod tests {
     fn non_json_log_format_is_false() {
         let cfg = Config::from_lookup(env(&[("LOG_FORMAT", "pretty")])).unwrap();
         assert!(!cfg.log_format_json);
+    }
+
+    #[test]
+    fn priority_parse_accepts_known_values_case_insensitively() {
+        assert_eq!(Priority::parse("realtime"), Some(Priority::Realtime));
+        assert_eq!(Priority::parse("BATCH"), Some(Priority::Batch));
+        assert_eq!(Priority::parse(" background "), Some(Priority::Background));
+    }
+
+    #[test]
+    fn priority_parse_rejects_unknown_values() {
+        assert_eq!(Priority::parse("urgent"), None);
     }
 
     #[test]

@@ -22,6 +22,7 @@ struct RoutingMetricsInner {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct RequestLabels {
     pub workload: String,
+    pub priority: String,
     pub backend: String,
     pub node: String,
     pub pool: String,
@@ -33,6 +34,7 @@ pub struct RequestLabels {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct RetryLabels {
     pub workload: String,
+    pub priority: String,
     pub backend: String,
     pub node: String,
     pub pool: String,
@@ -43,6 +45,7 @@ pub struct RetryLabels {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct FallbackLabels {
     pub workload: String,
+    pub priority: String,
     pub backend: String,
     pub node: String,
     pub pool: String,
@@ -83,8 +86,9 @@ impl RoutingMetrics {
 
         for (labels, aggregate) in &guard.requests {
             body.push_str(&format!(
-                "fairlead_requests_total{{workload=\"{}\",backend=\"{}\",node=\"{}\",pool=\"{}\",origin_node=\"{}\",status=\"{}\",outcome=\"{}\"}} {}\n",
+                "fairlead_requests_total{{workload=\"{}\",priority=\"{}\",backend=\"{}\",node=\"{}\",pool=\"{}\",origin_node=\"{}\",status=\"{}\",outcome=\"{}\"}} {}\n",
                 prometheus_escape(&labels.workload),
+                prometheus_escape(&labels.priority),
                 prometheus_escape(&labels.backend),
                 prometheus_escape(&labels.node),
                 prometheus_escape(&labels.pool),
@@ -102,8 +106,9 @@ impl RoutingMetrics {
 
         for (labels, aggregate) in &guard.requests {
             body.push_str(&format!(
-                "fairlead_request_latency_seconds_count{{workload=\"{}\",backend=\"{}\",node=\"{}\",pool=\"{}\",origin_node=\"{}\",status=\"{}\",outcome=\"{}\"}} {}\n",
+                "fairlead_request_latency_seconds_count{{workload=\"{}\",priority=\"{}\",backend=\"{}\",node=\"{}\",pool=\"{}\",origin_node=\"{}\",status=\"{}\",outcome=\"{}\"}} {}\n",
                 prometheus_escape(&labels.workload),
+                prometheus_escape(&labels.priority),
                 prometheus_escape(&labels.backend),
                 prometheus_escape(&labels.node),
                 prometheus_escape(&labels.pool),
@@ -113,8 +118,9 @@ impl RoutingMetrics {
                 aggregate.count,
             ));
             body.push_str(&format!(
-                "fairlead_request_latency_seconds_sum{{workload=\"{}\",backend=\"{}\",node=\"{}\",pool=\"{}\",origin_node=\"{}\",status=\"{}\",outcome=\"{}\"}} {:.6}\n",
+                "fairlead_request_latency_seconds_sum{{workload=\"{}\",priority=\"{}\",backend=\"{}\",node=\"{}\",pool=\"{}\",origin_node=\"{}\",status=\"{}\",outcome=\"{}\"}} {:.6}\n",
                 prometheus_escape(&labels.workload),
+                prometheus_escape(&labels.priority),
                 prometheus_escape(&labels.backend),
                 prometheus_escape(&labels.node),
                 prometheus_escape(&labels.pool),
@@ -132,8 +138,9 @@ impl RoutingMetrics {
 
         for (labels, count) in &guard.retries {
             body.push_str(&format!(
-                "fairlead_retries_total{{workload=\"{}\",backend=\"{}\",node=\"{}\",pool=\"{}\",origin_node=\"{}\",reason=\"{}\"}} {}\n",
+                "fairlead_retries_total{{workload=\"{}\",priority=\"{}\",backend=\"{}\",node=\"{}\",pool=\"{}\",origin_node=\"{}\",reason=\"{}\"}} {}\n",
                 prometheus_escape(&labels.workload),
+                prometheus_escape(&labels.priority),
                 prometheus_escape(&labels.backend),
                 prometheus_escape(&labels.node),
                 prometheus_escape(&labels.pool),
@@ -150,8 +157,9 @@ impl RoutingMetrics {
 
         for (labels, count) in &guard.fallbacks {
             body.push_str(&format!(
-                "fairlead_fallbacks_total{{workload=\"{}\",backend=\"{}\",node=\"{}\",pool=\"{}\",origin_node=\"{}\",reason=\"{}\"}} {}\n",
+                "fairlead_fallbacks_total{{workload=\"{}\",priority=\"{}\",backend=\"{}\",node=\"{}\",pool=\"{}\",origin_node=\"{}\",reason=\"{}\"}} {}\n",
                 prometheus_escape(&labels.workload),
+                prometheus_escape(&labels.priority),
                 prometheus_escape(&labels.backend),
                 prometheus_escape(&labels.node),
                 prometheus_escape(&labels.pool),
