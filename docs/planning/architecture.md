@@ -353,8 +353,9 @@ Current async scheduler behavior:
   `fairlead_job_duration_seconds_sum{priority,type,status}`, and
   `fairlead_job_duration_seconds_max{priority,type,status}`
 - job state is in memory by default; opt-in SQLite state persists jobs, queue
-  order, submit idempotency keys, leases, terminal state, callback metadata, and
-  callback delivery state across ordinary Fairlead restarts
+  order, submit idempotency keys, leases, terminal worker-attempt metadata,
+  terminal state, callback metadata, and callback delivery state across ordinary
+  Fairlead restarts
 - cancellation marks queued jobs `cancelled`
 - cancellation removes queued jobs from queue depth and wait-time accounting
 - repeated cancellation returns the existing job when it is already `cancelled`;

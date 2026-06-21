@@ -1344,6 +1344,7 @@ pool is not allowed by workload policy.
 request and delegates to `JobRegistry::submit()`:
 
 1. `callback_url` and optional `idempotency_key` are trimmed and validated.
+   Blank idempotency keys and keys longer than 256 bytes are rejected.
 2. If the idempotency key already maps to a matching existing job, the existing
    job is returned and no new queue entry is created.
 3. If the key maps to a different request shape, the submit is rejected.

@@ -873,6 +873,8 @@ workload protocols.
   - [x] Preserve conflict responses for contradictory terminal result reports.
   - [x] Review callback idempotency and keep the at-least-once receiver contract
     documented.
+  - [x] Audit test coverage and deferred process-level e2e cases before PR.
+  - [x] Add final 8C docs/readiness pass before PR.
 - **8D Clove: Background Maintenance Loops**
   - Add background expiry/recovery loops if claim-time sweeps are not enough.
   - Add optional background pruning loop that invokes the 8B terminal-job

@@ -114,10 +114,11 @@ Implemented generalization work includes:
 - **Terminal job pruning** through an explicit endpoint with configurable
   retention age, per-run limit, SQLite persistence, and Prometheus counters.
 
-Phase 8B is complete on `stopper` and adds terminal-job retention and pruning.
-Future Phase 8 work adds stronger idempotency semantics, background maintenance
-loops, and process-level e2e harnesses. Later phases add adapter boundaries,
-richer resource policy, external scale/overflow, and transport/SDK hardening.
+Phase 8C is complete on `splice` and adds stronger idempotency semantics for
+async job submission, cancellation retries, and terminal worker result retries.
+Remaining Phase 8 work adds background maintenance loops and process-level e2e
+harnesses. Later phases add adapter boundaries, richer resource policy,
+external scale/overflow, and transport/SDK hardening.
 
 See [`docs/planning/roadmap.md`](docs/planning/roadmap.md) for the
 implementation plan and acceptance criteria.

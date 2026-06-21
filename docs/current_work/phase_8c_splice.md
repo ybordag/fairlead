@@ -7,6 +7,7 @@ callback retries without changing workload protocols.
 
 - Added optional `idempotency_key` to `POST /v1/jobs`.
 - Trimmed and validated idempotency keys.
+- Rejected blank and overlong idempotency keys.
 - Reused the existing job when the same key is submitted with the same request
   shape.
 - Rejected reuse of the same key for a different job request.
@@ -35,6 +36,8 @@ callback retries without changing workload protocols.
 - Duplicate `POST /v1/jobs` requests with the same idempotency key return the
   same job and do not enqueue a second job.
 - Reusing an idempotency key for a different payload is rejected.
+- Overlong idempotency keys are rejected without mutating job state.
+- Retained terminal jobs are returned for matching submit idempotency retries.
 - SQLite-backed registries preserve submit idempotency across restart.
 - Terminal-job pruning releases submit idempotency keys.
 - SQLite schema migration adds the `idempotency_key` column to older job tables.
@@ -48,6 +51,14 @@ callback retries without changing workload protocols.
 - Duplicate failure with a different error still returns `409 Conflict`.
 - Terminal attempt metadata is persisted and recovered through SQLite.
 - Running completion with a mismatched attempt number is rejected.
+- Running failure with a mismatched attempt number is rejected.
+- Terminal attempt metadata is persisted and recovered for both completed and
+  failed jobs.
+- Delivered callbacks are not returned by pending callback scans and cannot
+  begin another delivery attempt.
+- Deferred process-level e2e coverage now includes concurrent duplicate submit
+  races, process API validation for invalid idempotency keys, terminal-result
+  replay races against new claims, and crash-after-terminal-result retry.
 
 ## Remaining 8C Scope
 
