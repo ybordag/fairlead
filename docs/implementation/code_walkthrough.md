@@ -524,6 +524,12 @@ accepts pool metadata, scheduler preview only pairs jobs with workers whose pool
 is allowed by the job type, and worker-pull claims only lease eligible queued
 jobs for the claiming worker's pool.
 
+Phase 7D adds optional strict worker pool validation. With the default
+permissive setting, worker registration accepts any non-empty pool string. With
+`STRICT_WORKER_POOLS=true`, the registration handler checks the worker's pool
+against configured or derived `POOLS_JSON` before inserting it into the worker
+registry.
+
 ### 5. Initialize Tracing
 
 ```rust

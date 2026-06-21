@@ -229,6 +229,9 @@ pub struct Config {
     /// Workload-to-pool eligibility policy. Phase 7A validates this shape; later
     /// Phase 7 slices apply it to synchronous routing and async worker claims.
     pub workload_pools: WorkloadPoolPolicy,
+    /// Reject worker registration when the worker's pool is not configured.
+    /// Default: false.
+    pub strict_worker_pools: bool,
     /// Consecutive failures required to open a circuit. Default: 3.
     pub circuit_failure_threshold: u32,
     /// Seconds to wait in Open state before probing again (Half-open). Default: 30.
@@ -288,6 +291,10 @@ impl Config {
             pools,
 
             workload_pools,
+
+            strict_worker_pools: get("STRICT_WORKER_POOLS")
+                .map(|v| v.trim().eq_ignore_ascii_case("true"))
+                .unwrap_or(false),
 
             circuit_failure_threshold: get("CIRCUIT_FAILURE_THRESHOLD")
                 .unwrap_or_else(|_| "3".to_string())
@@ -774,6 +781,13 @@ mod tests {
         assert_eq!(cfg.callback_max_attempts, DEFAULT_CALLBACK_MAX_ATTEMPTS);
         assert_eq!(cfg.callback_timeout_secs, DEFAULT_CALLBACK_TIMEOUT_SECS);
         assert_eq!(cfg.callback_retry_delay_ms, DEFAULT_CALLBACK_RETRY_DELAY_MS);
+        assert!(!cfg.strict_worker_pools);
+    }
+
+    #[test]
+    fn strict_worker_pools_parses_true_case_insensitively() {
+        let cfg = Config::from_lookup(env(&[("STRICT_WORKER_POOLS", "TRUE")])).unwrap();
+        assert!(cfg.strict_worker_pools);
     }
 
     #[test]

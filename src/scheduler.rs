@@ -403,6 +403,8 @@ mod tests {
             client: reqwest::Client::new(),
             backends: vec![],
             workload_pools: crate::config::WorkloadPoolPolicy::default(),
+            worker_pool_ids: vec![],
+            strict_worker_pools: false,
             affinity: SessionAffinity::default(),
             metrics: RoutingMetrics::default(),
             callback_policy,

@@ -36,6 +36,8 @@ detail.
 
 ## Current Work
 
+- [`current_work/phase_7d_navigator.md`](current_work/phase_7d_navigator.md) —
+  active Phase 7D shared pool demo and policy closeout notes.
 - [`current_work/phase_7c_tactician.md`](current_work/phase_7c_tactician.md) —
   completed Phase 7C async worker pool placement notes.
 - [`current_work/phase_7b_trimmer.md`](current_work/phase_7b_trimmer.md) —

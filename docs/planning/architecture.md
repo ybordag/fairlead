@@ -441,6 +441,13 @@ worker supports the job type and the workload policy allows the worker's pool.
 If a worker asks for work but every queued job is outside that worker's allowed
 pool, Fairlead releases the worker slot and returns `204 No Content`.
 
+Phase 7D adds optional strict worker pool registration. By default, Fairlead
+allows any non-empty worker pool string, which keeps dynamic local workers and
+experiments flexible. When `STRICT_WORKER_POOLS=true`, registration fails unless
+the worker's pool appears in configured or derived `POOLS_JSON`. This catches
+pool-name typos and bounds metric labels in production-like deployments without
+making strict mode the migration default.
+
 The claim path emits async pool placement counters:
 
 - `fairlead_async_pool_selections_total`

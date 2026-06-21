@@ -70,6 +70,8 @@ mod tests {
             client: reqwest::Client::new(),
             backends,
             workload_pools: crate::config::WorkloadPoolPolicy::default(),
+            worker_pool_ids: vec![],
+            strict_worker_pools: false,
             affinity: SessionAffinity::default(),
             metrics: RoutingMetrics::default(),
             callback_policy: crate::callbacks::CallbackPolicy::default(),

@@ -205,6 +205,7 @@ Phase 7 adds explicit pool and workload placement policy:
 
 ```bash
 POOLS_JSON='["local-llm", "peer-llm", {"id": "vision"}]' \
+STRICT_WORKER_POOLS=true \
 WORKLOAD_POOLS_JSON='{
   "chat_completions": ["local-llm", "peer-llm"],
   "embeddings": ["local-llm", "peer-llm"],
@@ -223,6 +224,10 @@ registration, scheduler preview, and worker-pull claims. If a workload is
 omitted from an explicit partial policy, it remains permissive for now. Phase 7D
 will decide whether explicit workload pool policy should become strict before
 the pool model is considered complete.
+
+Worker registration is permissive by default: workers may register any non-empty
+pool string. Set `STRICT_WORKER_POOLS=true` to reject worker registration unless
+the worker's pool is present in configured or derived `POOLS_JSON`.
 
 Async job state is in-memory by default. During Phase 6E, SQLite can be enabled
 explicitly for durable job state across ordinary Fairlead restarts:
