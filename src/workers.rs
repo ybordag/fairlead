@@ -20,6 +20,8 @@ pub struct RegisterWorkerRequest {
     pub endpoint_url: String,
     #[serde(default)]
     pub node_id: Option<String>,
+    #[serde(default = "default_worker_pool")]
+    pub pool: String,
     pub job_types: Vec<JobKind>,
     #[serde(default)]
     pub max_concurrent_jobs: Option<usize>,
@@ -32,6 +34,7 @@ pub struct WorkerSnapshot {
     pub id: String,
     pub endpoint_url: String,
     pub node_id: Option<String>,
+    pub pool: String,
     pub job_types: Vec<JobKind>,
     pub max_concurrent_jobs: Option<usize>,
     pub available_vram_mb: Option<u64>,
@@ -92,6 +95,7 @@ struct WorkerEntry {
     id: String,
     endpoint_url: String,
     node_id: Option<String>,
+    pool: String,
     job_types: Vec<JobKind>,
     max_concurrent_jobs: Option<usize>,
     available_vram_mb: Option<u64>,
@@ -292,11 +296,16 @@ fn validate_worker(request: RegisterWorkerRequest) -> Result<WorkerEntry, String
         .node_id
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty());
+    let pool = request.pool.trim();
+    if pool.is_empty() {
+        return Err("worker pool cannot be empty".into());
+    }
 
     Ok(WorkerEntry {
         id: id.to_string(),
         endpoint_url: endpoint_url.to_string(),
         node_id,
+        pool: pool.to_string(),
         job_types: request.job_types,
         max_concurrent_jobs: request.max_concurrent_jobs,
         available_vram_mb: request.available_vram_mb,
@@ -316,6 +325,7 @@ fn snapshot_from_entry(entry: &WorkerEntry, stale_after: Duration) -> WorkerSnap
         id: entry.id.clone(),
         endpoint_url: entry.endpoint_url.clone(),
         node_id: entry.node_id.clone(),
+        pool: entry.pool.clone(),
         job_types: entry.job_types.clone(),
         max_concurrent_jobs: entry.max_concurrent_jobs,
         available_vram_mb: entry.available_vram_mb,
@@ -326,6 +336,10 @@ fn snapshot_from_entry(entry: &WorkerEntry, stale_after: Duration) -> WorkerSnap
         age_seconds: age.as_secs_f64(),
         stale: age >= stale_after,
     }
+}
+
+fn default_worker_pool() -> String {
+    "default".into()
 }
 
 fn unix_ms(time: SystemTime) -> u128 {
@@ -414,6 +428,7 @@ mod tests {
         assert_eq!(value["worker"]["id"], "vision-a");
         assert_eq!(value["worker"]["endpoint_url"], "http://vision-a:9000");
         assert_eq!(value["worker"]["node_id"], "node-a");
+        assert_eq!(value["worker"]["pool"], "default");
         assert_eq!(
             value["worker"]["job_types"],
             json!(["vision_analysis", "embed_batch"])
@@ -426,10 +441,40 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn register_worker_accepts_explicit_pool_metadata() {
+        let app = build_router(test_state(WorkerRegistry::default()));
+
+        let response = app
+            .oneshot(
+                Request::post("/v1/workers/register")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({
+                            "id": "vision-a",
+                            "endpoint_url": "http://vision-a:9000",
+                            "pool": " vision ",
+                            "job_types": ["vision_analysis"]
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let value = response_json(response).await;
+        assert_eq!(value["worker"]["pool"], "vision");
+    }
+
+    #[tokio::test]
     async fn register_worker_upserts_existing_worker() {
         let app = build_router(test_state(WorkerRegistry::default()));
 
-        for endpoint_url in ["http://worker-a:9000", "http://worker-a:9001"] {
+        for (endpoint_url, pool) in [
+            ("http://worker-a:9000", "default"),
+            ("http://worker-a:9001", "vision"),
+        ] {
             app.clone()
                 .oneshot(
                     Request::post("/v1/workers/register")
@@ -438,6 +483,7 @@ mod tests {
                             json!({
                                 "id": "worker-a",
                                 "endpoint_url": endpoint_url,
+                                "pool": pool,
                                 "job_types": ["index_build"]
                             })
                             .to_string(),
@@ -457,6 +503,7 @@ mod tests {
         let value = response_json(response).await;
         assert_eq!(value["workers"].as_array().unwrap().len(), 1);
         assert_eq!(value["workers"][0]["endpoint_url"], "http://worker-a:9001");
+        assert_eq!(value["workers"][0]["pool"], "vision");
     }
 
     #[tokio::test]
@@ -467,6 +514,7 @@ mod tests {
                 id: "worker-a".into(),
                 endpoint_url: "http://worker-a:9000".into(),
                 node_id: Some("node-a".into()),
+                pool: "default".into(),
                 job_types: vec![JobKind::VisionAnalysis],
                 max_concurrent_jobs: Some(1),
                 available_vram_mb: None,
@@ -499,6 +547,7 @@ mod tests {
                 id: "worker-a".into(),
                 endpoint_url: "http://worker-a:9000".into(),
                 node_id: None,
+                pool: "default".into(),
                 job_types: vec![JobKind::EmbedBatch],
                 max_concurrent_jobs: Some(2),
                 available_vram_mb: None,
@@ -512,6 +561,7 @@ mod tests {
                 id: "worker-a".into(),
                 endpoint_url: "http://worker-a:9001".into(),
                 node_id: None,
+                pool: "vision".into(),
                 job_types: vec![JobKind::EmbedBatch],
                 max_concurrent_jobs: Some(3),
                 available_vram_mb: None,
@@ -520,6 +570,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(updated.endpoint_url, "http://worker-a:9001");
+        assert_eq!(updated.pool, "vision");
         assert_eq!(updated.in_flight_jobs, 1);
         assert_eq!(updated.available_job_slots, Some(2));
     }
@@ -532,6 +583,7 @@ mod tests {
                 id: "worker-a".into(),
                 endpoint_url: "http://worker-a:9000".into(),
                 node_id: None,
+                pool: "default".into(),
                 job_types: vec![JobKind::Cluster],
                 max_concurrent_jobs: None,
                 available_vram_mb: None,
@@ -579,6 +631,7 @@ mod tests {
                 id: "worker-b".into(),
                 endpoint_url: "http://worker-b:9000".into(),
                 node_id: None,
+                pool: "default".into(),
                 job_types: vec![JobKind::VisionAnalysis],
                 max_concurrent_jobs: None,
                 available_vram_mb: None,
@@ -590,6 +643,7 @@ mod tests {
                 id: "worker-a".into(),
                 endpoint_url: "http://worker-a:9000".into(),
                 node_id: None,
+                pool: "default".into(),
                 job_types: vec![JobKind::EmbedBatch],
                 max_concurrent_jobs: None,
                 available_vram_mb: None,
@@ -618,6 +672,7 @@ mod tests {
             json!({"id": " ", "endpoint_url": "http://worker:9000", "job_types": ["cluster"]}),
             json!({"id": "worker", "endpoint_url": " ", "job_types": ["cluster"]}),
             json!({"id": "worker", "endpoint_url": "worker:9000", "job_types": ["cluster"]}),
+            json!({"id": "worker", "endpoint_url": "http://worker:9000", "pool": " ", "job_types": ["cluster"]}),
             json!({"id": "worker", "endpoint_url": "http://worker:9000", "job_types": []}),
             json!({"id": "worker", "endpoint_url": "http://worker:9000", "job_types": ["cluster"], "max_concurrent_jobs": 0}),
         ] {
@@ -644,6 +699,7 @@ mod tests {
                 id: "worker-a".into(),
                 endpoint_url: "http://worker-a:9000".into(),
                 node_id: None,
+                pool: "default".into(),
                 job_types: vec![JobKind::VisionAnalysis, JobKind::EmbedBatch],
                 max_concurrent_jobs: None,
                 available_vram_mb: None,

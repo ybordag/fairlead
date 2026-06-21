@@ -165,6 +165,56 @@ Add an opt-in DGX Spark smoke test for synchronous pool routing:
 resource-report commands, and controlled backend lifecycle. It should be an
 opt-in deployment smoke test, not part of the default Rust suite.
 
+### `phase_7c_async_worker_pool_process_e2e`
+
+Add an opt-in process-level e2e for async worker pool placement with local fake
+workers:
+
+- start Fairlead with `POOLS_JSON` and `WORKLOAD_POOLS_JSON` describing at
+  least `vision`, `batch`, and `peer` pools
+- register fake workers in different pools through real
+  `POST /v1/workers/register` calls
+- submit `vision_analysis` and `embed_batch` jobs through real `/v1/jobs`
+  calls, with policies that allow each job type to use different pools
+- verify `/v1/scheduler/preview` only returns worker/job pairs where the
+  worker's pool is allowed by the job type
+- verify `/v1/workers/{id}/claim` returns `204 No Content` when the worker
+  supports a queued job type but its pool is not allowed
+- verify a worker in an allowed pool can claim the same queued job after a
+  disallowed-pool worker receives no work
+- verify a workload omitted from explicit `WORKLOAD_POOLS_JSON` remains
+  permissive until the Phase 7D strict-policy decision
+- verify `/metrics` includes `fairlead_async_pool_selections_total`,
+  `fairlead_async_pool_candidate_workers_total`, and
+  `fairlead_async_pool_no_compatible_jobs_total` with expected pool, worker,
+  node, job type, priority, and outcome labels
+- verify worker pool metadata survives worker upsert and appears in
+  `GET /v1/workers`
+
+**Why deferred:** The in-process Rust tests cover the placement and metric logic.
+This e2e should exercise real process startup, environment parsing, worker/job
+HTTP calls, port allocation, and Prometheus scraping.
+
+### `phase_7c_dgx_async_worker_pool_smoke_test`
+
+Add an opt-in DGX Spark smoke test for async worker pool placement:
+
+- run Fairlead on the two-node DGX Spark setup with fake async workers on both
+  nodes, using sanitized pool names such as `vision-local`, `vision-peer`, and
+  `batch`
+- register workers with node and pool metadata from each host
+- submit a vision job that should only be claimed by the configured vision pool
+- verify a peer or batch worker receives `204 No Content` for a job outside its
+  allowed pool, then verify the correct pool's worker can claim and complete it
+- verify queue depth/wait, worker capacity, async pool placement, terminal
+  duration, and callback metrics through `/metrics`
+- repeat the same scenario after restarting Fairlead with SQLite job storage to
+  confirm durable queued jobs still respect worker pool policy after restart
+
+**Why deferred:** This requires real DGX hosts, SSH reachability, process
+lifecycle control, optional SQLite persistence, and fake worker scripts running
+on both nodes. It should stay opt-in and outside the default Rust test suite.
+
 ### `phase_6c_worker_claims_and_leases`
 
 When later phases build on Phase 6C/6D worker-pull claims, leases, and result

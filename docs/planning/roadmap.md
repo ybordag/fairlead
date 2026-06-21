@@ -126,9 +126,10 @@ Fairlead currently provides:
 
 It does not yet provide:
 
-- Async worker pool placement or shared sync/async pool demos. Synchronous
-  backend pool configuration and ordered fallback chains are implemented in
-  Phase 7B.
+- Shared sync/async pool demos and the final partial-vs-strict pool policy
+  decision. Synchronous backend pool configuration and ordered fallback chains
+  are implemented in Phase 7B; async worker pool placement and per-pool metrics
+  are implemented in Phase 7C.
 - CPU resource accounting and richer resource dimensions beyond coarse VRAM/load.
 - Durable starvation/fairness policy beyond current priority queue ordering.
 - Worker deregistration, graceful shutdown, or completed-job pruning.
@@ -179,9 +180,9 @@ system.
 - [x] Complete synchronous pool-aware backend configuration and routing policy.
   Phase 7B applies workload pool policy to chat and embedding routing with
   ordered pool fallback.
-- [ ] Complete async worker pool placement. Deferred to **Phase 7C:
-  Async Worker Pool Placement** so queued jobs and registered workers use the
-  same pool vocabulary as synchronous backends.
+- [x] Complete async worker pool placement. Phase 7C applies workload pool
+  policy to worker registration metadata, scheduler preview, worker-pull claims,
+  and async placement metrics.
 - [x] Preserve a default backend pool for today's simple `BACKENDS` config.
 - [x] Add provider/header forwarding policy:
   content type,
@@ -816,11 +817,12 @@ async workers.
 
 #### Phase 7C: Async Worker Pool Placement
 
-- Add pool metadata to registered workers.
-- Route async jobs to eligible worker pools before choosing a specific worker.
-- Apply priority/FIFO ordering only after the workload's eligible worker pools
+- [x] Add pool metadata to registered workers.
+- [x] Route async jobs to eligible worker pools before choosing a specific
+  worker.
+- [x] Apply priority/FIFO ordering only after the workload's eligible worker pools
   are known.
-- Add per-pool async metrics for candidate workers, selected worker, and
+- [x] Add per-pool async metrics for candidate workers, selected worker, and
   no-compatible-pool cases.
 
 #### Phase 7D: Shared Pool Demo and Docs
@@ -828,6 +830,9 @@ async workers.
 - Document local DGX pools, peer-node pools, and shared Fairlead deployments.
 - Add local demo config that shows sync and async workloads using the same pool
   vocabulary.
+- Decide whether worker registration should validate worker `pool` values
+  against configured `POOLS_JSON`, once the shared demo clarifies whether worker
+  pools should be centrally enumerated or remain permissive metadata.
 - Decide whether explicit `WORKLOAD_POOLS_JSON` should stay a partial override
   or become strict after both sync and async placement paths are implemented.
 - Update deferred e2e plans for future cloud overflow pools.

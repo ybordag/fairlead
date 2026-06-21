@@ -7,7 +7,7 @@ health, circuit state, and session affinity.
 
 The name comes from sailing: a fairlead is a fitting that guides lines in exactly the right direction without friction or fouling.
 
-**Status:** Phase 7B is underway on `trimmer`. Phase 7 adds pool-aware
+**Status:** Phase 7C is complete on `tactician`. Phase 7 adds pool-aware
 placement: first the shared pool/workload policy model, then synchronous backend
 routing, then async worker placement.
 Fairlead currently runs as an Axum HTTP service with `/health`, `/metrics`,
@@ -44,8 +44,8 @@ The current service provides:
   overloading the service.
 - **Prometheus-style metrics** for backend circuit state, request outcomes,
   latency, fallback reasons, retry reasons, priority limits/in-flight counts,
-  reported resource state, async queue depth/wait, worker utilization, and
-  terminal job duration, and callback delivery outcomes.
+  reported resource state, async queue depth/wait, worker utilization, async
+  worker pool placement, terminal job duration, and callback delivery outcomes.
 
 Fairlead does **not** run inference itself. It routes requests to model servers
 such as vLLM. vLLM owns model loading, GPU execution, KV cache management, and
@@ -99,10 +99,15 @@ Implemented generalization work includes:
   recovery.
 - **Terminal job callbacks** with bounded retry/timeout policy,
   success/failure metrics, and SQLite-backed at-least-once restart recovery.
+- **Pool-aware synchronous backend routing** through shared `POOLS_JSON` and
+  `WORKLOAD_POOLS_JSON` policy, with ordered pool fallback and per-pool metrics.
+- **Pool-aware async worker placement** so worker registration, scheduler
+  preview, and worker-pull claims respect workload pool policy, with per-pool
+  async placement metrics.
 
-Remaining Phase 7 work adds async worker pool placement and shared pool demos.
-Future phases add scheduler hardening, adapter boundaries, richer resource
-policy, external scale/overflow, and transport/SDK hardening.
+Remaining Phase 7 work adds shared pool demos and the final partial-vs-strict
+policy decision. Future phases add scheduler hardening, adapter boundaries,
+richer resource policy, external scale/overflow, and transport/SDK hardening.
 
 See [`docs/planning/roadmap.md`](docs/planning/roadmap.md) for the
 implementation plan and acceptance criteria.
@@ -213,10 +218,10 @@ metadata and always includes the backward-compatible `default` pool. When
 `WORKLOAD_POOLS_JSON` is absent, all known workloads are considered eligible for
 all configured pools. Phase 7B applies this policy to synchronous chat and
 embedding backend eligibility and treats each workload's pool list as an ordered
-fallback chain. If a workload is omitted from an explicit partial policy, it
-remains permissive for now. Phase 7C applies the same vocabulary to async worker
-placement. Fairlead will keep partial policy permissive through Phase 7C; Phase
-7D will decide whether explicit workload pool policy should become strict before
+fallback chain. Phase 7C applies the same vocabulary to async worker
+registration, scheduler preview, and worker-pull claims. If a workload is
+omitted from an explicit partial policy, it remains permissive for now. Phase 7D
+will decide whether explicit workload pool policy should become strict before
 the pool model is considered complete.
 
 Async job state is in-memory by default. During Phase 6E, SQLite can be enabled
