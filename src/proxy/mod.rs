@@ -137,7 +137,7 @@ async fn forward(
 
     let mut attempted = Vec::new();
     let mut next_backend = None;
-    let route_ineligible = route_ineligible_backends(&state.backends, &route);
+    let route_ineligible = route_ineligible_backends(state, &route);
     let resource_state = resource_selection_state(state, &workload_kind).await;
     let selection_ineligible = selection_ineligible(&route_ineligible, &resource_state.ineligible);
 
@@ -526,16 +526,25 @@ fn fallback_reason(
     None
 }
 
-fn route_ineligible_backends(backends: &[BackendState], route: &WorkloadRoute) -> Vec<usize> {
-    backends
+fn route_ineligible_backends(state: &AppState, route: &WorkloadRoute) -> Vec<usize> {
+    state
+        .backends
         .iter()
         .enumerate()
-        .filter_map(|(idx, backend)| (!route_allows_backend(backend, route)).then_some(idx))
+        .filter_map(|(idx, backend)| {
+            (!route_allows_backend(backend, route, &state.workload_pools)).then_some(idx)
+        })
         .collect()
 }
 
-fn route_allows_backend(backend: &BackendState, route: &WorkloadRoute) -> bool {
-    route.backend_pool.allows(&backend.pool) && backend.workloads.contains(&route.kind)
+fn route_allows_backend(
+    backend: &BackendState,
+    route: &WorkloadRoute,
+    workload_pools: &crate::config::WorkloadPoolPolicy,
+) -> bool {
+    route.backend_pool.allows(&backend.pool)
+        && workload_pools.allows(route.kind.as_str(), &backend.pool)
+        && backend.workloads.contains(&route.kind)
 }
 
 fn selection_ineligible(route_ineligible: &[usize], resource_ineligible: &[usize]) -> Vec<usize> {
@@ -753,7 +762,7 @@ fn upstream_response(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{BackendConfig, WorkloadKind};
+    use crate::config::{BackendConfig, WorkloadKind, WorkloadPoolPolicy};
     use crate::{build_router, router::BackendState, router::SessionAffinity};
     use axum::{
         http::{Request, StatusCode},
@@ -762,6 +771,7 @@ mod tests {
     };
     use serde_json::json;
     use std::{
+        collections::BTreeMap,
         io,
         sync::{
             atomic::{AtomicBool, AtomicUsize, Ordering},
@@ -883,9 +893,17 @@ mod tests {
     }
 
     async fn start_fairlead_with_backends(backends: Vec<BackendState>) -> String {
+        start_fairlead_with_workload_pools(backends, WorkloadPoolPolicy::default()).await
+    }
+
+    async fn start_fairlead_with_workload_pools(
+        backends: Vec<BackendState>,
+        workload_pools: WorkloadPoolPolicy,
+    ) -> String {
         let state = AppState {
             client: reqwest::Client::new(),
             backends,
+            workload_pools,
             affinity: SessionAffinity::default(),
             metrics: crate::metrics::RoutingMetrics::default(),
             callback_policy: crate::callbacks::CallbackPolicy::default(),
@@ -1197,6 +1215,7 @@ mod tests {
         let state = AppState {
             client: reqwest::Client::new(),
             backends: vec![BackendState::new(backend, 10, Duration::from_secs(60))],
+            workload_pools: WorkloadPoolPolicy::default(),
             affinity: SessionAffinity::default(),
             metrics: crate::metrics::RoutingMetrics::default(),
             callback_policy: crate::callbacks::CallbackPolicy::default(),
@@ -1276,6 +1295,7 @@ mod tests {
         let state = AppState {
             client: reqwest::Client::new(),
             backends: vec![BackendState::new(backend, 10, Duration::from_secs(60))],
+            workload_pools: WorkloadPoolPolicy::default(),
             affinity: SessionAffinity::default(),
             metrics: crate::metrics::RoutingMetrics::default(),
             callback_policy: crate::callbacks::CallbackPolicy::default(),
@@ -1337,6 +1357,7 @@ mod tests {
         let state = AppState {
             client: reqwest::Client::new(),
             backends: vec![BackendState::new(backend, 10, Duration::from_secs(60))],
+            workload_pools: WorkloadPoolPolicy::default(),
             affinity: SessionAffinity::default(),
             metrics: crate::metrics::RoutingMetrics::default(),
             callback_policy: crate::callbacks::CallbackPolicy::default(),
@@ -1769,6 +1790,151 @@ mod tests {
             "embedding"
         );
         assert_eq!(skipped_hits.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn chat_completions_skips_backend_outside_workload_pool() {
+        let skipped_hits = Arc::new(AtomicUsize::new(0));
+        let skipped_hits_for_route = skipped_hits.clone();
+        let skipped = Router::new().route(
+            "/v1/chat/completions",
+            post(move || {
+                let hits = skipped_hits_for_route.clone();
+                async move {
+                    hits.fetch_add(1, Ordering::SeqCst);
+                    axum::Json(json!({"source":"peer"}))
+                }
+            }),
+        );
+        let selected = Router::new().route(
+            "/v1/chat/completions",
+            post(|| async { axum::Json(json!({"source":"local"})) }),
+        );
+        let skipped_url = start_mock(skipped).await;
+        let selected_url = start_mock(selected).await;
+        let workload_pools = WorkloadPoolPolicy::new(BTreeMap::from([(
+            "chat_completions".to_string(),
+            vec!["local-llm".to_string()],
+        )]));
+        let fairlead = start_fairlead_with_workload_pools(
+            vec![
+                backend_with_workloads(
+                    skipped_url,
+                    "peer-chat",
+                    "peer-llm",
+                    vec![WorkloadKind::ChatCompletions],
+                ),
+                backend_with_workloads(
+                    selected_url,
+                    "local-chat",
+                    "local-llm",
+                    vec![WorkloadKind::ChatCompletions],
+                ),
+            ],
+            workload_pools,
+        )
+        .await;
+
+        let resp = reqwest::Client::new()
+            .post(format!("{}/v1/chat/completions", fairlead))
+            .json(&json!({"model":"m","messages":[]}))
+            .send()
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), 200);
+        assert_eq!(
+            resp.json::<serde_json::Value>().await.unwrap()["source"],
+            "local"
+        );
+        assert_eq!(skipped_hits.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn workload_pool_policy_returns_503_when_no_backend_is_allowed() {
+        let hits = Arc::new(AtomicUsize::new(0));
+        let hits_for_route = hits.clone();
+        let backend = Router::new().route(
+            "/v1/chat/completions",
+            post(move || {
+                let hits = hits_for_route.clone();
+                async move {
+                    hits.fetch_add(1, Ordering::SeqCst);
+                    axum::Json(json!({"source":"peer"}))
+                }
+            }),
+        );
+        let backend_url = start_mock(backend).await;
+        let workload_pools = WorkloadPoolPolicy::new(BTreeMap::from([(
+            "chat_completions".to_string(),
+            vec!["local-llm".to_string()],
+        )]));
+        let fairlead = start_fairlead_with_workload_pools(
+            vec![backend_with_workloads(
+                backend_url,
+                "peer-chat",
+                "peer-llm",
+                vec![WorkloadKind::ChatCompletions],
+            )],
+            workload_pools,
+        )
+        .await;
+
+        let resp = reqwest::Client::new()
+            .post(format!("{}/v1/chat/completions", fairlead))
+            .json(&json!({"model":"m","messages":[]}))
+            .send()
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            resp.text().await.unwrap(),
+            "no backends configured for workload"
+        );
+        assert_eq!(hits.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn missing_workload_pool_policy_remains_permissive() {
+        let selected = Router::new().route(
+            "/v1/embeddings",
+            post(|| async {
+                axum::Json(json!({
+                    "object":"list",
+                    "data":[{"object":"embedding","index":0,"embedding":[0.2]}],
+                    "model":"embedding"
+                }))
+            }),
+        );
+        let selected_url = start_mock(selected).await;
+        let workload_pools = WorkloadPoolPolicy::new(BTreeMap::from([(
+            "chat_completions".to_string(),
+            vec!["local-llm".to_string()],
+        )]));
+        let fairlead = start_fairlead_with_workload_pools(
+            vec![backend_with_workloads(
+                selected_url,
+                "embedding",
+                "embedding",
+                vec![WorkloadKind::Embeddings],
+            )],
+            workload_pools,
+        )
+        .await;
+
+        let resp = reqwest::Client::new()
+            .post(format!("{}/v1/embeddings", fairlead))
+            .json(&json!({"model":"m","input":"hello"}))
+            .send()
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), 200);
+        assert_eq!(
+            resp.json::<serde_json::Value>().await.unwrap()["model"],
+            "embedding"
+        );
     }
 
     #[tokio::test]
@@ -2361,6 +2527,7 @@ mod tests {
                 backend_on_node(node_a_url, "node-a"),
                 backend_on_node(node_b_url, "node-b"),
             ],
+            workload_pools: WorkloadPoolPolicy::default(),
             affinity: SessionAffinity::default(),
             metrics: crate::metrics::RoutingMetrics::default(),
             callback_policy: crate::callbacks::CallbackPolicy::default(),
@@ -2444,6 +2611,7 @@ mod tests {
                 backend_on_node(node_a_url, "node-a"),
                 backend_on_node(node_b_url, "node-b"),
             ],
+            workload_pools: WorkloadPoolPolicy::default(),
             affinity: SessionAffinity::default(),
             metrics: crate::metrics::RoutingMetrics::default(),
             callback_policy: crate::callbacks::CallbackPolicy::default(),
@@ -2514,6 +2682,7 @@ mod tests {
                 backend_on_node(node_a_url, "node-a"),
                 backend_on_node(node_b_url, "node-b"),
             ],
+            workload_pools: WorkloadPoolPolicy::default(),
             affinity: SessionAffinity::default(),
             metrics: crate::metrics::RoutingMetrics::default(),
             callback_policy: crate::callbacks::CallbackPolicy::default(),
@@ -2566,6 +2735,7 @@ mod tests {
                 backend_on_node("http://node-a:8000/v1".into(), "node-a"),
                 backend_on_node("http://node-b:8000/v1".into(), "node-b"),
             ],
+            workload_pools: WorkloadPoolPolicy::default(),
             affinity: SessionAffinity::default(),
             metrics: crate::metrics::RoutingMetrics::default(),
             callback_policy: crate::callbacks::CallbackPolicy::default(),
@@ -2613,6 +2783,7 @@ mod tests {
         let state = AppState {
             client: reqwest::Client::new(),
             backends: vec![node_a_backend, backend_on_node(node_b_url, "node-b")],
+            workload_pools: WorkloadPoolPolicy::default(),
             affinity: SessionAffinity::default(),
             metrics: crate::metrics::RoutingMetrics::default(),
             callback_policy: crate::callbacks::CallbackPolicy::default(),
@@ -2857,6 +3028,7 @@ mod tests {
         let state = AppState {
             client: reqwest::Client::new(),
             backends: vec![BackendState::new(backend, 10, Duration::from_secs(60))],
+            workload_pools: WorkloadPoolPolicy::default(),
             affinity: affinity.clone(),
             metrics: crate::metrics::RoutingMetrics::default(),
             callback_policy: crate::callbacks::CallbackPolicy::default(),

@@ -60,6 +60,42 @@ enum PoolConfigEntry {
     Object(PoolConfig),
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct WorkloadPoolPolicy {
+    pools_by_workload: BTreeMap<String, Vec<String>>,
+}
+
+impl WorkloadPoolPolicy {
+    pub fn new(pools_by_workload: BTreeMap<String, Vec<String>>) -> Self {
+        Self { pools_by_workload }
+    }
+
+    pub fn allows(&self, workload: &str, pool: &str) -> bool {
+        self.pools_by_workload
+            .get(workload)
+            .is_none_or(|pools| pools.iter().any(|allowed| allowed == pool))
+    }
+
+    pub fn len(&self) -> usize {
+        self.pools_by_workload.len()
+    }
+
+    #[cfg(test)]
+    pub fn keys(&self) -> impl Iterator<Item = &String> {
+        self.pools_by_workload.keys()
+    }
+
+    #[cfg(test)]
+    pub fn contains_key(&self, workload: &str) -> bool {
+        self.pools_by_workload.contains_key(workload)
+    }
+
+    #[cfg(test)]
+    pub fn get(&self, workload: &str) -> Option<&Vec<String>> {
+        self.pools_by_workload.get(workload)
+    }
+}
+
 impl BackendPoolPolicy {
     pub fn allows(self, pool: &str) -> bool {
         match self {
@@ -188,7 +224,7 @@ pub struct Config {
     pub pools: Vec<PoolConfig>,
     /// Workload-to-pool eligibility policy. Phase 7A validates this shape; later
     /// Phase 7 slices apply it to synchronous routing and async worker claims.
-    pub workload_pools: BTreeMap<String, Vec<String>>,
+    pub workload_pools: WorkloadPoolPolicy,
     /// Consecutive failures required to open a circuit. Default: 3.
     pub circuit_failure_threshold: u32,
     /// Seconds to wait in Open state before probing again (Half-open). Default: 30.
@@ -422,14 +458,14 @@ fn parse_pools(
 fn parse_workload_pools(
     get: &impl Fn(&str) -> Result<String, VarError>,
     pools: &[PoolConfig],
-) -> Result<BTreeMap<String, Vec<String>>> {
+) -> Result<WorkloadPoolPolicy> {
     match get("WORKLOAD_POOLS_JSON") {
         Ok(raw) => {
             let parsed: BTreeMap<String, Vec<String>> = serde_json::from_str(&raw)
                 .map_err(|e| anyhow!("invalid WORKLOAD_POOLS_JSON: {}", e))?;
-            validate_workload_pools(parsed, pools)
+            validate_workload_pools(parsed, pools).map(WorkloadPoolPolicy::new)
         }
-        Err(_) => Ok(default_workload_pools(pools)),
+        Err(_) => Ok(WorkloadPoolPolicy::new(default_workload_pools(pools))),
     }
 }
 

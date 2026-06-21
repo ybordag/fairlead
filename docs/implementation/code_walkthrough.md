@@ -507,9 +507,12 @@ eligible pools:
 }
 ```
 
-At this stage the policy is parsed and validated but not yet applied to dispatch.
-If the pool list is omitted, Fairlead derives pools from backend metadata and
-keeps the `default` pool for compatibility with simple `BACKENDS` setup.
+Phase 7B applies this policy to synchronous chat and embedding dispatch. A
+backend must support the requested workload and sit in one of that workload's
+allowed pools before resource ranking, locality, affinity, or retry fallback can
+select it. If the pool list is omitted, Fairlead derives pools from backend
+metadata and keeps the `default` pool for compatibility with simple `BACKENDS`
+setup.
 
 ### 5. Initialize Tracing
 
@@ -1407,16 +1410,18 @@ Fairlead does:
 6. `forward` acquires a realtime priority admission slot.
 7. `SessionAffinity::preferred("chat_completions:abc")` returns a preferred
    index or `None`.
-8. `resource_selection_state` marks resource-ineligible backends if resource-aware
+8. `route_ineligible_backends` removes backends that do not support the workload
+   or sit outside the workload's allowed pools.
+9. `resource_selection_state` marks resource-ineligible backends if resource-aware
    routing is enabled.
-9. `select_backend_excluding_resource` prefers an available backend on `spark-a`,
+10. `select_backend_excluding_resource` prefers an available backend on `spark-a`,
    then affinity, then resource rank/configured order.
-10. `forward` builds the upstream URL.
-11. `reqwest` sends the request body to vLLM or another compatible backend.
-12. Fairlead records success or failure on that backend's circuit breaker.
-13. On success, Fairlead records
+11. `forward` builds the upstream URL.
+12. `reqwest` sends the request body to vLLM or another compatible backend.
+13. Fairlead records success or failure on that backend's circuit breaker.
+14. On success, Fairlead records
     `chat_completions:abc -> selected_backend_index`.
-14. Fairlead streams the backend response back to the caller.
+15. Fairlead streams the backend response back to the caller.
 
 ## What Is Not Happening Yet
 

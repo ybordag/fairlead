@@ -436,6 +436,7 @@ mod tests {
         let state = AppState {
             client: reqwest::Client::new(),
             backends,
+            workload_pools: crate::config::WorkloadPoolPolicy::default(),
             affinity: crate::router::SessionAffinity::default(),
             metrics: RoutingMetrics::default(),
             callback_policy: crate::callbacks::CallbackPolicy::default(),
@@ -667,6 +668,7 @@ mod tests {
         let state = AppState {
             client: reqwest::Client::new(),
             backends: vec![],
+            workload_pools: crate::config::WorkloadPoolPolicy::default(),
             affinity: crate::router::SessionAffinity::default(),
             metrics: RoutingMetrics::default(),
             callback_policy: crate::callbacks::CallbackPolicy::default(),
@@ -712,6 +714,7 @@ mod tests {
         let state = AppState {
             client: reqwest::Client::new(),
             backends: vec![],
+            workload_pools: crate::config::WorkloadPoolPolicy::default(),
             affinity: crate::router::SessionAffinity::default(),
             metrics: RoutingMetrics::default(),
             callback_policy: crate::callbacks::CallbackPolicy::default(),

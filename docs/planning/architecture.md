@@ -238,11 +238,18 @@ validation rejects empty pool IDs, duplicate pool IDs, backends that reference
 undeclared pools, unknown workload names, empty workload pool lists, duplicate
 pool references, and workload policies that reference undeclared pools.
 
-Phase 7A intentionally does not change dispatch. Synchronous routing still uses
-existing workload support and backend health/resource eligibility. Phase 7B
-will apply this validated policy to synchronous backend selection and fallback
-chains. Phase 7C will add worker pool metadata and apply the same vocabulary to
-async worker placement.
+Phase 7B applies this validated policy to synchronous backend selection. A
+backend is eligible for chat or embeddings only when it supports the requested
+workload and its pool is allowed by that workload's policy. If an explicit
+policy omits a workload, that workload remains permissive for now. If every
+backend is outside the workload's allowed pools, Fairlead returns `503` without
+contacting an upstream backend.
+
+Phase 7B currently implements pool allowlists, not ordered pool fallback chains.
+When multiple pools are allowed, locality, affinity, resource ranking, and
+configured backend order still choose among the allowed candidates. Phase 7C
+will add worker pool metadata and apply the same vocabulary to async worker
+placement.
 
 ---
 
@@ -264,8 +271,9 @@ Every inference request goes through a decision pipeline:
 request arrives
   → check priority (realtime / batch / background)
   → acquire a synchronous admission slot for that priority, or return 429
-  → find eligible backends (circuit closed + VRAM headroom)
-  → check session affinity (prefer same node for KV cache)
+  → find eligible backends (workload support + allowed pool + circuit/resource state)
+  → prefer origin node
+  → check session affinity
   → proxy to selected backend, stream response back
   → if backend fails: try next in fallback chain
   → if all eligible backends fail: return 502/503

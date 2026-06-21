@@ -377,6 +377,7 @@ mod tests {
         AppState {
             client: reqwest::Client::new(),
             backends: vec![],
+            workload_pools: crate::config::WorkloadPoolPolicy::default(),
             affinity: SessionAffinity::default(),
             metrics: RoutingMetrics::default(),
             callback_policy: crate::callbacks::CallbackPolicy::default(),
