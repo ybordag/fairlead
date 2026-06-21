@@ -471,7 +471,10 @@ mod tests {
     async fn register_worker_upserts_existing_worker() {
         let app = build_router(test_state(WorkerRegistry::default()));
 
-        for endpoint_url in ["http://worker-a:9000", "http://worker-a:9001"] {
+        for (endpoint_url, pool) in [
+            ("http://worker-a:9000", "default"),
+            ("http://worker-a:9001", "vision"),
+        ] {
             app.clone()
                 .oneshot(
                     Request::post("/v1/workers/register")
@@ -480,6 +483,7 @@ mod tests {
                             json!({
                                 "id": "worker-a",
                                 "endpoint_url": endpoint_url,
+                                "pool": pool,
                                 "job_types": ["index_build"]
                             })
                             .to_string(),
@@ -499,6 +503,7 @@ mod tests {
         let value = response_json(response).await;
         assert_eq!(value["workers"].as_array().unwrap().len(), 1);
         assert_eq!(value["workers"][0]["endpoint_url"], "http://worker-a:9001");
+        assert_eq!(value["workers"][0]["pool"], "vision");
     }
 
     #[tokio::test]
@@ -556,7 +561,7 @@ mod tests {
                 id: "worker-a".into(),
                 endpoint_url: "http://worker-a:9001".into(),
                 node_id: None,
-                pool: "default".into(),
+                pool: "vision".into(),
                 job_types: vec![JobKind::EmbedBatch],
                 max_concurrent_jobs: Some(3),
                 available_vram_mb: None,
@@ -565,6 +570,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(updated.endpoint_url, "http://worker-a:9001");
+        assert_eq!(updated.pool, "vision");
         assert_eq!(updated.in_flight_jobs, 1);
         assert_eq!(updated.available_job_slots, Some(2));
     }

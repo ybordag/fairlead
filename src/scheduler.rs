@@ -853,6 +853,10 @@ mod tests {
     async fn worker_claim_endpoint_leases_matching_job() {
         let jobs = JobRegistry::default();
         let workers = WorkerRegistry::default();
+        let workload_pools = crate::config::WorkloadPoolPolicy::new(BTreeMap::from([(
+            "vision_analysis".to_string(),
+            vec!["default".to_string()],
+        )]));
 
         jobs.submit(SubmitJobRequest {
             kind: JobKind::VisionAnalysis,
@@ -862,20 +866,30 @@ mod tests {
         })
         .await
         .unwrap();
-        workers
-            .register(RegisterWorkerRequest {
-                id: "vision-worker".into(),
-                endpoint_url: "http://vision-worker:9000".into(),
-                node_id: Some("node-a".into()),
-                pool: "default".into(),
-                job_types: vec![JobKind::VisionAnalysis],
-                max_concurrent_jobs: None,
-                available_vram_mb: None,
-            })
-            .await
-            .unwrap();
+        for (id, node_id, pool) in [
+            ("vision-worker", Some("node-a"), "default"),
+            ("vision-worker-b", Some("node-b"), "default"),
+            ("peer-worker", Some("node-c"), "peer"),
+        ] {
+            workers
+                .register(RegisterWorkerRequest {
+                    id: id.into(),
+                    endpoint_url: format!("http://{id}:9000"),
+                    node_id: node_id.map(str::to_string),
+                    pool: pool.into(),
+                    job_types: vec![JobKind::VisionAnalysis],
+                    max_concurrent_jobs: None,
+                    available_vram_mb: None,
+                })
+                .await
+                .unwrap();
+        }
 
-        let app = build_router(test_state(jobs.clone(), workers));
+        let app = build_router(test_state_with_workload_pools(
+            jobs.clone(),
+            workers,
+            workload_pools,
+        ));
         let response = app
             .clone()
             .oneshot(
@@ -906,7 +920,7 @@ mod tests {
             "fairlead_async_pool_selections_total{type=\"vision_analysis\",priority=\"batch\",pool=\"default\",worker=\"vision-worker\",node=\"node-a\",outcome=\"selected\"} 1"
         ));
         assert!(metrics.contains(
-            "fairlead_async_pool_candidate_workers_total{type=\"vision_analysis\",priority=\"batch\",pool=\"default\",worker=\"vision-worker\",node=\"node-a\",outcome=\"selected\"} 1"
+            "fairlead_async_pool_candidate_workers_total{type=\"vision_analysis\",priority=\"batch\",pool=\"default\",worker=\"vision-worker\",node=\"node-a\",outcome=\"selected\"} 2"
         ));
         assert!(metrics.contains(
             "fairlead_async_pool_no_compatible_jobs_total{type=\"vision_analysis\",priority=\"batch\",pool=\"default\",worker=\"vision-worker\",node=\"node-a\",outcome=\"selected\"} 0"
@@ -999,6 +1013,14 @@ mod tests {
         })
         .await
         .unwrap();
+        jobs.submit(SubmitJobRequest {
+            kind: JobKind::VisionAnalysis,
+            priority: Priority::Batch,
+            payload: Value::Null,
+            callback_url: None,
+        })
+        .await
+        .unwrap();
         workers
             .register(RegisterWorkerRequest {
                 id: "peer-worker".into(),
@@ -1046,8 +1068,67 @@ mod tests {
             "fairlead_async_pool_candidate_workers_total{type=\"vision_analysis\",priority=\"batch\",pool=\"peer\",worker=\"peer-worker\",node=\"\",outcome=\"no_compatible_job\"} 0"
         ));
         assert!(metrics.contains(
-            "fairlead_async_pool_no_compatible_jobs_total{type=\"vision_analysis\",priority=\"batch\",pool=\"peer\",worker=\"peer-worker\",node=\"\",outcome=\"no_compatible_job\"} 1"
+            "fairlead_async_pool_no_compatible_jobs_total{type=\"vision_analysis\",priority=\"batch\",pool=\"peer\",worker=\"peer-worker\",node=\"\",outcome=\"no_compatible_job\"} 2"
         ));
+    }
+
+    #[tokio::test]
+    async fn worker_claim_endpoint_keeps_omitted_workload_pool_policy_permissive() {
+        let jobs = JobRegistry::default();
+        let workers = WorkerRegistry::default();
+        let workload_pools = crate::config::WorkloadPoolPolicy::new(BTreeMap::from([(
+            "vision_analysis".to_string(),
+            vec!["vision".to_string()],
+        )]));
+
+        jobs.submit(SubmitJobRequest {
+            kind: JobKind::EmbedBatch,
+            priority: Priority::Batch,
+            payload: Value::Null,
+            callback_url: None,
+        })
+        .await
+        .unwrap();
+        workers
+            .register(RegisterWorkerRequest {
+                id: "embed-worker".into(),
+                endpoint_url: "http://embed-worker:9000".into(),
+                node_id: None,
+                pool: "peer".into(),
+                job_types: vec![JobKind::EmbedBatch],
+                max_concurrent_jobs: None,
+                available_vram_mb: None,
+            })
+            .await
+            .unwrap();
+
+        let preview = preview_next_assignment_with_policy(&jobs, &workers, &workload_pools)
+            .await
+            .unwrap();
+        assert_eq!(preview.job.kind, JobKind::EmbedBatch);
+        assert_eq!(preview.worker.id, "embed-worker");
+
+        let app = build_router(test_state_with_workload_pools(
+            jobs.clone(),
+            workers,
+            workload_pools,
+        ));
+        let response = app
+            .oneshot(
+                Request::post("/v1/workers/embed-worker/claim")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(value["job"]["id"], "job-1");
+        assert_eq!(value["job"]["type"], "embed_batch");
     }
 
     #[tokio::test]
