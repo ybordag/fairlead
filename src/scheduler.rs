@@ -141,7 +141,7 @@ pub async fn complete_worker_job_handler(
 
     match state
         .jobs
-        .complete_lease(&job_id, &worker.id, request.result)
+        .complete_lease(&job_id, &worker.id, request.attempt, request.result)
         .await
     {
         FinishJobResult::Completed(job) => {
@@ -155,13 +155,18 @@ pub async fn complete_worker_job_handler(
             );
             Json(JobResultResponse { job }).into_response()
         }
+        FinishJobResult::IdempotentCompleted(job) => {
+            Json(JobResultResponse { job }).into_response()
+        }
         FinishJobResult::NotRunning(job)
         | FinishJobResult::LeaseNotHeld(job)
         | FinishJobResult::Expired(job) => {
             (StatusCode::CONFLICT, Json(JobResultResponse { job })).into_response()
         }
         FinishJobResult::NotFound => (StatusCode::NOT_FOUND, "job not found").into_response(),
-        FinishJobResult::Requeued(_) | FinishJobResult::Failed(_) => {
+        FinishJobResult::Requeued(_)
+        | FinishJobResult::Failed(_)
+        | FinishJobResult::IdempotentFailed(_) => {
             unreachable!("completion cannot requeue or fail a job")
         }
     }
@@ -189,7 +194,11 @@ pub async fn fail_worker_job_handler(
         message: error.to_string(),
         retryable: request.retryable,
     };
-    match state.jobs.fail_lease(&job_id, &worker.id, failure).await {
+    match state
+        .jobs
+        .fail_lease(&job_id, &worker.id, request.attempt, failure)
+        .await
+    {
         FinishJobResult::Requeued(job) => {
             state.workers.release_slot(&worker.id).await;
             Json(JobResultResponse { job }).into_response()
@@ -205,13 +214,16 @@ pub async fn fail_worker_job_handler(
             );
             Json(JobResultResponse { job }).into_response()
         }
+        FinishJobResult::IdempotentFailed(job) => Json(JobResultResponse { job }).into_response(),
         FinishJobResult::NotRunning(job)
         | FinishJobResult::LeaseNotHeld(job)
         | FinishJobResult::Expired(job) => {
             (StatusCode::CONFLICT, Json(JobResultResponse { job })).into_response()
         }
         FinishJobResult::NotFound => (StatusCode::NOT_FOUND, "job not found").into_response(),
-        FinishJobResult::Completed(_) => unreachable!("failure cannot complete a job"),
+        FinishJobResult::Completed(_) | FinishJobResult::IdempotentCompleted(_) => {
+            unreachable!("failure cannot complete a job")
+        }
     }
 }
 
@@ -2024,7 +2036,7 @@ mod tests {
         jobs.claim_next_for_worker("vision-worker", &[submitted.kind], 30_000)
             .await
             .unwrap();
-        jobs.complete_lease(&submitted.id, "vision-worker", json!({"ok": true}))
+        jobs.complete_lease(&submitted.id, "vision-worker", None, json!({"ok": true}))
             .await;
 
         let restored =
@@ -2093,7 +2105,7 @@ mod tests {
         jobs.claim_next_for_worker("cluster-worker", &[submitted.kind], 30_000)
             .await
             .unwrap();
-        jobs.complete_lease(&submitted.id, "cluster-worker", json!({"ok": true}))
+        jobs.complete_lease(&submitted.id, "cluster-worker", None, json!({"ok": true}))
             .await;
 
         crate::callbacks::dispatch_pending_callbacks(
@@ -2166,7 +2178,7 @@ mod tests {
         jobs.claim_next_for_worker("vision-worker", &[submitted.kind], 30_000)
             .await
             .unwrap();
-        jobs.complete_lease(&submitted.id, "vision-worker", json!({"ok": true}))
+        jobs.complete_lease(&submitted.id, "vision-worker", None, json!({"ok": true}))
             .await;
 
         let restored =
@@ -2215,7 +2227,7 @@ mod tests {
         jobs.claim_next_for_worker("cluster-worker", &[submitted.kind], 30_000)
             .await
             .unwrap();
-        jobs.complete_lease(&submitted.id, "cluster-worker", json!({"ok": true}))
+        jobs.complete_lease(&submitted.id, "cluster-worker", None, json!({"ok": true}))
             .await;
 
         let dispatcher = crate::callbacks::CallbackDispatcher::default();
@@ -2740,7 +2752,7 @@ mod tests {
                 Request::post("/v1/workers/vision-worker/jobs/job-1/complete")
                     .header("content-type", "application/json")
                     .body(Body::from(
-                        json!({"result": {"label": "healthy"}}).to_string(),
+                        json!({"attempt": 1, "result": {"label": "healthy"}}).to_string(),
                     ))
                     .unwrap(),
             )
@@ -2754,20 +2766,35 @@ mod tests {
                 Request::post("/v1/workers/vision-worker/jobs/job-1/complete")
                     .header("content-type", "application/json")
                     .body(Body::from(
-                        json!({"result": {"label": "changed"}}).to_string(),
+                        json!({"attempt": 1, "result": {"label": "healthy"}}).to_string(),
                     ))
                     .unwrap(),
             )
             .await
             .unwrap();
-        assert_eq!(duplicate_complete.status(), StatusCode::CONFLICT);
+        assert_eq!(duplicate_complete.status(), StatusCode::OK);
+
+        let changed_complete = app
+            .clone()
+            .oneshot(
+                Request::post("/v1/workers/vision-worker/jobs/job-1/complete")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({"attempt": 1, "result": {"label": "changed"}}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(changed_complete.status(), StatusCode::CONFLICT);
 
         let late_fail = app
             .oneshot(
                 Request::post("/v1/workers/vision-worker/jobs/job-1/fail")
                     .header("content-type", "application/json")
                     .body(Body::from(
-                        json!({"error": "late failure", "retryable": true}).to_string(),
+                        json!({"attempt": 1, "error": "late failure", "retryable": true})
+                            .to_string(),
                     ))
                     .unwrap(),
             )
@@ -2782,6 +2809,122 @@ mod tests {
         assert_eq!(
             workers.get("vision-worker").await.unwrap().in_flight_jobs,
             0
+        );
+    }
+
+    #[tokio::test]
+    async fn duplicate_terminal_failure_returns_existing_job_without_releasing_new_slot() {
+        let jobs = JobRegistry::default();
+        let workers = WorkerRegistry::default();
+
+        for _ in 0..2 {
+            jobs.submit(SubmitJobRequest {
+                kind: JobKind::VisionAnalysis,
+                priority: Priority::Batch,
+                payload: Value::Null,
+                callback_url: None,
+                idempotency_key: None,
+            })
+            .await
+            .unwrap();
+        }
+        workers
+            .register(RegisterWorkerRequest {
+                id: "vision-worker".into(),
+                endpoint_url: "http://vision-worker:9000".into(),
+                node_id: None,
+                pool: "default".into(),
+                job_types: vec![JobKind::VisionAnalysis],
+                max_concurrent_jobs: Some(1),
+                available_vram_mb: None,
+            })
+            .await
+            .unwrap();
+
+        let app = build_router(test_state(jobs.clone(), workers.clone()));
+        let claim = app
+            .clone()
+            .oneshot(
+                Request::post("/v1/workers/vision-worker/claim")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(claim.status(), StatusCode::OK);
+
+        let fail = app
+            .clone()
+            .oneshot(
+                Request::post("/v1/workers/vision-worker/jobs/job-1/fail")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({"attempt": 1, "error": "bad input", "retryable": false}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(fail.status(), StatusCode::OK);
+        assert_eq!(
+            workers.get("vision-worker").await.unwrap().in_flight_jobs,
+            0
+        );
+
+        let next_claim = app
+            .clone()
+            .oneshot(
+                Request::post("/v1/workers/vision-worker/claim")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(next_claim.status(), StatusCode::OK);
+        assert_eq!(
+            workers.get("vision-worker").await.unwrap().in_flight_jobs,
+            1
+        );
+
+        let duplicate_fail = app
+            .clone()
+            .oneshot(
+                Request::post("/v1/workers/vision-worker/jobs/job-1/fail")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({"attempt": 1, "error": "bad input", "retryable": false}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(duplicate_fail.status(), StatusCode::OK);
+        assert_eq!(
+            workers.get("vision-worker").await.unwrap().in_flight_jobs,
+            1
+        );
+
+        let changed_fail = app
+            .oneshot(
+                Request::post("/v1/workers/vision-worker/jobs/job-1/fail")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({"attempt": 1, "error": "different", "retryable": false}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(changed_fail.status(), StatusCode::CONFLICT);
+
+        let failed = jobs.get("job-1").await.unwrap();
+        assert_eq!(failed.status, crate::jobs::JobStatus::Failed);
+        assert_eq!(
+            failed.error,
+            Some(JobFailure {
+                message: "bad input".into(),
+                retryable: false,
+            })
         );
     }
 

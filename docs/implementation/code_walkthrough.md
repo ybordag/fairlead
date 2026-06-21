@@ -1426,24 +1426,34 @@ attempts are exhausted, the job becomes `failed` with `retryable: false`.
 2. Fairlead sweeps expired leases before completion, so late completion cannot
    resurrect an expired attempt.
 3. `JobRegistry::complete_lease()` checks that the job exists, is still
-   `running`, and is leased to that worker.
+   `running`, and is leased to that worker. If the request includes `attempt`,
+   it must match the lease attempt number.
 4. If those checks pass, the job becomes `complete`, the result payload is
-   stored, error state is cleared, lease metadata is removed, and the worker's
-   in-flight slot is released.
-5. Missing jobs return `404`; stale workers, wrong workers, expired leases, and
-   non-running jobs return `409`.
+   stored, error state is cleared, terminal attempt metadata is recorded, lease
+   metadata is removed, and the worker's in-flight slot is released.
+5. If the same worker repeats the same terminal completion with the same
+   `attempt` and result payload, Fairlead returns the existing terminal job
+   without releasing capacity or dispatching another callback.
+6. Missing jobs return `404`; stale workers, wrong workers, wrong attempts,
+   expired leases, contradictory terminal reports, and non-running jobs return
+   `409`.
 
 `POST /v1/workers/{worker_id}/jobs/{job_id}/fail` reports an attempt failure:
 
 1. Fairlead validates the worker and rejects empty error messages.
 2. Fairlead sweeps expired leases before applying the failure.
 3. `JobRegistry::fail_lease()` checks that the job is running and leased to that
-   worker.
+   worker. If the request includes `attempt`, it must match the lease attempt
+   number.
 4. The failure message and retryable flag are stored on the job.
 5. Retryable failures return the job to its priority queue when attempts remain.
 6. Non-retryable failures, or retryable failures after max attempts, mark the
-   job `failed`.
+   job `failed` and record terminal attempt metadata.
 7. Both requeue and terminal-failure paths release the worker's in-flight slot.
+8. Exact duplicate terminal failures with the same worker, `attempt`, error, and
+   retryable flag return the existing failed job without releasing capacity or
+   dispatching another callback. Contradictory terminal failure reports return
+   `409`.
 
 The proxy logs structured fields for the same decision: request ID, workload,
 origin node, affinity key, selected backend, retry count, fallback reason,

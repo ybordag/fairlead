@@ -260,8 +260,8 @@ request is rejected.
 
 With `JOB_STORE=sqlite`, Fairlead persists submitted jobs, queue order, submit
 idempotency keys, claim and lease state, attempts, cancellation, completion,
-failure, payloads, callback metadata, callback delivery state, and result/error
-state. On startup,
+failure, terminal worker-attempt metadata, payloads, callback metadata,
+callback delivery state, and result/error state. On startup,
 already-expired running leases are requeued when attempts remain and failed when
 attempts are exhausted.
 
@@ -275,6 +275,12 @@ their submit idempotency keys are released, when `JOB_STORE=sqlite` is enabled.
 Cancelling a job that already completed or failed still returns a conflict,
 because that work was not cancelled by the caller's earlier request.
 
+Worker complete/fail requests can include the lease `attempt` returned by the
+claim response. If a worker retries the same terminal complete/fail report with
+the same worker ID, attempt, and result/error payload, Fairlead returns the
+existing terminal job without releasing capacity or dispatching callbacks again.
+Contradictory terminal reports still return a conflict.
+
 ```bash
 JOB_RETENTION_SECS=86400 \
 JOB_PRUNE_LIMIT=1000 \
@@ -284,9 +290,10 @@ cargo run
 Terminal async jobs with `callback_url` are delivered asynchronously. Callback
 delivery is at-least-once when SQLite persistence is enabled: pending callback
 state survives ordinary Fairlead restarts and the recovery loop retries delivery
-until a 2xx response is recorded. Callback handlers should be idempotent by job
-ID because a crash after the receiver handles a callback but before Fairlead
-records success can produce a duplicate callback after restart.
+until a 2xx response is recorded. In-process callback dispatch is deduplicated
+by job ID and delivered callbacks are skipped. Callback handlers should still be
+idempotent by job ID because a crash after the receiver handles a callback but
+before Fairlead records success can produce a duplicate callback after restart.
 
 Callback delivery is bounded per delivery sweep by:
 

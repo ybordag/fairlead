@@ -93,6 +93,7 @@ pub struct JobRecord {
     pub attempts: u32,
     pub max_attempts: u32,
     pub lease: Option<JobLease>,
+    pub terminal_attempt: Option<JobTerminalAttempt>,
     pub created_at_unix_ms: u128,
     pub updated_at_unix_ms: u128,
 }
@@ -137,6 +138,12 @@ pub struct JobLease {
     pub expires_at_unix_ms: u128,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct JobTerminalAttempt {
+    pub worker_id: String,
+    pub attempt: u32,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct JobResponse {
     pub job: JobRecord,
@@ -146,6 +153,8 @@ pub struct JobResponse {
 pub struct CompleteJobRequest {
     #[serde(default)]
     pub result: Value,
+    #[serde(default)]
+    pub attempt: Option<u32>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -153,6 +162,8 @@ pub struct FailJobRequest {
     pub error: String,
     #[serde(default = "default_retryable_failure")]
     pub retryable: bool,
+    #[serde(default)]
+    pub attempt: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -362,6 +373,7 @@ impl JobRegistry {
             attempts: 0,
             max_attempts: 3,
             lease: None,
+            terminal_attempt: None,
             created_at_unix_ms: now,
             updated_at_unix_ms: now,
         };
@@ -642,6 +654,7 @@ impl JobRegistry {
         job.status = JobStatus::Running;
         job.attempts += 1;
         job.result = None;
+        job.terminal_attempt = None;
         job.lease = Some(JobLease {
             worker_id: worker_id.to_string(),
             attempt: job.attempts,
@@ -708,6 +721,7 @@ impl JobRegistry {
         &self,
         id: &str,
         worker_id: &str,
+        attempt: Option<u32>,
         result: Value,
     ) -> FinishJobResult {
         let mut guard = self.inner.write().await;
@@ -716,6 +730,12 @@ impl JobRegistry {
         };
 
         if job.status != JobStatus::Running {
+            if job.status == JobStatus::Complete
+                && terminal_attempt_matches(job, worker_id, attempt)
+                && job.result.as_ref() == Some(&result)
+            {
+                return FinishJobResult::IdempotentCompleted(job.clone());
+            }
             return FinishJobResult::NotRunning(job.clone());
         }
 
@@ -726,6 +746,9 @@ impl JobRegistry {
         if lease.worker_id != worker_id {
             return FinishJobResult::LeaseNotHeld(job.clone());
         }
+        if attempt.is_some_and(|reported| reported != lease.attempt) {
+            return FinishJobResult::LeaseNotHeld(job.clone());
+        }
 
         let now = unix_ms();
         if lease.expires_at_unix_ms <= now {
@@ -733,10 +756,15 @@ impl JobRegistry {
         }
 
         let job = {
+            let attempt = job.lease.as_ref().expect("lease checked above").attempt;
             job.status = JobStatus::Complete;
             job.result = Some(result);
             job.error = None;
             job.lease = None;
+            job.terminal_attempt = Some(JobTerminalAttempt {
+                worker_id: worker_id.to_string(),
+                attempt,
+            });
             job.updated_at_unix_ms = now;
             prepare_callback(job);
             job.clone()
@@ -751,6 +779,7 @@ impl JobRegistry {
         &self,
         id: &str,
         worker_id: &str,
+        attempt: Option<u32>,
         failure: JobFailure,
     ) -> FinishJobResult {
         let mut guard = self.inner.write().await;
@@ -759,6 +788,12 @@ impl JobRegistry {
         };
 
         if job.status != JobStatus::Running {
+            if job.status == JobStatus::Failed
+                && terminal_attempt_matches(job, worker_id, attempt)
+                && job.error.as_ref() == Some(&failure)
+            {
+                return FinishJobResult::IdempotentFailed(job.clone());
+            }
             return FinishJobResult::NotRunning(job.clone());
         }
 
@@ -769,12 +804,16 @@ impl JobRegistry {
         if lease.worker_id != worker_id {
             return FinishJobResult::LeaseNotHeld(job.clone());
         }
+        if attempt.is_some_and(|reported| reported != lease.attempt) {
+            return FinishJobResult::LeaseNotHeld(job.clone());
+        }
 
         let now = unix_ms();
         if lease.expires_at_unix_ms <= now {
             return FinishJobResult::Expired(job.clone());
         }
 
+        let attempt = job.lease.as_ref().expect("lease checked above").attempt;
         job.result = None;
         job.error = Some(failure.clone());
         job.lease = None;
@@ -782,6 +821,7 @@ impl JobRegistry {
 
         if failure.retryable && job.attempts < job.max_attempts {
             job.status = JobStatus::Queued;
+            job.terminal_attempt = None;
             let priority = job.priority;
             let id = job.id.clone();
             let job = job.clone();
@@ -792,6 +832,10 @@ impl JobRegistry {
             FinishJobResult::Requeued(job)
         } else {
             job.status = JobStatus::Failed;
+            job.terminal_attempt = Some(JobTerminalAttempt {
+                worker_id: worker_id.to_string(),
+                attempt,
+            });
             prepare_callback(job);
             let job = job.clone();
             if self.persist_locked(&guard).is_err() {
@@ -815,6 +859,7 @@ impl JobRegistry {
         job.status = JobStatus::Cancelled;
         let now = unix_ms();
         job.updated_at_unix_ms = now;
+        job.terminal_attempt = None;
         prepare_callback(job);
         let job = job.clone();
         guard.queues.remove(priority, id);
@@ -981,8 +1026,10 @@ pub enum RenewJobLeaseResult {
 
 pub enum FinishJobResult {
     Completed(JobRecord),
+    IdempotentCompleted(JobRecord),
     Requeued(JobRecord),
     Failed(JobRecord),
+    IdempotentFailed(JobRecord),
     NotRunning(JobRecord),
     LeaseNotHeld(JobRecord),
     Expired(JobRecord),
@@ -1053,6 +1100,15 @@ fn normalize_callback_url(callback_url: Option<String>) -> Result<Option<String>
         return Err("callback_url cannot be empty".into());
     }
     Ok(Some(trimmed.to_string()))
+}
+
+fn terminal_attempt_matches(job: &JobRecord, worker_id: &str, attempt: Option<u32>) -> bool {
+    let Some(reported_attempt) = attempt else {
+        return false;
+    };
+    job.terminal_attempt.as_ref().is_some_and(|terminal| {
+        terminal.worker_id == worker_id && terminal.attempt == reported_attempt
+    })
 }
 
 fn normalize_idempotency_key(idempotency_key: Option<String>) -> Result<Option<String>, String> {
@@ -1406,7 +1462,7 @@ mod tests {
         jobs.claim_next_for_worker("worker-b", &[complete.kind], 30_000)
             .await
             .unwrap();
-        jobs.complete_lease(&complete.id, "worker-b", json!({"ok": true}))
+        jobs.complete_lease(&complete.id, "worker-b", None, json!({"ok": true}))
             .await;
 
         let restored =
@@ -1426,6 +1482,13 @@ mod tests {
         assert_eq!(complete.status, JobStatus::Complete);
         assert_eq!(complete.result, Some(json!({"ok": true})));
         assert!(complete.lease.is_none());
+        assert_eq!(
+            complete.terminal_attempt,
+            Some(JobTerminalAttempt {
+                worker_id: "worker-b".into(),
+                attempt: 1,
+            })
+        );
     }
 
     #[tokio::test]
@@ -1622,6 +1685,7 @@ mod tests {
         jobs.fail_lease(
             &retryable.id,
             "worker-a",
+            None,
             JobFailure {
                 message: "transient worker error".into(),
                 retryable: true,
@@ -1634,6 +1698,7 @@ mod tests {
         jobs.fail_lease(
             &terminal.id,
             "worker-b",
+            None,
             JobFailure {
                 message: "bad input".into(),
                 retryable: false,
@@ -2397,7 +2462,7 @@ mod tests {
             .unwrap();
 
         let result = jobs
-            .complete_lease("job-1", "worker-a", json!({"ok": true}))
+            .complete_lease("job-1", "worker-a", None, json!({"ok": true}))
             .await;
         let FinishJobResult::Completed(job) = result else {
             panic!("expected completion");
@@ -2426,8 +2491,14 @@ mod tests {
             .await
             .unwrap();
 
-        let wrong_worker = jobs.complete_lease("job-1", "worker-b", Value::Null).await;
+        let wrong_worker = jobs
+            .complete_lease("job-1", "worker-b", None, Value::Null)
+            .await;
         assert!(matches!(wrong_worker, FinishJobResult::LeaseNotHeld(_)));
+        let wrong_attempt = jobs
+            .complete_lease("job-1", "worker-a", Some(2), Value::Null)
+            .await;
+        assert!(matches!(wrong_attempt, FinishJobResult::LeaseNotHeld(_)));
 
         jobs.submit(SubmitJobRequest {
             kind: JobKind::Cluster,
@@ -2442,7 +2513,9 @@ mod tests {
             .await
             .unwrap();
 
-        let expired = jobs.complete_lease("job-2", "worker-a", Value::Null).await;
+        let expired = jobs
+            .complete_lease("job-2", "worker-a", None, Value::Null)
+            .await;
         assert!(matches!(expired, FinishJobResult::Expired(_)));
     }
 
@@ -2466,6 +2539,7 @@ mod tests {
             .fail_lease(
                 "job-1",
                 "worker-a",
+                None,
                 JobFailure {
                     message: "transient oom".into(),
                     retryable: true,
@@ -2516,6 +2590,7 @@ mod tests {
             .fail_lease(
                 "job-1",
                 "worker-a",
+                None,
                 JobFailure {
                     message: "bad input".into(),
                     retryable: false,
@@ -2545,6 +2620,7 @@ mod tests {
                 .fail_lease(
                     "job-2",
                     "worker-a",
+                    None,
                     JobFailure {
                         message: "temporary failure".into(),
                         retryable: true,
@@ -2560,6 +2636,7 @@ mod tests {
             .fail_lease(
                 "job-2",
                 "worker-a",
+                None,
                 JobFailure {
                     message: "temporary failure".into(),
                     retryable: true,
@@ -2645,7 +2722,7 @@ mod tests {
         jobs.claim_next_for_worker("worker-a", &[JobKind::VisionAnalysis], 30_000)
             .await
             .unwrap();
-        jobs.complete_lease("job-1", "worker-a", json!({"ok": true}))
+        jobs.complete_lease("job-1", "worker-a", None, json!({"ok": true}))
             .await;
         jobs.cancel("job-2").await;
 
@@ -2810,7 +2887,7 @@ mod tests {
         jobs.claim_next_for_worker("worker-a", &[JobKind::VisionAnalysis], 30_000)
             .await
             .unwrap();
-        jobs.complete_lease("job-1", "worker-a", json!({"ok": true}))
+        jobs.complete_lease("job-1", "worker-a", None, json!({"ok": true}))
             .await;
         jobs.claim_next_for_worker("worker-a", &[JobKind::Cluster], 30_000)
             .await
@@ -2818,6 +2895,7 @@ mod tests {
         jobs.fail_lease(
             "job-2",
             "worker-a",
+            None,
             JobFailure {
                 message: "bad input".into(),
                 retryable: false,
@@ -2886,7 +2964,7 @@ mod tests {
         jobs.claim_next_for_worker("worker-a", &[JobKind::VisionAnalysis], 30_000)
             .await
             .unwrap();
-        jobs.complete_lease("job-1", "worker-a", json!({"ok": true}))
+        jobs.complete_lease("job-1", "worker-a", None, json!({"ok": true}))
             .await;
         jobs.claim_next_for_worker("worker-a", &[JobKind::Cluster], 30_000)
             .await
@@ -2894,6 +2972,7 @@ mod tests {
         jobs.fail_lease(
             "job-2",
             "worker-a",
+            None,
             JobFailure {
                 message: "bad input".into(),
                 retryable: false,
@@ -2904,17 +2983,17 @@ mod tests {
         jobs.claim_next_for_worker("worker-a", &[JobKind::IndexBuild], 30_000)
             .await
             .unwrap();
-        jobs.complete_lease("job-4", "worker-a", json!({"ok": true}))
+        jobs.complete_lease("job-4", "worker-a", None, json!({"ok": true}))
             .await;
         jobs.claim_next_for_worker("worker-a", &[JobKind::VisionAnalysis], 30_000)
             .await
             .unwrap();
-        jobs.complete_lease("job-5", "worker-a", json!({"ok": true}))
+        jobs.complete_lease("job-5", "worker-a", None, json!({"ok": true}))
             .await;
         jobs.claim_next_for_worker("worker-a", &[JobKind::EmbedBatch], 30_000)
             .await
             .unwrap();
-        jobs.complete_lease("job-7", "worker-a", json!({"ok": true}))
+        jobs.complete_lease("job-7", "worker-a", None, json!({"ok": true}))
             .await;
 
         age_job_updated_at(&jobs, "job-1", 120_000).await;
@@ -2974,7 +3053,7 @@ mod tests {
             jobs.claim_next_for_worker("worker-a", &[JobKind::VisionAnalysis], 30_000)
                 .await
                 .unwrap();
-            jobs.complete_lease(id, "worker-a", json!({"ok": true}))
+            jobs.complete_lease(id, "worker-a", None, json!({"ok": true}))
                 .await;
         }
 
@@ -3004,7 +3083,7 @@ mod tests {
         jobs.claim_next_for_worker("worker-a", &[JobKind::VisionAnalysis], 30_000)
             .await
             .unwrap();
-        jobs.complete_lease("job-1", "worker-a", json!({"ok": true}))
+        jobs.complete_lease("job-1", "worker-a", None, json!({"ok": true}))
             .await;
 
         let pending = jobs.prune_terminal_jobs().await;
@@ -3038,7 +3117,7 @@ mod tests {
         jobs.claim_next_for_worker("worker-a", &[JobKind::VisionAnalysis], 30_000)
             .await
             .unwrap();
-        jobs.complete_lease("job-1", "worker-a", json!({"ok": true}))
+        jobs.complete_lease("job-1", "worker-a", None, json!({"ok": true}))
             .await;
 
         let report = jobs.prune_terminal_jobs().await;
@@ -3083,7 +3162,7 @@ mod tests {
         jobs.claim_next_for_worker("worker-a", &[JobKind::VisionAnalysis], 30_000)
             .await
             .unwrap();
-        jobs.complete_lease("job-1", "worker-a", json!({"ok": true}))
+        jobs.complete_lease("job-1", "worker-a", None, json!({"ok": true}))
             .await;
         jobs.claim_next_for_worker("worker-b", &[JobKind::EmbedBatch], 30_000)
             .await
@@ -3128,7 +3207,7 @@ mod tests {
         jobs.claim_next_for_worker("worker-a", &[JobKind::Cluster], 30_000)
             .await
             .unwrap();
-        jobs.complete_lease("job-1", "worker-a", json!({"ok": true}))
+        jobs.complete_lease("job-1", "worker-a", None, json!({"ok": true}))
             .await;
 
         let report = jobs.prune_terminal_jobs().await;
@@ -3163,7 +3242,7 @@ mod tests {
         jobs.claim_next_for_worker("worker-a", &[JobKind::VisionAnalysis], 30_000)
             .await
             .unwrap();
-        jobs.complete_lease("job-1", "worker-a", json!({"ok": true}))
+        jobs.complete_lease("job-1", "worker-a", None, json!({"ok": true}))
             .await;
         jobs.claim_next_for_worker("worker-a", &[JobKind::Cluster], 30_000)
             .await
@@ -3171,6 +3250,7 @@ mod tests {
         jobs.fail_lease(
             "job-2",
             "worker-a",
+            None,
             JobFailure {
                 message: "bad input".into(),
                 retryable: false,
@@ -3266,7 +3346,7 @@ mod tests {
         jobs.claim_next_for_worker("worker-a", &[JobKind::Cluster], 30_000)
             .await
             .unwrap();
-        jobs.complete_lease("job-1", "worker-a", json!({"ok": true}))
+        jobs.complete_lease("job-1", "worker-a", None, json!({"ok": true}))
             .await;
         let app = build_router(test_state_with_jobs(jobs));
 

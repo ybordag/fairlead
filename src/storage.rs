@@ -9,7 +9,7 @@ use std::{
 use crate::config::JobStoreConfig;
 use crate::jobs::{JobQueues, JobRecord, JobRegistryInner, JobStatus};
 
-const JOB_STORE_SCHEMA_VERSION: i32 = 3;
+const JOB_STORE_SCHEMA_VERSION: i32 = 4;
 
 #[cfg(test)]
 pub fn bootstrap_job_store(config: &JobStoreConfig) -> Result<()> {
@@ -49,7 +49,8 @@ impl SqliteJobStore {
             r#"
             SELECT id, type, priority, status, payload_json, callback_url, result_json,
                    error_json, attempts, max_attempts, lease_json, created_at_unix_ms,
-                   updated_at_unix_ms, queue_position, callback_state_json, idempotency_key
+                   updated_at_unix_ms, queue_position, callback_state_json, idempotency_key,
+                   terminal_attempt_json
             FROM jobs
             ORDER BY order_position ASC, created_at_unix_ms ASC, id ASC
             "#,
@@ -74,6 +75,7 @@ impl SqliteJobStore {
             let queue_position: Option<i64> = row.get(13)?;
             let callback_state_json: Option<String> = row.get(14)?;
             let idempotency_key: Option<String> = row.get(15)?;
+            let terminal_attempt_json: Option<String> = row.get(16)?;
 
             let job = JobRecord {
                 id,
@@ -97,6 +99,9 @@ impl SqliteJobStore {
                 attempts: row.get::<_, i64>(8)? as u32,
                 max_attempts: row.get::<_, i64>(9)? as u32,
                 lease: lease_json
+                    .map(|raw| serde_json::from_str(&raw).map_err(to_sql_error))
+                    .transpose()?,
+                terminal_attempt: terminal_attempt_json
                     .map(|raw| serde_json::from_str(&raw).map_err(to_sql_error))
                     .transpose()?,
                 created_at_unix_ms: created_at_unix_ms as u128,
@@ -168,9 +173,9 @@ impl SqliteJobStore {
                     id, type, priority, status, payload_json, callback_url, result_json,
                     error_json, attempts, max_attempts, lease_json, created_at_unix_ms,
                     updated_at_unix_ms, queue_position, order_position, callback_state_json,
-                    idempotency_key
+                    idempotency_key, terminal_attempt_json
                 )
-                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)
+                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)
                 "#,
                 params![
                     job.id,
@@ -190,6 +195,7 @@ impl SqliteJobStore {
                     order_position as i64,
                     optional_json(&job.callback)?,
                     job.idempotency_key,
+                    optional_json(&job.terminal_attempt)?,
                 ],
             )?;
         }
@@ -221,7 +227,8 @@ fn bootstrap_schema(connection: &Connection) -> Result<()> {
             queue_position INTEGER,
             order_position INTEGER NOT NULL DEFAULT 0,
             callback_state_json TEXT,
-            idempotency_key TEXT
+            idempotency_key TEXT,
+            terminal_attempt_json TEXT
         );
 
         CREATE INDEX IF NOT EXISTS idx_jobs_queue
@@ -248,6 +255,12 @@ fn bootstrap_schema(connection: &Connection) -> Result<()> {
         "jobs",
         "idempotency_key",
         "ALTER TABLE jobs ADD COLUMN idempotency_key TEXT",
+    )?;
+    ensure_column(
+        connection,
+        "jobs",
+        "terminal_attempt_json",
+        "ALTER TABLE jobs ADD COLUMN terminal_attempt_json TEXT",
     )?;
     connection.pragma_update(None, "user_version", JOB_STORE_SCHEMA_VERSION)?;
     Ok(())
@@ -408,6 +421,7 @@ mod tests {
         assert!(columns.contains(&"order_position".into()));
         assert!(columns.contains(&"callback_state_json".into()));
         assert!(columns.contains(&"idempotency_key".into()));
+        assert!(columns.contains(&"terminal_attempt_json".into()));
     }
 
     #[test]

@@ -390,11 +390,17 @@ Current async scheduler behavior:
 - `POST /v1/workers/{worker_id}/jobs/{job_id}/fail` validates the worker and
   lease, records an error, then requeues retryable failures when attempts remain
   or marks the job `failed`; both paths release worker capacity
+- worker complete/fail requests may include the lease `attempt`; exact duplicate
+  terminal reports with the same worker, attempt, and payload return the
+  existing terminal job without releasing worker capacity or dispatching another
+  callback, while contradictory terminal reports still return conflict
 - no push dispatch exists yet; workers must pull by calling the claim endpoint
 - terminal jobs with `callback_url` dispatch asynchronous callbacks with bounded
   retry and timeout policy
-- SQLite-backed callback state gives at-least-once delivery across ordinary
-  Fairlead restarts by retrying pending callbacks after startup
+- callback dispatch deduplicates in-flight delivery by job ID and skips
+  delivered callbacks; SQLite-backed callback state gives at-least-once
+  delivery across ordinary Fairlead restarts by retrying pending callbacks after
+  startup
 - `POST /v1/jobs/prune` removes terminal jobs older than the configured
   retention age, up to the configured per-call limit
 - pruning skips terminal jobs with pending callbacks so callback delivery can

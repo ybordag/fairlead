@@ -20,6 +20,15 @@ callback retries without changing workload protocols.
   `cancelled`.
 - Kept cancellation of `complete` or `failed` jobs as `409 Conflict`, because
   those jobs were not cancelled by the caller's earlier cancellation request.
+- Added optional worker-reported `attempt` to complete/fail requests.
+- Stored terminal attempt metadata for jobs completed or terminally failed by a
+  worker.
+- Made exact duplicate terminal complete/fail reports idempotent when worker ID,
+  attempt number, and result/error payload match.
+- Kept contradictory terminal result reports as `409 Conflict`.
+- Reviewed callback idempotency. Fairlead already deduplicates in-flight
+  callback dispatches by job ID and skips delivered callbacks, while preserving
+  the documented at-least-once restart contract.
 
 ## Tests Added
 
@@ -32,14 +41,16 @@ callback retries without changing workload protocols.
 - Duplicate cancellation of an already-cancelled job returns `200 OK` with the
   existing job.
 - Cancellation of a completed job still returns `409 Conflict`.
+- Exact duplicate terminal completion returns the existing completed job.
+- Duplicate completion with a different result still returns `409 Conflict`.
+- Exact duplicate terminal failure returns the existing failed job without
+  releasing a later in-flight worker slot.
+- Duplicate failure with a different error still returns `409 Conflict`.
+- Terminal attempt metadata is persisted and recovered through SQLite.
+- Running completion with a mismatched attempt number is rejected.
 
 ## Remaining 8C Scope
 
-- Review whether worker completion/failure retries should return idempotent
-  success for already-terminal jobs when Fairlead can prove the same worker and
-  attempt produced the terminal state.
-- Review callback delivery semantics around duplicate successful callback
-  reports and recovery loops. Current delivery is at least once; receivers must
-  remain idempotent by job ID.
-- Add deferred process-level tests for submit idempotency across real Fairlead
-  restarts and SQLite reuse after pruning.
+- Add process-level restart tests for submit idempotency, cancellation
+  idempotency, terminal result idempotency, and callback at-least-once delivery
+  in the Phase 8E e2e harness.

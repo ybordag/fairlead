@@ -417,6 +417,18 @@ Add an opt-in process-level e2e for async job idempotency:
   delivery or queue metric mutation
 - attempt to cancel completed and failed jobs and verify the process-level API
   still returns conflict
+- complete a leased job with `attempt`, retry the same completion before and
+  after restart, and verify Fairlead returns the existing terminal job without
+  duplicate callback delivery or worker capacity mutation
+- retry terminal completion with the same worker/attempt but a different result
+  payload and verify Fairlead returns conflict
+- terminally fail a leased job with `attempt`, retry the same failure before and
+  after restart, and verify Fairlead returns the existing terminal job without
+  duplicate callback delivery or worker capacity mutation
+- retry terminal failure with the same worker/attempt but a different error or
+  retryable flag and verify Fairlead returns conflict
+- report complete/fail with a mismatched running lease attempt and verify
+  Fairlead rejects the report
 - prune the retained terminal job after it becomes eligible, then reuse the
   same idempotency key and verify Fairlead creates a new job
 - run the same sequence while fake workers are concurrently claiming jobs to

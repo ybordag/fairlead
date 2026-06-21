@@ -865,8 +865,14 @@ workload protocols.
   - [x] Release submit idempotency keys when terminal jobs are pruned.
   - [x] Make repeated cancellation idempotent for already-cancelled jobs while
     preserving conflict responses for completed or failed jobs.
-  - Add stronger idempotency semantics for complete, fail, and callback
-    handling where needed.
+  - [x] Add optional worker-reported `attempt` to complete/fail requests.
+  - [x] Store terminal attempt metadata for completed and terminally failed
+    worker attempts.
+  - [x] Make exact duplicate terminal complete/fail reports idempotent when
+    worker ID, attempt, and result/error payload match.
+  - [x] Preserve conflict responses for contradictory terminal result reports.
+  - [x] Review callback idempotency and keep the at-least-once receiver contract
+    documented.
 - **8D Clove: Background Maintenance Loops**
   - Add background expiry/recovery loops if claim-time sweeps are not enough.
   - Add optional background pruning loop that invokes the 8B terminal-job
