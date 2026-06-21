@@ -236,10 +236,10 @@ request arrives
 
 The first Phase 6B slices implement the HTTP job surface and non-dispatching
 worker registration with in-memory state. Scheduler dispatch, leases,
-persistence, callback delivery, and queue wait-time metrics are still future
-Phase 6B slices. The design belongs in the architecture because it defines
-Fairlead's boundary: Fairlead should be a compute control plane, not a
-general-purpose workflow engine.
+persistence, and callback delivery are still future Phase 6B slices. The
+design belongs in the architecture because it defines Fairlead's boundary:
+Fairlead should be a compute control plane, not a general-purpose workflow
+engine.
 
 ```
 POST /v1/jobs        — submit, get job_id immediately
@@ -257,9 +257,11 @@ Current early Phase 6B behavior:
 - submitted jobs are tracked in in-memory per-priority queues
 - `GET /v1/jobs` lists current in-memory job records
 - `/metrics` exposes `fairlead_job_queue_depth{priority,type}`
+- `/metrics` exposes `fairlead_job_queue_wait_seconds_sum{priority,type}` and
+  `fairlead_job_queue_wait_seconds_max{priority,type}`
 - job state is in memory and is lost on process restart
 - cancellation marks queued jobs `cancelled`
-- cancellation removes queued jobs from queue depth accounting
+- cancellation removes queued jobs from queue depth and wait-time accounting
 - registered workers are listed with stale status
 - `/metrics` exposes `fairlead_workers{type,status}`
 - no worker is selected yet
@@ -290,7 +292,7 @@ job submitted
 - `GET /v1/workers` — current in-memory worker registry
 - `POST /v1/resources/report` — GPU consumers and workers report capacity
 - `GET /v1/resources` — current resource control-plane state
-- `GET /metrics` — Prometheus: queue depth, circuit states, VRAM per node
+- `GET /metrics` — Prometheus: queue depth/wait, circuit states, VRAM per node
 - Persistent job state for running attempts, retries, callbacks, and pruning.
 
 ### Scheduler boundaries
@@ -460,8 +462,8 @@ metrics.
 
 This is not yet a durable priority queue. A full synchronous bucket fails fast
 with `429 Too Many Requests`; Fairlead does not currently wait in a queue for
-capacity. Queue depth, queue wait time, starvation policy, and async job
-scheduling remain future scheduler work.
+capacity. The async job API exposes in-memory queue depth and wait age, but
+starvation policy and async job scheduling remain future scheduler work.
 
 ---
 

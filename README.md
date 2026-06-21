@@ -69,14 +69,13 @@ Implemented generalization work includes:
 - **Workload-aware observability** for selected backend, fallback reason,
   latency, priority admission, and resource state.
 - **Initial async job API** with in-memory submission, listing, polling,
-  cancellation, per-priority queue tracking, queue depth metrics, job type,
-  priority, payload, and callback metadata.
+  cancellation, per-priority queue tracking, queue depth and wait-time metrics,
+  job type, priority, payload, and callback metadata.
 - **Non-dispatching worker registration** with heartbeat, stale detection,
   capability metadata, and worker availability metrics.
 
 Future phases add durable priority queues, worker dispatch, complete pool-aware
-routing, adapter boundaries, queue wait-time metrics, callback delivery, and
-cloud fallback.
+routing, adapter boundaries, callback delivery, and cloud fallback.
 
 See [`docs/planning/roadmap.md`](docs/planning/roadmap.md) for the
 implementation plan and acceptance criteria.
@@ -211,8 +210,8 @@ cargo run
 ```
 
 When a bucket is full, Fairlead returns `429 Too Many Requests` and records
-`outcome="priority_limited"` in request metrics. Full priority queues, wait-time
-metrics, and async job scheduling remain future scheduler work.
+`outcome="priority_limited"` in request metrics. Synchronous requests still do
+not wait in a queue; full async scheduling remains future scheduler work.
 
 Chat completions are proxied to one of the configured backends:
 

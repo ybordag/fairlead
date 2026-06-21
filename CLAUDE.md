@@ -139,7 +139,7 @@ DELETE /v1/jobs/{id}         — cancel a queued job
 The first Phase 6B slices store job records in memory only and track explicit
 per-priority queued job IDs. Worker registration is non-dispatching for now.
 Worker dispatch, deregistration, durable queues, leases, callback delivery,
-queue wait-time metrics, and SQLite-backed persistence are still planned.
+worker utilization metrics, and SQLite-backed persistence are still planned.
 
 Job request body:
 ```json
@@ -323,10 +323,10 @@ WORKER_HEARTBEAT_SECS        — interval before a worker is considered stale
 - [x] First-slice in-memory job API: `POST /v1/jobs`,
   `GET /v1/jobs/{id}`, `DELETE /v1/jobs/{id}`
 - [x] Queue visibility: `GET /v1/jobs`, per-priority queue state, and queue
-  depth metrics
+  depth/wait-time metrics
 - [x] Non-dispatching worker registration, heartbeat, stale status, and
   availability metrics
-- Durable priority queues with queue depth and queue wait-time metrics
+- Durable priority queues
 - Worker deregistration API and graceful shutdown semantics
 - Worker utilization metrics
 - Workers declare: job types they handle, VRAM cost per job, endpoint URL

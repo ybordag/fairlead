@@ -398,9 +398,10 @@ Scope:
 
 - [x] Add resource metrics for reported VRAM/load per node.
 - [x] Add synchronous priority limit and in-flight gauges.
-- [ ] Add queue depth by priority and workload.
-- [ ] Add queue wait time by priority and workload.
-- [ ] Add worker availability and utilization.
+- [x] Add queue depth by priority and workload.
+- [x] Add queue wait time by priority and workload.
+- [x] Add worker availability.
+- [ ] Add worker utilization.
 - [ ] Add job duration and callback success/failure.
 
 Acceptance criteria:
@@ -653,10 +654,10 @@ It should not introduce queues, workers, or job state.
 - [x] Add first-slice in-memory job API: submit, status, and cancellation.
 - [x] Add in-memory priority queue state and job listing.
 - [x] Add queue depth metrics by priority and workload.
+- [x] Add queue wait-time metrics by priority and workload.
 - [x] Add non-dispatching worker registration and heartbeat.
 - [x] Add worker availability metrics.
 - Add durable priority queues.
-- Add queue wait-time metrics by priority and workload.
 - Add worker deregistration and graceful shutdown semantics.
 - Add worker utilization metrics.
 - Add bounded job attempts with timeouts, leases, retry limits, and cancellation.

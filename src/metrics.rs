@@ -231,9 +231,14 @@ async fn render_worker_metrics(state: &AppState) -> String {
 
 async fn render_job_queue_metrics(state: &AppState) -> String {
     let snapshots = state.jobs.queue_snapshots().await;
+    let wait_snapshots = state.jobs.queue_wait_snapshots().await;
     let mut body = String::from(
         "# HELP fairlead_job_queue_depth Queued async jobs by priority and type\n\
-         # TYPE fairlead_job_queue_depth gauge\n",
+         # TYPE fairlead_job_queue_depth gauge\n\
+         # HELP fairlead_job_queue_wait_seconds_sum Total current queued job wait age by priority and type\n\
+         # TYPE fairlead_job_queue_wait_seconds_sum gauge\n\
+         # HELP fairlead_job_queue_wait_seconds_max Oldest current queued job age by priority and type\n\
+         # TYPE fairlead_job_queue_wait_seconds_max gauge\n",
     );
 
     for snapshot in snapshots {
@@ -242,6 +247,19 @@ async fn render_job_queue_metrics(state: &AppState) -> String {
         body.push_str(&format!(
             "fairlead_job_queue_depth{{priority=\"{priority}\",type=\"{kind}\"}} {}\n",
             snapshot.depth,
+        ));
+    }
+
+    for snapshot in wait_snapshots {
+        let priority = prometheus_escape(snapshot.priority);
+        let kind = prometheus_escape(snapshot.kind);
+        body.push_str(&format!(
+            "fairlead_job_queue_wait_seconds_sum{{priority=\"{priority}\",type=\"{kind}\"}} {:.6}\n",
+            snapshot.wait_seconds_sum,
+        ));
+        body.push_str(&format!(
+            "fairlead_job_queue_wait_seconds_max{{priority=\"{priority}\",type=\"{kind}\"}} {:.6}\n",
+            snapshot.wait_seconds_max,
         ));
     }
 

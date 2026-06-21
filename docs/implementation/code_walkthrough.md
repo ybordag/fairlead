@@ -1195,6 +1195,25 @@ fairlead_resource_load{node="spark-a",backend="spark-a-vllm"} 0.250000
 fairlead_resource_report_stale{node="spark-a",backend="spark-a-vllm"} 0
 ```
 
+Async job queue visibility exposes queued job depth and current wait age by
+priority and job type:
+
+```text
+fairlead_job_queue_depth{priority="batch",type="vision_analysis"} 2
+fairlead_job_queue_wait_seconds_sum{priority="batch",type="vision_analysis"} 4.200000
+fairlead_job_queue_wait_seconds_max{priority="batch",type="vision_analysis"} 2.400000
+```
+
+The wait metric only considers jobs still in `queued` state. Cancelled jobs are
+removed from queue depth and wait-time accounting.
+
+Worker registration exposes current non-dispatching worker availability:
+
+```text
+fairlead_workers{type="vision_analysis",status="available"} 1
+fairlead_workers{type="embed_batch",status="stale"} 1
+```
+
 The proxy logs structured fields for the same decision: request ID, workload,
 origin node, affinity key, selected backend, retry count, fallback reason,
 status, and outcome.

@@ -96,6 +96,16 @@ pub struct JobQueueSnapshot {
     pub depth: usize,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct JobQueueWaitSnapshot {
+    pub priority: &'static str,
+    #[serde(rename = "type")]
+    pub kind: &'static str,
+    pub count: usize,
+    pub wait_seconds_sum: f64,
+    pub wait_seconds_max: f64,
+}
+
 #[derive(Clone, Default)]
 pub struct JobRegistry {
     inner: Arc<RwLock<JobRegistryInner>>,
@@ -205,6 +215,46 @@ impl JobRegistry {
                         priority: priority.as_str(),
                         kind: job.kind.as_str(),
                         depth: 1,
+                    });
+                }
+            }
+        }
+
+        snapshots
+            .sort_by_key(|snapshot| (priority_rank(snapshot.priority), kind_rank(snapshot.kind)));
+        snapshots
+    }
+
+    pub async fn queue_wait_snapshots(&self) -> Vec<JobQueueWaitSnapshot> {
+        let now = unix_ms();
+        let guard = self.inner.read().await;
+        let mut snapshots: Vec<JobQueueWaitSnapshot> = Vec::new();
+
+        for (priority, queue) in guard.queues.iter() {
+            for id in queue {
+                let Some(job) = guard.jobs.get(id) else {
+                    continue;
+                };
+                if job.status != JobStatus::Queued {
+                    continue;
+                }
+
+                let wait_seconds = now.saturating_sub(job.created_at_unix_ms) as f64 / 1000.0;
+
+                if let Some(snapshot) = snapshots
+                    .iter_mut()
+                    .find(|s| s.priority == priority.as_str() && s.kind == job.kind.as_str())
+                {
+                    snapshot.count += 1;
+                    snapshot.wait_seconds_sum += wait_seconds;
+                    snapshot.wait_seconds_max = snapshot.wait_seconds_max.max(wait_seconds);
+                } else {
+                    snapshots.push(JobQueueWaitSnapshot {
+                        priority: priority.as_str(),
+                        kind: job.kind.as_str(),
+                        count: 1,
+                        wait_seconds_sum: wait_seconds,
+                        wait_seconds_max: wait_seconds,
                     });
                 }
             }
@@ -562,7 +612,68 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn metrics_reports_queue_depth_for_queued_jobs() {
+    async fn queue_wait_snapshots_measure_queued_job_age_by_priority_and_type() {
+        let jobs = JobRegistry::default();
+
+        jobs.submit(SubmitJobRequest {
+            kind: JobKind::VisionAnalysis,
+            priority: Priority::Batch,
+            payload: Value::Null,
+            callback_url: None,
+        })
+        .await
+        .unwrap();
+        jobs.submit(SubmitJobRequest {
+            kind: JobKind::VisionAnalysis,
+            priority: Priority::Batch,
+            payload: Value::Null,
+            callback_url: None,
+        })
+        .await
+        .unwrap();
+
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+
+        let snapshots = jobs.queue_wait_snapshots().await;
+        assert_eq!(snapshots.len(), 1);
+        assert_eq!(snapshots[0].priority, "batch");
+        assert_eq!(snapshots[0].kind, "vision_analysis");
+        assert_eq!(snapshots[0].count, 2);
+        assert!(snapshots[0].wait_seconds_sum > 0.0);
+        assert!(snapshots[0].wait_seconds_max > 0.0);
+    }
+
+    #[tokio::test]
+    async fn cancelling_job_removes_it_from_queue_wait_snapshots() {
+        let jobs = JobRegistry::default();
+        jobs.submit(SubmitJobRequest {
+            kind: JobKind::IndexBuild,
+            priority: Priority::Background,
+            payload: Value::Null,
+            callback_url: None,
+        })
+        .await
+        .unwrap();
+        jobs.submit(SubmitJobRequest {
+            kind: JobKind::IndexBuild,
+            priority: Priority::Background,
+            payload: Value::Null,
+            callback_url: None,
+        })
+        .await
+        .unwrap();
+
+        jobs.cancel("job-1").await;
+
+        let snapshots = jobs.queue_wait_snapshots().await;
+        assert_eq!(snapshots.len(), 1);
+        assert_eq!(snapshots[0].priority, "background");
+        assert_eq!(snapshots[0].kind, "index_build");
+        assert_eq!(snapshots[0].count, 1);
+    }
+
+    #[tokio::test]
+    async fn metrics_reports_queue_depth_and_wait_time_for_queued_jobs() {
         let app = build_router(test_state());
 
         app.clone()
@@ -610,6 +721,8 @@ mod tests {
             .await
             .unwrap();
 
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+
         let response = app
             .oneshot(Request::get("/metrics").body(Body::empty()).unwrap())
             .await
@@ -618,9 +731,21 @@ mod tests {
         let metrics = response_text(response).await;
         assert!(metrics
             .contains("fairlead_job_queue_depth{priority=\"batch\",type=\"vision_analysis\"} 2"));
+        assert!(metrics.contains(
+            "fairlead_job_queue_wait_seconds_sum{priority=\"batch\",type=\"vision_analysis\"} "
+        ));
+        assert!(metrics.contains(
+            "fairlead_job_queue_wait_seconds_max{priority=\"batch\",type=\"vision_analysis\"} "
+        ));
         assert!(
             !metrics.contains("fairlead_job_queue_depth{priority=\"background\",type=\"cluster\"}")
         );
+        assert!(!metrics.contains(
+            "fairlead_job_queue_wait_seconds_sum{priority=\"background\",type=\"cluster\"}"
+        ));
+        assert!(!metrics.contains(
+            "fairlead_job_queue_wait_seconds_max{priority=\"background\",type=\"cluster\"}"
+        ));
     }
 
     #[tokio::test]
