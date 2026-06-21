@@ -28,7 +28,8 @@ detail.
 ## Implementation And Examples
 
 - [`../demo/README.md`](../demo/README.md) — local GPU-free routing and async job
-  demos. The executable demos remain under the repo-level `demo/` directory.
+  demos, including the shared strict pool policy used by both runners. The
+  executable demos remain under the repo-level `demo/` directory.
 - [`implementation/dgx_spark_deployment.md`](implementation/dgx_spark_deployment.md)
   — manual two-node DGX Spark deployment notes using vLLM and Fairlead.
 - [`implementation/fixture_examples.md`](implementation/fixture_examples.md) —
@@ -36,6 +37,8 @@ detail.
 
 ## Current Work
 
+- [`current_work/phase_7d_navigator.md`](current_work/phase_7d_navigator.md) —
+  active Phase 7D shared pool demo and policy closeout notes.
 - [`current_work/phase_7c_tactician.md`](current_work/phase_7c_tactician.md) —
   completed Phase 7C async worker pool placement notes.
 - [`current_work/phase_7b_trimmer.md`](current_work/phase_7b_trimmer.md) —

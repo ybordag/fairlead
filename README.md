@@ -104,10 +104,15 @@ Implemented generalization work includes:
 - **Pool-aware async worker placement** so worker registration, scheduler
   preview, and worker-pull claims respect workload pool policy, with per-pool
   async placement metrics.
+- **Optional strict pool validation** for production-like setups:
+  `STRICT_WORKER_POOLS=true` bounds worker registration to configured or derived
+  pools, and `STRICT_WORKLOAD_POOLS=true` requires explicit policy for every
+  known workload.
 
-Remaining Phase 7 work adds shared pool demos and the final partial-vs-strict
-policy decision. Future phases add scheduler hardening, adapter boundaries,
-richer resource policy, external scale/overflow, and transport/SDK hardening.
+Phase 7D closes the shared pool model with strict validation flags, shared local
+demos, and DGX/shared deployment notes. Future phases add scheduler hardening,
+adapter boundaries, richer resource policy, external scale/overflow, and
+transport/SDK hardening.
 
 See [`docs/planning/roadmap.md`](docs/planning/roadmap.md) for the
 implementation plan and acceptance criteria.
@@ -205,6 +210,8 @@ Phase 7 adds explicit pool and workload placement policy:
 
 ```bash
 POOLS_JSON='["local-llm", "peer-llm", {"id": "vision"}]' \
+STRICT_WORKLOAD_POOLS=true \
+STRICT_WORKER_POOLS=true \
 WORKLOAD_POOLS_JSON='{
   "chat_completions": ["local-llm", "peer-llm"],
   "embeddings": ["local-llm", "peer-llm"],
@@ -219,10 +226,18 @@ metadata and always includes the backward-compatible `default` pool. When
 all configured pools. Phase 7B applies this policy to synchronous chat and
 embedding backend eligibility and treats each workload's pool list as an ordered
 fallback chain. Phase 7C applies the same vocabulary to async worker
-registration, scheduler preview, and worker-pull claims. If a workload is
-omitted from an explicit partial policy, it remains permissive for now. Phase 7D
-will decide whether explicit workload pool policy should become strict before
-the pool model is considered complete.
+registration, scheduler preview, and worker-pull claims.
+
+Explicit `WORKLOAD_POOLS_JSON` remains a partial override by default: if a
+workload is omitted, that workload is still eligible for all configured pools.
+Set `STRICT_WORKLOAD_POOLS=true` to require explicit pool policy for every known
+workload at startup. Strict workload policy is useful for production-like demos
+and deployments where an omitted workload should fail fast instead of silently
+routing through every pool.
+
+Worker registration is permissive by default: workers may register any non-empty
+pool string. Set `STRICT_WORKER_POOLS=true` to reject worker registration unless
+the worker's pool is present in configured or derived `POOLS_JSON`.
 
 Async job state is in-memory by default. During Phase 6E, SQLite can be enabled
 explicitly for durable job state across ordinary Fairlead restarts:
@@ -331,8 +346,11 @@ recovery, metrics, and structured traces:
 ```
 
 The demo starts two mock OpenAI-compatible backends named `spark-a` and
-`spark-b`, starts Fairlead, then asserts the expected routing behavior. See
-[`demo/README.md`](demo/README.md) for details.
+`spark-b`, starts Fairlead, then asserts the expected routing behavior. The
+routing and async demos both source
+[`demo/shared_pool_policy.sh`](demo/shared_pool_policy.sh) so local demos use
+the same strict pool vocabulary. See [`demo/README.md`](demo/README.md) for
+details.
 
 ## Local Inference: vLLM
 

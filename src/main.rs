@@ -38,6 +38,10 @@ pub struct AppState {
     pub backends: Vec<BackendState>,
     /// Workload-to-pool eligibility policy for placement decisions.
     pub workload_pools: config::WorkloadPoolPolicy,
+    /// Configured pool IDs used to validate worker registration when strict.
+    pub worker_pool_ids: Vec<String>,
+    /// Whether workers may only register with configured pool IDs.
+    pub strict_worker_pools: bool,
     /// Thread-ID → backend-index affinity map.
     pub affinity: SessionAffinity,
     /// In-process routing metrics rendered by `/metrics`.
@@ -71,6 +75,8 @@ async fn main() -> anyhow::Result<()> {
     info!(
         pool_count = cfg.pools.len(),
         workload_policy_count = cfg.workload_pools.len(),
+        strict_workload_pools = cfg.strict_workload_pools,
+        strict_worker_pools = cfg.strict_worker_pools,
         pools = ?pool_ids,
         "loaded pool policy"
     );
@@ -117,6 +123,8 @@ async fn main() -> anyhow::Result<()> {
         client: client.clone(),
         backends,
         workload_pools: cfg.workload_pools.clone(),
+        worker_pool_ids: cfg.pools.iter().map(|pool| pool.id.clone()).collect(),
+        strict_worker_pools: cfg.strict_worker_pools,
         affinity: SessionAffinity::default(),
         metrics: metrics.clone(),
         callback_policy,
@@ -212,6 +220,8 @@ mod tests {
             client: reqwest::Client::new(),
             backends: vec![],
             workload_pools: config::WorkloadPoolPolicy::default(),
+            worker_pool_ids: vec![],
+            strict_worker_pools: false,
             affinity: SessionAffinity::default(),
             metrics: RoutingMetrics::default(),
             callback_policy: callbacks::CallbackPolicy::default(),

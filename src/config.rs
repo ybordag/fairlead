@@ -229,6 +229,12 @@ pub struct Config {
     /// Workload-to-pool eligibility policy. Phase 7A validates this shape; later
     /// Phase 7 slices apply it to synchronous routing and async worker claims.
     pub workload_pools: WorkloadPoolPolicy,
+    /// Require explicit workload pool policies for every known workload when
+    /// `WORKLOAD_POOLS_JSON` is configured. Default: false.
+    pub strict_workload_pools: bool,
+    /// Reject worker registration when the worker's pool is not configured.
+    /// Default: false.
+    pub strict_worker_pools: bool,
     /// Consecutive failures required to open a circuit. Default: 3.
     pub circuit_failure_threshold: u32,
     /// Seconds to wait in Open state before probing again (Half-open). Default: 30.
@@ -269,7 +275,10 @@ impl Config {
     fn from_lookup(get: impl Fn(&str) -> Result<String, VarError>) -> Result<Self> {
         let backends = parse_backends(&get)?;
         let pools = parse_pools(&get, &backends)?;
-        let workload_pools = parse_workload_pools(&get, &pools)?;
+        let strict_workload_pools = get("STRICT_WORKLOAD_POOLS")
+            .map(|v| v.trim().eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+        let workload_pools = parse_workload_pools(&get, &pools, strict_workload_pools)?;
 
         Ok(Config {
             port: get("PORT")
@@ -288,6 +297,12 @@ impl Config {
             pools,
 
             workload_pools,
+
+            strict_workload_pools,
+
+            strict_worker_pools: get("STRICT_WORKER_POOLS")
+                .map(|v| v.trim().eq_ignore_ascii_case("true"))
+                .unwrap_or(false),
 
             circuit_failure_threshold: get("CIRCUIT_FAILURE_THRESHOLD")
                 .unwrap_or_else(|_| "3".to_string())
@@ -462,13 +477,17 @@ fn parse_pools(
 fn parse_workload_pools(
     get: &impl Fn(&str) -> Result<String, VarError>,
     pools: &[PoolConfig],
+    strict: bool,
 ) -> Result<WorkloadPoolPolicy> {
     match get("WORKLOAD_POOLS_JSON") {
         Ok(raw) => {
             let parsed: BTreeMap<String, Vec<String>> = serde_json::from_str(&raw)
                 .map_err(|e| anyhow!("invalid WORKLOAD_POOLS_JSON: {}", e))?;
-            validate_workload_pools(parsed, pools).map(WorkloadPoolPolicy::new)
+            validate_workload_pools(parsed, pools, strict).map(WorkloadPoolPolicy::new)
         }
+        Err(_) if strict => Err(anyhow!(
+            "invalid WORKLOAD_POOLS_JSON: STRICT_WORKLOAD_POOLS=true requires explicit workload pool policy"
+        )),
         Err(_) => Ok(WorkloadPoolPolicy::new(default_workload_pools(pools))),
     }
 }
@@ -559,6 +578,7 @@ fn validate_backend_pool_refs(backends: &[BackendConfig], pools: &[PoolConfig]) 
 fn validate_workload_pools(
     parsed: BTreeMap<String, Vec<String>>,
     pools: &[PoolConfig],
+    strict: bool,
 ) -> Result<BTreeMap<String, Vec<String>>> {
     if parsed.is_empty() {
         return Err(anyhow!(
@@ -613,6 +633,19 @@ fn validate_workload_pools(
         }
 
         normalized.insert(workload, normalized_pools);
+    }
+
+    if strict {
+        let missing = known_workloads
+            .difference(&normalized.keys().map(String::as_str).collect())
+            .copied()
+            .collect::<Vec<_>>();
+        if !missing.is_empty() {
+            return Err(anyhow!(
+                "invalid WORKLOAD_POOLS_JSON: STRICT_WORKLOAD_POOLS=true missing workload policy for {}",
+                missing.join(", ")
+            ));
+        }
     }
 
     Ok(normalized)
@@ -684,6 +717,7 @@ mod tests {
             cfg.workload_pools.keys().cloned().collect::<Vec<_>>(),
             expected_workloads
         );
+        assert!(!cfg.strict_workload_pools);
     }
 
     #[test]
@@ -774,6 +808,89 @@ mod tests {
         assert_eq!(cfg.callback_max_attempts, DEFAULT_CALLBACK_MAX_ATTEMPTS);
         assert_eq!(cfg.callback_timeout_secs, DEFAULT_CALLBACK_TIMEOUT_SECS);
         assert_eq!(cfg.callback_retry_delay_ms, DEFAULT_CALLBACK_RETRY_DELAY_MS);
+        assert!(!cfg.strict_worker_pools);
+    }
+
+    #[test]
+    fn strict_worker_pools_parses_true_case_insensitively() {
+        let cfg = Config::from_lookup(env(&[("STRICT_WORKER_POOLS", "TRUE")])).unwrap();
+        assert!(cfg.strict_worker_pools);
+    }
+
+    #[test]
+    fn strict_workload_pools_parses_true_case_insensitively() {
+        let all_workloads = KNOWN_POOL_WORKLOADS
+            .iter()
+            .map(|workload| format!(r#""{workload}": ["default"]"#))
+            .collect::<Vec<_>>()
+            .join(",");
+        let raw = format!("{{{all_workloads}}}");
+        let cfg = Config::from_lookup(env(&[
+            ("STRICT_WORKLOAD_POOLS", "TRUE"),
+            ("WORKLOAD_POOLS_JSON", &raw),
+        ]))
+        .unwrap();
+
+        assert!(cfg.strict_workload_pools);
+    }
+
+    #[test]
+    fn strict_workload_pools_requires_explicit_policy() {
+        let result = Config::from_lookup(env(&[("STRICT_WORKLOAD_POOLS", "true")]));
+
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("requires explicit workload pool policy"));
+    }
+
+    #[test]
+    fn strict_workload_pools_accepts_complete_policy_with_derived_backend_pools() {
+        let cfg = Config::from_lookup(env(&[
+            (
+                "BACKENDS_JSON",
+                r#"[
+                    {"id":"node-a-vllm","url":"http://node-a:8000/v1","pool":"local-llm"},
+                    {"id":"node-b-vllm","url":"http://node-b:8000/v1","pool":"peer-llm"}
+                ]"#,
+            ),
+            (
+                "WORKLOAD_POOLS_JSON",
+                r#"{
+                    "chat_completions": ["local-llm", "peer-llm"],
+                    "embeddings": ["peer-llm"],
+                    "vision_analysis": ["peer-llm"],
+                    "embed_batch": ["peer-llm"],
+                    "index_build": ["default"],
+                    "cluster": ["default"]
+                }"#,
+            ),
+            ("STRICT_WORKLOAD_POOLS", "true"),
+        ]))
+        .unwrap();
+
+        assert!(cfg.strict_workload_pools);
+        assert_eq!(
+            pool_ids(&cfg),
+            vec![DEFAULT_BACKEND_POOL, "local-llm", "peer-llm"]
+        );
+        assert_eq!(
+            cfg.workload_pools.get("chat_completions").unwrap(),
+            &vec!["local-llm".to_string(), "peer-llm".to_string()]
+        );
+        assert_eq!(
+            cfg.workload_pools.get("embeddings").unwrap(),
+            &vec!["peer-llm".to_string()]
+        );
+    }
+
+    #[test]
+    fn strict_worker_pools_preserves_default_pool_derivation() {
+        let cfg = Config::from_lookup(env(&[("STRICT_WORKER_POOLS", "true")])).unwrap();
+
+        assert!(cfg.strict_worker_pools);
+        assert_eq!(pool_ids(&cfg), vec![DEFAULT_BACKEND_POOL]);
     }
 
     #[test]
@@ -1218,6 +1335,45 @@ mod tests {
             &vec!["vision".to_string(), "local-llm".to_string()]
         );
         assert!(!cfg.workload_pools.contains_key("embeddings"));
+    }
+
+    #[test]
+    fn workload_pools_json_rejects_omitted_workloads_when_strict() {
+        let result = Config::from_lookup(env(&[
+            ("STRICT_WORKLOAD_POOLS", "true"),
+            (
+                "WORKLOAD_POOLS_JSON",
+                r#"{"chat_completions": ["default"]}"#,
+            ),
+        ]));
+
+        assert!(result.is_err());
+        let error = result.unwrap_err().to_string();
+        assert!(error.contains("STRICT_WORKLOAD_POOLS=true missing workload policy"));
+        assert!(error.contains("embeddings"));
+        assert!(error.contains("vision_analysis"));
+    }
+
+    #[test]
+    fn workload_pools_json_accepts_all_known_workloads_when_strict() {
+        let cfg = Config::from_lookup(env(&[
+            (
+                "WORKLOAD_POOLS_JSON",
+                r#"{
+                    "chat_completions": ["default"],
+                    "embeddings": ["default"],
+                    "vision_analysis": ["default"],
+                    "embed_batch": ["default"],
+                    "index_build": ["default"],
+                    "cluster": ["default"]
+                }"#,
+            ),
+            ("STRICT_WORKLOAD_POOLS", "true"),
+        ]))
+        .unwrap();
+
+        assert!(cfg.strict_workload_pools);
+        assert_eq!(cfg.workload_pools.len(), KNOWN_POOL_WORKLOADS.len());
     }
 
     #[test]

@@ -515,14 +515,20 @@ later pools; inside each pool it still uses origin locality, affinity, resource
 rank, circuit state, and configured backend order. If the pool list is omitted,
 Fairlead derives pools from backend metadata and keeps the `default` pool for
 compatibility with simple `BACKENDS` setup. If a workload is omitted from an
-explicit `WORKLOAD_POOLS_JSON`, it remains permissive through Phase 7C. Phase 7D
-will decide whether explicit policy should become strict after the sync and
-async paths share the same pool vocabulary.
+explicit `WORKLOAD_POOLS_JSON`, it remains permissive by default.
+`STRICT_WORKLOAD_POOLS=true` changes startup validation so explicit workload
+policy must include every known workload.
 
 Phase 7C applies the same policy to async worker placement. Worker registration
 accepts pool metadata, scheduler preview only pairs jobs with workers whose pool
 is allowed by the job type, and worker-pull claims only lease eligible queued
 jobs for the claiming worker's pool.
+
+Phase 7D adds optional strict worker pool validation. With the default
+permissive setting, worker registration accepts any non-empty pool string. With
+`STRICT_WORKER_POOLS=true`, the registration handler checks the worker's pool
+against configured or derived `POOLS_JSON` before inserting it into the worker
+registry.
 
 ### 5. Initialize Tracing
 

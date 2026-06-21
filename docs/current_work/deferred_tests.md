@@ -113,6 +113,12 @@ tests for complete pool placement behavior:
   ranking, circuit state, and same-request retry
 - async workers register with pools and only claim jobs whose workload can use
   that worker pool
+- strict worker pool mode accepts configured worker pools and rejects typos
+  before rejected workers appear in `GET /v1/workers`
+- omitted worker pools deserialize to `default`, and strict mode accepts or
+  rejects that default based on whether `default` is configured or derived
+- strict workload pool mode fails process startup when explicit policy is absent
+  or partial, and starts when every known workload has policy
 - per-pool metrics report candidate counts, selected pool/backend or worker,
   no-compatible-pool cases, fallback reasons, and capacity pressure
 - local mock e2e and two-node DGX Spark e2e use the same sanitized pool config
@@ -138,7 +144,9 @@ OpenAI-compatible backends:
 - make the first-pool backend return a retryable 5xx and verify same-request
   retry moves to the next pool only after the first pool is exhausted
 - verify a workload omitted from explicit `WORKLOAD_POOLS_JSON` remains
-  permissive until the Phase 7D strict-policy decision
+  permissive when `STRICT_WORKLOAD_POOLS` is unset or false
+- verify startup fails when `STRICT_WORKLOAD_POOLS=true` and the explicit
+  workload policy omits a known workload
 - verify `/metrics` includes `fairlead_pool_selections_total`,
   `fairlead_pool_candidate_backends_total`, and
   `fairlead_pool_resource_ineligible_backends_total` with expected labels
@@ -183,7 +191,9 @@ workers:
 - verify a worker in an allowed pool can claim the same queued job after a
   disallowed-pool worker receives no work
 - verify a workload omitted from explicit `WORKLOAD_POOLS_JSON` remains
-  permissive until the Phase 7D strict-policy decision
+  permissive when `STRICT_WORKLOAD_POOLS` is unset or false
+- verify startup fails when `STRICT_WORKLOAD_POOLS=true` and the explicit
+  workload policy omits a known async workload
 - verify `/metrics` includes `fairlead_async_pool_selections_total`,
   `fairlead_async_pool_candidate_workers_total`, and
   `fairlead_async_pool_no_compatible_jobs_total` with expected pool, worker,
@@ -214,6 +224,94 @@ Add an opt-in DGX Spark smoke test for async worker pool placement:
 **Why deferred:** This requires real DGX hosts, SSH reachability, process
 lifecycle control, optional SQLite persistence, and fake worker scripts running
 on both nodes. It should stay opt-in and outside the default Rust test suite.
+
+### `phase_7d_strict_worker_pool_registration_process_e2e`
+
+Add an opt-in process-level e2e for strict worker pool validation with local
+fake workers:
+
+- start Fairlead with explicit `POOLS_JSON` and `STRICT_WORKER_POOLS=true`
+- register a worker with a configured pool and verify `200 OK`
+- register a worker with an unknown pool and verify `400 Bad Request`
+- verify the rejected worker is absent from `GET /v1/workers`
+- start with no explicit `POOLS_JSON`, keep `STRICT_WORKER_POOLS=true`, omit
+  `pool` from the worker registration request, and verify the derived `default`
+  pool is accepted
+- start with explicit `POOLS_JSON` that omits `default`, keep
+  `STRICT_WORKER_POOLS=true`, omit `pool`, and verify the defaulted registration
+  is rejected
+- start with `STRICT_WORKER_POOLS` unset or false and verify an ad hoc pool is
+  still accepted
+- verify logs or `/metrics` expose enough context to diagnose strict-mode pool
+  rejection during demos
+
+**Why deferred:** Unit and in-process endpoint tests cover the validation
+boundary. This e2e needs binary lifecycle, environment setup, port allocation,
+HTTP client orchestration, and log capture.
+
+### `phase_7d_strict_workload_pool_startup_process_e2e`
+
+Add an opt-in process-level e2e for strict workload pool validation:
+
+- start Fairlead with `STRICT_WORKLOAD_POOLS=true` and no
+  `WORKLOAD_POOLS_JSON`; verify the process exits before binding and the error
+  names the missing explicit policy
+- start Fairlead with `STRICT_WORKLOAD_POOLS=true` and partial
+  `WORKLOAD_POOLS_JSON`; verify the process exits before binding and the error
+  names the missing workload policies
+- start Fairlead with `STRICT_WORKLOAD_POOLS=false` or unset and the same
+  partial `WORKLOAD_POOLS_JSON`; verify the process starts and omitted
+  workloads remain permissive
+- start Fairlead with `STRICT_WORKLOAD_POOLS=true`, `BACKENDS_JSON` using
+  derived pools, and complete `WORKLOAD_POOLS_JSON`; verify the process starts
+  and logs `strict_workload_pools=true`
+- issue sync and async HTTP calls against that complete strict config to verify
+  Phase 7B and 7C placement behavior is unchanged after startup validation
+- scrape `/metrics` after those calls and verify pool labels still reflect the
+  configured policy
+
+**Why deferred:** The unit tests cover parser behavior and derived-pool
+interaction. This e2e needs binary lifecycle, port allocation, startup failure
+assertions, log capture, fake backends, fake workers, and real HTTP calls.
+
+### `phase_7d_dgx_strict_pool_registration_smoke_test`
+
+Add an opt-in DGX Spark smoke test for strict worker pool validation:
+
+- run Fairlead on the two-node DGX Spark setup with sanitized pool names for
+  the local and peer node
+- register fake workers from both DGX Spark nodes with configured pool names and
+  verify both appear in `GET /v1/workers`
+- attempt a typo pool registration from one node and verify Fairlead rejects it
+  without changing the registered worker list
+- submit an async job after the failed registration and verify only compatible,
+  configured-pool workers can claim it
+- scrape `/metrics` after the run and verify pool labels remain bounded to the
+  configured names plus expected outcome labels
+
+**Why deferred:** This requires the real two-node DGX Spark environment, SSH
+reachability, fake worker lifecycle management on both nodes, and deployment
+log collection.
+
+### `phase_7d_future_cloud_overflow_pool_e2e_plan`
+
+When cloud provider adapters and cloud overflow pools are implemented in a
+future phase, add e2e coverage for mixed local/peer/cloud placement:
+
+- configure ordered workload pools such as `local-gpu`, `peer-gpu`, and
+  `cloud-overflow`
+- verify local routing wins when local resources are healthy
+- exhaust or mark local resources unavailable and verify Fairlead falls back to
+  peer before cloud when policy orders pools that way
+- exhaust local and peer capacity and verify Fairlead admits cloud overflow only
+  for workloads whose policy allows that pool
+- verify strict worker pool validation rejects accidental cloud pool typos
+- verify cloud credentials, provider identifiers, cost labels, and rate-limit
+  metadata are redacted or sanitized in logs and metrics
+
+**Why deferred:** Fairlead does not yet have provider adapters, cloud worker
+registration, cost/rate-limit policy, or a CI-safe cloud test fixture. This
+belongs with the future cloud overflow phase rather than Phase 7D.
 
 ### `phase_6c_worker_claims_and_leases`
 

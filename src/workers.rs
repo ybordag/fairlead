@@ -251,6 +251,21 @@ pub async fn register_worker(
     State(state): State<AppState>,
     Json(request): Json<RegisterWorkerRequest>,
 ) -> Response {
+    if state.strict_worker_pools {
+        let pool = request.pool.trim();
+        if !state
+            .worker_pool_ids
+            .iter()
+            .any(|configured| configured == pool)
+        {
+            return (
+                StatusCode::BAD_REQUEST,
+                format!("worker pool '{pool}' is not configured"),
+            )
+                .into_response();
+        }
+    }
+
     match state.workers.register(request).await {
         Ok(worker) => Json(WorkerResponse { worker }).into_response(),
         Err(message) => (StatusCode::BAD_REQUEST, message).into_response(),
@@ -387,6 +402,8 @@ mod tests {
             client: reqwest::Client::new(),
             backends: vec![],
             workload_pools: crate::config::WorkloadPoolPolicy::default(),
+            worker_pool_ids: vec![],
+            strict_worker_pools: false,
             affinity: SessionAffinity::default(),
             metrics: RoutingMetrics::default(),
             callback_policy: crate::callbacks::CallbackPolicy::default(),
@@ -396,6 +413,14 @@ mod tests {
             priority_limiter: PriorityLimiter::default(),
             jobs: JobRegistry::default(),
             workers,
+        }
+    }
+
+    fn strict_test_state(workers: WorkerRegistry, worker_pool_ids: Vec<&str>) -> AppState {
+        AppState {
+            worker_pool_ids: worker_pool_ids.into_iter().map(str::to_string).collect(),
+            strict_worker_pools: true,
+            ..test_state(workers)
         }
     }
 
@@ -465,6 +490,150 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
         let value = response_json(response).await;
         assert_eq!(value["worker"]["pool"], "vision");
+    }
+
+    #[tokio::test]
+    async fn register_worker_rejects_unknown_pool_when_strict() {
+        let workers = WorkerRegistry::default();
+        let app = build_router(strict_test_state(workers.clone(), vec!["vision"]));
+
+        let response = app
+            .oneshot(
+                Request::post("/v1/workers/register")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({
+                            "id": "worker-a",
+                            "endpoint_url": "http://worker-a:9000",
+                            "pool": "peer",
+                            "job_types": ["vision_analysis"]
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body = String::from_utf8(body.to_vec()).unwrap();
+        assert!(body.contains("worker pool 'peer' is not configured"));
+        assert!(workers.list().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn register_worker_accepts_configured_pool_when_strict() {
+        let app = build_router(strict_test_state(WorkerRegistry::default(), vec!["vision"]));
+
+        let response = app
+            .oneshot(
+                Request::post("/v1/workers/register")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({
+                            "id": "worker-a",
+                            "endpoint_url": "http://worker-a:9000",
+                            "pool": " vision ",
+                            "job_types": ["vision_analysis"]
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let value = response_json(response).await;
+        assert_eq!(value["worker"]["pool"], "vision");
+    }
+
+    #[tokio::test]
+    async fn register_worker_accepts_omitted_default_pool_when_strict_and_default_configured() {
+        let app = build_router(strict_test_state(
+            WorkerRegistry::default(),
+            vec!["default"],
+        ));
+
+        let response = app
+            .oneshot(
+                Request::post("/v1/workers/register")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({
+                            "id": "worker-a",
+                            "endpoint_url": "http://worker-a:9000",
+                            "job_types": ["vision_analysis"]
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let value = response_json(response).await;
+        assert_eq!(value["worker"]["pool"], "default");
+    }
+
+    #[tokio::test]
+    async fn register_worker_rejects_omitted_default_pool_when_strict_and_default_not_configured() {
+        let app = build_router(strict_test_state(WorkerRegistry::default(), vec!["vision"]));
+
+        let response = app
+            .oneshot(
+                Request::post("/v1/workers/register")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({
+                            "id": "worker-a",
+                            "endpoint_url": "http://worker-a:9000",
+                            "job_types": ["vision_analysis"]
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body = String::from_utf8(body.to_vec()).unwrap();
+        assert!(body.contains("worker pool 'default' is not configured"));
+    }
+
+    #[tokio::test]
+    async fn register_worker_remains_permissive_by_default() {
+        let app = build_router(test_state(WorkerRegistry::default()));
+
+        let response = app
+            .oneshot(
+                Request::post("/v1/workers/register")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({
+                            "id": "worker-a",
+                            "endpoint_url": "http://worker-a:9000",
+                            "pool": "ad-hoc",
+                            "job_types": ["vision_analysis"]
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let value = response_json(response).await;
+        assert_eq!(value["worker"]["pool"], "ad-hoc");
     }
 
     #[tokio::test]
