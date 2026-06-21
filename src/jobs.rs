@@ -1326,6 +1326,62 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn submit_job_rejects_overlong_idempotency_key() {
+        let jobs = JobRegistry::default();
+        let result = jobs
+            .submit(SubmitJobRequest {
+                kind: JobKind::VisionAnalysis,
+                priority: Priority::Batch,
+                payload: Value::Null,
+                callback_url: None,
+                idempotency_key: Some("x".repeat(257)),
+            })
+            .await;
+
+        assert_eq!(
+            result.unwrap_err(),
+            "idempotency_key cannot exceed 256 bytes"
+        );
+        assert!(jobs.list().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn submit_job_reuses_retained_terminal_job_for_idempotency_key() {
+        let jobs = JobRegistry::default();
+        let first = jobs
+            .submit(SubmitJobRequest {
+                kind: JobKind::VisionAnalysis,
+                priority: Priority::Batch,
+                payload: json!({"image": "rose.jpg"}),
+                callback_url: None,
+                idempotency_key: Some("rose-image".into()),
+            })
+            .await
+            .unwrap();
+        jobs.claim_next_for_worker("worker-a", &[JobKind::VisionAnalysis], 30_000)
+            .await
+            .unwrap();
+        jobs.complete_lease(&first.id, "worker-a", None, json!({"ok": true}))
+            .await;
+
+        let duplicate = jobs
+            .submit(SubmitJobRequest {
+                kind: JobKind::VisionAnalysis,
+                priority: Priority::Batch,
+                payload: json!({"image": "rose.jpg"}),
+                callback_url: None,
+                idempotency_key: Some("rose-image".into()),
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(duplicate.id, first.id);
+        assert_eq!(duplicate.status, JobStatus::Complete);
+        assert_eq!(duplicate.result, Some(json!({"ok": true})));
+        assert_eq!(jobs.list().await.len(), 1);
+    }
+
+    #[tokio::test]
     async fn sqlite_registry_recovers_queued_jobs_and_next_id() {
         let path = unique_db_path("queued");
         let jobs =
@@ -1454,6 +1510,16 @@ mod tests {
             })
             .await
             .unwrap();
+        let failed = jobs
+            .submit(SubmitJobRequest {
+                kind: JobKind::Cluster,
+                priority: Priority::Batch,
+                payload: Value::Null,
+                callback_url: None,
+                idempotency_key: None,
+            })
+            .await
+            .unwrap();
 
         jobs.claim_next_for_worker("worker-a", &[running.kind], 30_000)
             .await
@@ -1464,6 +1530,19 @@ mod tests {
             .unwrap();
         jobs.complete_lease(&complete.id, "worker-b", None, json!({"ok": true}))
             .await;
+        jobs.claim_next_for_worker("worker-c", &[failed.kind], 30_000)
+            .await
+            .unwrap();
+        jobs.fail_lease(
+            &failed.id,
+            "worker-c",
+            None,
+            JobFailure {
+                message: "bad input".into(),
+                retryable: false,
+            },
+        )
+        .await;
 
         let restored =
             JobRegistry::with_store(crate::storage::SqliteJobStore::open(&path).unwrap()).unwrap();
@@ -1486,6 +1565,16 @@ mod tests {
             complete.terminal_attempt,
             Some(JobTerminalAttempt {
                 worker_id: "worker-b".into(),
+                attempt: 1,
+            })
+        );
+
+        let failed = restored.get(&failed.id).await.unwrap();
+        assert_eq!(failed.status, JobStatus::Failed);
+        assert_eq!(
+            failed.terminal_attempt,
+            Some(JobTerminalAttempt {
+                worker_id: "worker-c".into(),
                 attempt: 1,
             })
         );
@@ -2571,6 +2660,41 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn fail_lease_rejects_mismatched_running_attempt() {
+        let jobs = JobRegistry::default();
+        jobs.submit(SubmitJobRequest {
+            kind: JobKind::IndexBuild,
+            priority: Priority::Background,
+            payload: Value::Null,
+            callback_url: None,
+            idempotency_key: None,
+        })
+        .await
+        .unwrap();
+        jobs.claim_next_for_worker("worker-a", &[JobKind::IndexBuild], 30_000)
+            .await
+            .unwrap();
+
+        let result = jobs
+            .fail_lease(
+                "job-1",
+                "worker-a",
+                Some(2),
+                JobFailure {
+                    message: "wrong attempt".into(),
+                    retryable: false,
+                },
+            )
+            .await;
+
+        assert!(matches!(result, FinishJobResult::LeaseNotHeld(_)));
+        let job = jobs.get("job-1").await.unwrap();
+        assert_eq!(job.status, JobStatus::Running);
+        assert!(job.error.is_none());
+        assert!(job.lease.is_some());
+    }
+
+    #[tokio::test]
     async fn fail_lease_marks_non_retryable_or_exhausted_failure_failed() {
         let jobs = JobRegistry::default();
         jobs.submit(SubmitJobRequest {
@@ -3096,6 +3220,32 @@ mod tests {
         assert_eq!(delivered.removed, 1);
         assert_eq!(delivered.retained_pending_callbacks, 0);
         assert!(jobs.get("job-1").await.is_none());
+    }
+
+    #[tokio::test]
+    async fn delivered_callback_jobs_are_not_dispatched_again() {
+        let jobs = JobRegistry::default();
+
+        jobs.submit(SubmitJobRequest {
+            kind: JobKind::VisionAnalysis,
+            priority: Priority::Batch,
+            payload: Value::Null,
+            callback_url: Some("http://rhizome/jobs/job-1".into()),
+            idempotency_key: None,
+        })
+        .await
+        .unwrap();
+        jobs.claim_next_for_worker("worker-a", &[JobKind::VisionAnalysis], 30_000)
+            .await
+            .unwrap();
+        jobs.complete_lease("job-1", "worker-a", None, json!({"ok": true}))
+            .await;
+
+        assert_eq!(jobs.pending_callback_jobs().await.len(), 1);
+        jobs.record_callback_success("job-1", 200).await.unwrap();
+
+        assert!(jobs.pending_callback_jobs().await.is_empty());
+        assert!(jobs.begin_callback_attempt("job-1").await.is_none());
     }
 
     #[tokio::test]

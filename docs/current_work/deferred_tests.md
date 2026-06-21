@@ -407,8 +407,12 @@ Add an opt-in process-level e2e for async job idempotency:
 - restart Fairlead and retry the same submission again, verifying the recovered
   SQLite registry still returns the original job instead of enqueueing a
   duplicate
+- fire many concurrent `POST /v1/jobs` requests with the same `idempotency_key`
+  against a real Fairlead process and verify only one job is created
 - reuse the same key with a different payload, callback URL, priority, or job
   type and verify Fairlead rejects the request without mutating queue depth
+- submit an overlong or blank `idempotency_key` through the process-level API
+  and verify Fairlead rejects the request without mutating queue depth
 - complete, fail, or cancel the original job, then retry the original submit
   and verify it still returns the retained terminal job while that job has not
   been pruned
@@ -433,6 +437,11 @@ Add an opt-in process-level e2e for async job idempotency:
   same idempotency key and verify Fairlead creates a new job
 - run the same sequence while fake workers are concurrently claiming jobs to
   verify duplicate submits never create duplicate running leases
+- race duplicate terminal result reports against fresh worker claims and verify
+  idempotent replay never releases capacity for a different in-flight job
+- simulate a crash after a worker terminal result is accepted but before the
+  worker receives the HTTP response, then retry the result after restart and
+  verify terminal-attempt metadata makes the retry idempotent
 - scrape `/metrics` during the flow and verify queue depth, queue wait, terminal
   duration, and prune metrics remain internally consistent
 - run the submit/retry/restart sequence against the DGX Spark two-node setup
