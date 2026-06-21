@@ -12,9 +12,10 @@ unit coverage; they need process lifecycle control, port allocation, fake
 backends/workers, callback receiver processes, SQLite restart checks, remote
 DGX access, or future cloud/provider features.
 
-Phase 8E should make the biggest dent. Once a reusable local process harness
-exists, we should be able to implement the local process portions of roughly 11
-groups:
+Phase 8E should make the biggest dent. The first reusable local process harness
+now exists; as it gains restart, SQLite, fake-worker, and callback-receiver
+helpers, we should be able to implement the local process portions of roughly
+11 groups:
 
 - local routing demo smoke coverage
 - Phase 7A startup/config validation
@@ -337,19 +338,19 @@ belongs with the future cloud overflow phase rather than Phase 7D.
 
 ### `phase_8e_scheduler_hardening_process_harness`
 
-Consolidated process-level e2e backlog for Phase 8A through 8D. This should be
-the first Phase 8E target because it unlocks most of the local deferred tests in
-one harness.
+Consolidated process-level e2e backlog for Phase 8A through 8D. Reef's first
+slice adds the base process harness; the remaining work is to extend it into a
+full scheduler-hardening harness.
 
-Harness requirements:
+Remaining harness requirements:
 
-- start and stop a Fairlead process with isolated ports and env vars
+- restart Fairlead with the same SQLite DB and changed environment
 - start fake async workers and callback receivers
 - use temporary SQLite job storage
 - poll `/health`, `/metrics`, `/v1/jobs`, and `/v1/workers`
-- support clean shutdown and forced restart
-- capture stdout/stderr or structured logs for startup and maintenance-loop
-  assertions
+- add JSON request helpers for jobs, workers, pruning, and metrics
+- assert captured stdout/stderr or structured logs for startup and
+  maintenance-loop behavior
 
 Worker lifecycle cases:
 

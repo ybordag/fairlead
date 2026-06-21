@@ -884,6 +884,8 @@ workload protocols.
   - [x] Audit Phase 8D and broader Phase 8 test coverage, add immediate
     in-process edge tests, and record heavier e2e cases for Phase 8E.
 - **8E Reef: Process-Level E2E Harness**
+  - [x] Add a reusable process harness that starts a real Fairlead binary on an
+    isolated local port and verifies `/health`.
   - Add process-level restart e2e harnesses for jobs, leases, callbacks, and
     metrics.
 - Keep Temporal deferred unless application workflows need durable multi-step
