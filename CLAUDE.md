@@ -11,7 +11,8 @@ It exposes an OpenAI-compatible inference API. A generic async job API is planne
 for a later phase. The inference path is synchronous (request → response). The
 future job path is async (submit → job_id → callback on completion).
 
-See `design.md` for the full architecture.
+See `docs/design.md` for the design horizon and `docs/architecture.md` for the
+current architecture.
 
 ## Related repos
 

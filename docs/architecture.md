@@ -15,12 +15,13 @@ Cambium          Go API gateway — auth, provider key management, SSE proxy
   ↓  HTTP /internal/agent (SSE)
 Rhizome          Python LangGraph agent — 93 tools, planning, triage, DB
   ↓  HTTP /v1/chat/completions (OpenAI-compatible)
-Fairlead         Rust compute router — inference, job dispatch, circuit breaking
+Fairlead         Rust compute router — inference routing, resource admission, circuit breaking
   ↓  HTTP /v1
 vLLM             Python model server — GPU inference on spark-a
-  OR
-Cloud APIs       Gemini, Claude, OpenAI — fallback when local is unavailable
 ```
+
+Future phases may add async job dispatch and cloud-provider fallback, but those
+are not part of the current synchronous proxy surface.
 
 **Cambium** handles everything external-facing: verifies JWT tokens, decrypts the
 user's stored API key, injects it into the Rhizome request. It knows about users

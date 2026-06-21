@@ -271,10 +271,14 @@ what the model result means.
 
 ## Documentation
 
+Start with [`docs/README.md`](docs/README.md) for the full documentation map.
+
 - [`docs/architecture.md`](docs/architecture.md) — system architecture,
   vLLM/Fairlead responsibilities, and the spark-a/spark-b routing example.
 - [`docs/code_walkthrough.md`](docs/code_walkthrough.md) — Rust code walkthrough
   from process startup to proxied response.
+- [`docs/design.md`](docs/design.md) — design horizon and longer-term product
+  shape.
 - [`docs/roadmap.md`](docs/roadmap.md) — generalization plan, feature epics, and
   acceptance criteria.
 - [`docs/dgx_spark_deployment.md`](docs/dgx_spark_deployment.md) — manual

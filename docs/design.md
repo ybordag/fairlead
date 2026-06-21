@@ -1,14 +1,20 @@
 # Fairlead — Design Document
 
-**Status:** Design horizon; current implementation is documented in `README.md`,
-`docs/architecture.md`, and `docs/code_walkthrough.md`.
+**Status:** Design horizon; current implementation is documented in
+[`../README.md`](../README.md), [`architecture.md`](architecture.md), and
+[`code_walkthrough.md`](code_walkthrough.md).
 **Version:** 0.1
 
 ---
 
 ## What it is
 
-Fairlead is a resource router for AI agent systems. It sits between an agent application and its compute backend, routing inference requests to the right hardware, managing agent worker processes, and handling failover when nodes become unavailable.
+Fairlead is a resource router for AI agent systems. It sits between an agent
+application and its compute backends, routing inference requests to the right
+hardware, tracking cooperative capacity reports, and handling failover when
+nodes become unavailable. Future phases add async job scheduling for registered
+compute workers, but Fairlead should not supervise or restart those worker
+processes itself.
 
 The name comes from sailing: a fairlead is a fitting that guides lines in exactly the right direction without friction or fouling. It does not generate power or hold cargo — it ensures that what needs to flow, flows correctly.
 
@@ -24,7 +30,9 @@ An AI agent application that makes LLM calls against local hardware faces severa
 - **No cloud fallback.** When local hardware is saturated, requests queue indefinitely or are dropped.
 - **No VRAM awareness.** Multiple GPU consumers (LLM serving, vision sidecars, embedding servers) compete for memory with no coordination, causing OOM failures.
 - **No session continuity.** A mid-session node failure has no recovery path.
-- **No worker management.** The application has no way to scale agent processes or restart crashed ones.
+- **No compute-worker dispatch.** The application has no infrastructure-level
+  way to submit bounded compute jobs, select eligible workers, enforce leases,
+  or retry failed attempts.
 
 Solving these problems inside the application couples infrastructure concerns to business logic. Fairlead solves them as a separate infrastructure layer.
 
