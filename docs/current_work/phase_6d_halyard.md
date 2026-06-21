@@ -50,10 +50,6 @@ Implemented:
   failure requeue, non-retryable failure, retry exhaustion, and invalid failure
   payloads.
 
-Remaining likely Halyard work:
-
-- Per-attempt timeout behavior.
-
 ## Second Slice
 
 Implemented:
@@ -77,10 +73,6 @@ Implemented:
   claim-time capacity rejection, result-time release, cancellation-time release,
   expiry-sweep release, and metric output.
 
-Remaining likely Halyard work:
-
-- Per-attempt timeout behavior.
-
 ## Third Slice
 
 Implemented:
@@ -96,6 +88,21 @@ Implemented:
   `cancelled`.
 - Added registry and metrics tests for terminal duration accounting.
 
-Remaining likely Halyard work:
+## Fourth Slice
 
-- Per-attempt timeout behavior.
+Implemented:
+
+- Made lease expiry explicitly record per-attempt timeout state.
+- Expired attempts now store `attempt timed out` in the job error field.
+- Timed-out attempts are marked retryable while attempts remain.
+- Timed-out attempts are marked non-retryable when attempts are exhausted and
+  the job becomes `failed`.
+- Claim, renewal, completion, and failure endpoints continue to sweep expired
+  leases before mutating job state, so late worker reports cannot resurrect an
+  expired attempt.
+- Added registry and endpoint assertions for timeout error state.
+
+Remaining Halyard work:
+
+- None. Durable persistence, callback delivery, configurable per-workload
+  timeout policy, and background expiry loops remain future phases.

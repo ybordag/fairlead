@@ -15,6 +15,8 @@ use tokio::sync::RwLock;
 
 use crate::{config::Priority, AppState};
 
+pub const ATTEMPT_TIMEOUT_ERROR: &str = "attempt timed out";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum JobKind {
@@ -445,10 +447,16 @@ impl JobRegistry {
             }
 
             report.released_workers.push(lease.worker_id.clone());
+            let retryable = job.attempts < job.max_attempts;
+            job.result = None;
+            job.error = Some(JobFailure {
+                message: ATTEMPT_TIMEOUT_ERROR.into(),
+                retryable,
+            });
             job.lease = None;
             job.updated_at_unix_ms = now;
 
-            if job.attempts < job.max_attempts {
+            if retryable {
                 job.status = JobStatus::Queued;
                 requeued_jobs.push((job.priority, id));
                 report.requeued += 1;
@@ -1151,6 +1159,13 @@ mod tests {
         let job = jobs.get("job-1").await.unwrap();
         assert_eq!(job.status, JobStatus::Queued);
         assert_eq!(job.attempts, 1);
+        assert_eq!(
+            job.error,
+            Some(JobFailure {
+                message: ATTEMPT_TIMEOUT_ERROR.into(),
+                retryable: true,
+            })
+        );
         assert!(job.lease.is_none());
         assert_eq!(
             jobs.queued_jobs_by_priority()
@@ -1207,6 +1222,13 @@ mod tests {
         let job = jobs.get("job-1").await.unwrap();
         assert_eq!(job.status, JobStatus::Failed);
         assert_eq!(job.attempts, job.max_attempts);
+        assert_eq!(
+            job.error,
+            Some(JobFailure {
+                message: ATTEMPT_TIMEOUT_ERROR.into(),
+                retryable: false,
+            })
+        );
         assert!(job.lease.is_none());
         assert!(jobs.queued_jobs_by_priority().await.is_empty());
     }

@@ -725,11 +725,11 @@ observable.
 - [x] Define the worker result contract.
 - [x] Add completion and failure endpoints.
 - [x] Enforce bounded attempts and retry limits for reported worker failures.
-- Enforce per-attempt timeouts.
+- [x] Enforce per-attempt timeouts.
 - [x] Track worker in-flight counts and capacity usage.
 - [x] Add worker utilization metrics.
 - [x] Add job duration metrics.
-- Add tests for timeout accounting.
+- [x] Add tests for timeout accounting.
 - [x] Add tests for success, retryable failure, and retry exhaustion.
 - [x] Add tests for utilization accounting.
 - [x] Add tests for duration accounting.

@@ -669,6 +669,8 @@ mod tests {
         let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(value["job"]["id"], "job-1");
         assert_eq!(value["job"]["attempts"], 2);
+        assert_eq!(value["job"]["error"]["message"], "attempt timed out");
+        assert_eq!(value["job"]["error"]["retryable"], true);
         assert_eq!(value["job"]["lease"]["worker_id"], "vision-worker");
         assert_eq!(
             jobs.get("job-1").await.unwrap().status,
@@ -1318,6 +1320,8 @@ mod tests {
             .unwrap();
         let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(value["job"]["status"], "queued");
+        assert_eq!(value["job"]["error"]["message"], "attempt timed out");
+        assert_eq!(value["job"]["error"]["retryable"], true);
         assert!(value["job"]["lease"].is_null());
         assert_eq!(
             jobs.queued_jobs_by_priority()

@@ -88,10 +88,12 @@ Implemented generalization work includes:
 - **Worker capacity accounting** so claims respect `max_concurrent_jobs` and
   release in-flight slots on completion, failure, cancellation, or expired
   leases.
+- **Per-attempt timeout state** so expired leases record `attempt timed out`,
+  requeue while attempts remain, and fail when attempts are exhausted.
 
-Future Phase 6 subphases add per-attempt timeout behavior, durable job state,
-callback delivery, and async completion metrics. Later phases add complete
-pool-aware routing, adapter boundaries, and cloud fallback.
+Future Phase 6 subphases add durable job state, callback delivery, and async
+completion metrics. Later phases add complete pool-aware routing, adapter
+boundaries, and cloud fallback.
 
 See [`docs/planning/roadmap.md`](docs/planning/roadmap.md) for the
 implementation plan and acceptance criteria.

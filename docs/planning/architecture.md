@@ -115,10 +115,11 @@ scheduler input, not the source of truth for GPU execution.
 The current code implements the synchronous gateway path: backend selection,
 circuit breaking, health probing, soft affinity, streaming proxying, resource
 reporting, resource-aware backend eligibility, priority admission, and basic
-metrics. The early async path implements in-memory job records and
-non-dispatching worker registration, queue metrics, and scheduler preview.
-Worker-pull claims, worker execution, leases, callbacks, and durable job
-recovery are planned for Phase 6C+.
+metrics. The async path implements in-memory job records, worker registration,
+queue metrics, scheduler preview, worker-pull claims, lease renewal, result
+reporting, retryable failure, worker capacity accounting, terminal duration
+metrics, and explicit timeout state for expired attempts. Callbacks and durable
+job recovery remain future phases.
 
 ### Rhizome example: spark-a and spark-b
 
@@ -289,7 +290,8 @@ Current Phase 6B/6C/6D behavior:
   increments worker in-flight accounting, and removes it from queue metrics
 - worker claims first sweep expired leases: expired jobs reenter their priority
   queue if attempts remain, otherwise they become `failed`; expired leases also
-  release the previous worker's in-flight slot
+  release the previous worker's in-flight slot and record `attempt timed out` in
+  the job error field
 - `POST /v1/workers/{worker_id}/jobs/{job_id}/renew` validates the worker,
   sweeps expired leases, and extends the lease only if that worker still holds
   the running job
@@ -313,6 +315,8 @@ job submitted
   → worker processes async
   → worker completes or renews the job lease before it expires
   → Fairlead records completion/failure and releases worker capacity
+  → if the lease expires first, Fairlead records timeout error state and
+    requeues or fails the job by remaining attempts
   → future phase: callback fires to caller on completion
 ```
 

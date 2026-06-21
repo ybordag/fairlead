@@ -1297,6 +1297,11 @@ lease is created, and Fairlead does not call the worker endpoint.
 The claim endpoint still does not call the worker process. It only grants the
 worker a bounded lease and returns the job payload to run.
 
+Lease expiry is Fairlead's current per-attempt timeout mechanism. When a sweep
+finds an expired running lease, the job records `attempt timed out` in `error`.
+If attempts remain, the job returns to `queued` with `retryable: true`; if
+attempts are exhausted, the job becomes `failed` with `retryable: false`.
+
 `POST /v1/workers/{worker_id}/jobs/{job_id}/renew` extends a running lease:
 
 1. Fairlead looks up the worker by ID.

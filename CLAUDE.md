@@ -56,7 +56,8 @@ cargo watch -x run
 
 **Phase 6C complete** (cleat → main). **Phase 6D is in progress on halyard**:
 worker completion/failure reporting, retries, worker capacity accounting,
-duration metrics, and per-attempt timeouts before durable state and callbacks.
+duration metrics, and per-attempt timeout state before durable state and
+callbacks.
 
 | Phase | Branch | Status |
 |---|---|---|
@@ -371,7 +372,8 @@ WORKER_HEARTBEAT_SECS        — interval before a worker is considered stale
 - [x] Worker utilization metrics for in-flight jobs, max concurrency, and
   available slots.
 - Scheduler policy based on lease availability, VRAM headroom, and load.
-- Job manager: per-attempt timeouts, cancellation, and completed-job pruning.
+- [x] Job manager: per-attempt timeout state and cancellation.
+- Completed-job pruning.
 - Persistence path: SQLite first for local durable state, Postgres later for
   multiple Fairlead instances.
 - Callback delivery: on completion, POST to `callback_url` with result payload;
