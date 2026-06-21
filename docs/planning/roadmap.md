@@ -902,6 +902,8 @@ workload protocols.
   - [x] Add process-level worker lifecycle coverage for drain, reactivate,
     busy deregister, completion while draining, idle deregister, and final
     worker listing.
+  - [x] Add process-level worker renew and retryable failure coverage with
+    requeue, worker capacity release, reclaim, and completion.
   - Add process-level restart e2e harnesses for jobs, leases, callbacks, and
     metrics.
 - Keep Temporal deferred unless application workflows need durable multi-step

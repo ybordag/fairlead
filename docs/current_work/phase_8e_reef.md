@@ -52,8 +52,12 @@ behavior that in-process Rust tests cannot cover.
 - Added `worker_lifecycle_controls_work_over_real_http`, which verifies
   drain/reactivate/deregister behavior through the real process API, including
   busy deregistration leaving a draining worker able to complete its held job.
+- Added harness helpers for worker lease renewal and worker-reported failure.
+- Added `worker_renew_and_retryable_fail_requeues_over_real_http`, which
+  verifies renewal extends a running lease and retryable worker failure requeues
+  the job for another worker to reclaim and complete.
 
 ## Next Slices
 
-- Add helpers for worker renew/fail and prune endpoints.
+- Add helpers for prune endpoints.
 - Move deferred Phase 8 local-process cases into concrete tests incrementally.
