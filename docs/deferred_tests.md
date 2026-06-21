@@ -30,19 +30,6 @@ matching metrics assertions.
 
 ---
 
-### `mid_stream_failure_is_not_retried`
-
-Use a custom response body that yields one successful Server-Sent Event chunk and
-then returns a stream error. Assert that Fairlead does not replay the request to
-another backend after response bytes have already been sent to the caller.
-
-**Why deferred:** This needs a custom fallible body stream fixture rather than the
-simple static SSE bodies used by the current proxy tests. The core policy is
-covered by code structure: retry decisions happen before `upstream_response()`
-turns the upstream response into the caller-visible stream.
-
----
-
 ## Demo Harness
 
 ### `small_cluster_demo_exercises_routing_story`

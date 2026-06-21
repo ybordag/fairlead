@@ -441,12 +441,34 @@ mod tests {
         },
         time::Duration,
     };
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     async fn start_mock(app: Router) -> String {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move {
             axum::serve(listener, app).await.unwrap();
+        });
+        format!("http://{}/v1", addr)
+    }
+
+    async fn start_mid_stream_failure_backend() -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut buf = [0; 4096];
+            let _ = stream.read(&mut buf).await.unwrap();
+
+            let chunk = b"data: {\"partial\":true}\n\n";
+            let headers = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ntransfer-encoding: chunked\r\n\r\n{:X}\r\n",
+                chunk.len()
+            );
+            stream.write_all(headers.as_bytes()).await.unwrap();
+            stream.write_all(chunk).await.unwrap();
+            stream.write_all(b"\r\n").await.unwrap();
+            stream.shutdown().await.unwrap();
         });
         format!("http://{}/v1", addr)
     }
@@ -588,6 +610,51 @@ mod tests {
             .unwrap_or("");
         assert!(ct.contains("text/event-stream"), "expected SSE, got {ct}");
         assert!(resp.text().await.unwrap().contains("data: [DONE]"));
+    }
+
+    #[tokio::test]
+    async fn mid_stream_failure_is_not_retried() {
+        let failing_backend = start_mid_stream_failure_backend().await;
+        let fallback_hit = Arc::new(AtomicBool::new(false));
+        let fallback_hit_for_route = fallback_hit.clone();
+        let fallback = Router::new().route(
+            "/v1/chat/completions",
+            post(move || {
+                let hit = fallback_hit_for_route.clone();
+                async move {
+                    hit.store(true, Ordering::SeqCst);
+                    Response::builder()
+                        .status(200)
+                        .header("content-type", "text/event-stream")
+                        .body(Body::from("data: fallback\n\ndata: [DONE]\n\n"))
+                        .unwrap()
+                }
+            }),
+        );
+        let fallback_backend = start_mock(fallback).await;
+        let fairlead = start_fairlead_with_backends(vec![
+            backend_with_id(failing_backend, "failing-stream"),
+            backend_with_id(fallback_backend, "fallback"),
+        ])
+        .await;
+
+        let resp = reqwest::Client::new()
+            .post(format!("{}/v1/chat/completions", fairlead))
+            .json(&json!({"model":"m","messages":[],"stream":true}))
+            .send()
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), 200);
+        let body = resp.text().await;
+        assert!(
+            body.is_err(),
+            "client should see the upstream body error after streaming starts"
+        );
+        assert!(
+            !fallback_hit.load(Ordering::SeqCst),
+            "Fairlead must not retry after response bytes have started streaming"
+        );
     }
 
     #[tokio::test]
