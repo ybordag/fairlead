@@ -858,7 +858,7 @@ workload protocols.
   - [x] Add configurable retention limits.
   - [x] Add SQLite pruning behavior and metrics.
   - [x] Audit test coverage and deferred process-level pruning tests before PR.
-  - Add final 8B docs/readiness pass before PR.
+  - [x] Add final 8B docs/readiness pass before PR.
 - **8C Splice: Idempotency**
   - Add stronger idempotency semantics for submit, complete, fail, cancel, and
     callback handling where needed.

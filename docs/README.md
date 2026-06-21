@@ -39,7 +39,7 @@ detail.
 ## Current Work
 
 - [`current_work/phase_8b_stopper.md`](current_work/phase_8b_stopper.md) —
-  active Phase 8B terminal-job retention and pruning notes.
+  completed Phase 8B terminal-job retention and pruning notes.
 - [`current_work/phase_8a_bowline.md`](current_work/phase_8a_bowline.md) —
   completed Phase 8A worker lifecycle and graceful drain notes.
 - [`current_work/phase_7d_navigator.md`](current_work/phase_7d_navigator.md) —

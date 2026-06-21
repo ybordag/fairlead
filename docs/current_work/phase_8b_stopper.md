@@ -31,7 +31,7 @@ processes can bound completed job history without weakening callback delivery.
 
 ## Remaining
 
-- Do a final docs/readiness pass before PR.
+- Ready for PR.
 
 ## Semantics
 
