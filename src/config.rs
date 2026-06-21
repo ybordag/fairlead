@@ -791,6 +791,14 @@ mod tests {
     }
 
     #[test]
+    fn strict_worker_pools_preserves_default_pool_derivation() {
+        let cfg = Config::from_lookup(env(&[("STRICT_WORKER_POOLS", "true")])).unwrap();
+
+        assert!(cfg.strict_worker_pools);
+        assert_eq!(pool_ids(&cfg), vec![DEFAULT_BACKEND_POOL]);
+    }
+
+    #[test]
     fn circuit_env_overrides() {
         let cfg = Config::from_lookup(env(&[
             ("CIRCUIT_FAILURE_THRESHOLD", "5"),
