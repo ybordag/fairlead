@@ -22,8 +22,8 @@ detail.
   backends, providers, workers, workloads, routes, affinity, pools, and leases.
 - [`planning/workloads.md`](planning/workloads.md) — current synchronous and
   async workload shapes.
-- [`planning/roadmap.md`](planning/roadmap.md) — completed phases, active Phase
-  8 scheduler-hardening scope, future phases, acceptance criteria, and deferred
+- [`planning/roadmap.md`](planning/roadmap.md) — completed phases, Phase 8
+  scheduler-hardening scope, future phases, acceptance criteria, and deferred
   work.
 
 ## Implementation And Examples
@@ -39,7 +39,7 @@ detail.
 ## Current Work
 
 - [`current_work/phase_8e_reef.md`](current_work/phase_8e_reef.md) —
-  active Phase 8E process-level e2e harness notes.
+  completed Phase 8E process-level e2e harness notes.
 - [`current_work/phase_8d_clove.md`](current_work/phase_8d_clove.md) —
   completed Phase 8D background maintenance loop notes.
 - [`current_work/phase_8c_splice.md`](current_work/phase_8c_splice.md) —
