@@ -889,6 +889,9 @@ workload protocols.
   - [x] Add process-level startup failure coverage for invalid scheduler and
     retention environment configuration.
   - [x] Add JSON request helpers and a SQLite-backed job restart smoke test.
+  - [x] Add SQLite-backed process idempotency coverage for invalid keys,
+    matching duplicate submits, conflicting duplicate submits, terminal retained
+    job reuse, pruning key release, and new-job creation after prune.
   - [x] Add process-level worker registration, claim, completion, and metrics
     smoke coverage.
   - [x] Add process-level callback receiver coverage for successful terminal

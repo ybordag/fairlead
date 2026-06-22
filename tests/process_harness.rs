@@ -575,6 +575,147 @@ async fn sqlite_job_state_survives_process_restart() {
 }
 
 #[tokio::test]
+async fn sqlite_idempotency_keys_survive_restart_and_release_after_prune() {
+    let db_dir = unique_temp_dir("fairlead-process-idempotency-db");
+    fs::create_dir_all(&db_dir).expect("create idempotency SQLite process test temp dir");
+    let db_path = db_dir.join("jobs.sqlite3");
+    let db_path = db_path.to_string_lossy().to_string();
+    let mut fairlead = FairleadProcess::spawn(&[
+        ("JOB_STORE", "sqlite"),
+        ("JOB_DB_PATH", &db_path),
+        ("JOB_RETENTION_SECS", "1"),
+        ("JOB_PRUNE_LIMIT", "10"),
+    ]);
+    fairlead.wait_for_health().await;
+
+    for (body, expected_error) in [
+        (
+            json!({
+                "type": "vision_analysis",
+                "idempotency_key": "   "
+            }),
+            "idempotency_key cannot be empty",
+        ),
+        (
+            json!({
+                "type": "vision_analysis",
+                "idempotency_key": "x".repeat(257)
+            }),
+            "idempotency_key cannot exceed 256 bytes",
+        ),
+    ] {
+        let (status, rejected) = fairlead.submit_job(body).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(rejected["raw"], expected_error);
+    }
+
+    let original_body = json!({
+        "type": "vision_analysis",
+        "priority": "batch",
+        "payload": { "image": "rose.jpg" },
+        "idempotency_key": "rose-image"
+    });
+    let (status, submitted) = fairlead.submit_job(original_body.clone()).await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+    assert_eq!(submitted["job"]["id"], "job-1");
+    assert_eq!(submitted["job"]["idempotency_key"], "rose-image");
+
+    let (status, duplicate) = fairlead.submit_job(original_body.clone()).await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+    assert_eq!(duplicate["job"]["id"], "job-1");
+
+    let (status, conflict) = fairlead
+        .submit_job(json!({
+            "type": "vision_analysis",
+            "priority": "batch",
+            "payload": { "image": "lily.jpg" },
+            "idempotency_key": "rose-image"
+        }))
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(
+        conflict["raw"],
+        "idempotency_key already used for a different job request"
+    );
+
+    let (status, listed) = fairlead.get_json("/v1/jobs").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        listed["jobs"]
+            .as_array()
+            .expect("jobs response is an array")
+            .len(),
+        1
+    );
+
+    fairlead.restart().await;
+    fairlead.wait_for_health().await;
+
+    let (status, after_restart) = fairlead.submit_job(original_body.clone()).await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+    assert_eq!(after_restart["job"]["id"], "job-1");
+    assert_eq!(after_restart["job"]["status"], "queued");
+
+    let (status, _) = fairlead
+        .register_worker(json!({
+            "id": "idempotency-worker",
+            "endpoint_url": "http://idempotency-worker.local",
+            "node_id": "spark-a",
+            "pool": "default",
+            "job_types": ["vision_analysis"],
+            "max_concurrent_jobs": 1,
+            "available_vram_mb": 4096
+        }))
+        .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, claim) = fairlead.claim_worker_job("idempotency-worker").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(claim["job"]["id"], "job-1");
+
+    let (status, completed) = fairlead
+        .complete_worker_job(
+            "idempotency-worker",
+            "job-1",
+            json!({
+                "attempt": 1,
+                "result": { "classification": "healthy" }
+            }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(completed["job"]["status"], "complete");
+
+    let (status, retained_terminal) = fairlead.submit_job(original_body).await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+    assert_eq!(retained_terminal["job"]["id"], "job-1");
+    assert_eq!(retained_terminal["job"]["status"], "complete");
+
+    tokio::time::sleep(Duration::from_millis(1_200)).await;
+    let (status, pruned) = fairlead.prune_jobs().await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(pruned["pruned"]["removed"], 1);
+
+    let body = wait_for_job_not_found(&fairlead, "job-1").await;
+    assert_eq!(body["raw"], "job not found");
+
+    let (status, new_job) = fairlead
+        .submit_job(json!({
+            "type": "vision_analysis",
+            "priority": "batch",
+            "payload": { "image": "lily.jpg" },
+            "idempotency_key": "rose-image"
+        }))
+        .await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+    assert_eq!(new_job["job"]["id"], "job-2");
+    assert_eq!(new_job["job"]["idempotency_key"], "rose-image");
+
+    fairlead.shutdown().await;
+    fs::remove_dir_all(db_dir).expect("remove idempotency SQLite process test temp dir");
+}
+
+#[tokio::test]
 async fn worker_can_claim_and_complete_job_over_http() {
     let mut fairlead = FairleadProcess::spawn(&[]);
     fairlead.wait_for_health().await;

@@ -27,6 +27,11 @@ behavior that in-process Rust tests cannot cover.
   SQLite job storage, submits a job over HTTP, restarts the process, fetches the
   same job over HTTP, and verifies submit idempotency still returns the original
   job.
+- Added `sqlite_idempotency_keys_survive_restart_and_release_after_prune`,
+  which verifies invalid idempotency keys are rejected, matching submits reuse
+  the same job before and after restart, conflicting reuse is rejected without
+  queue mutation, retained terminal jobs are reused, and pruning releases the
+  key for a new job.
 - Added harness helpers for worker registration, worker claim, worker
   completion, and text responses such as `/metrics`.
 - Added `worker_can_claim_and_complete_job_over_http`, which exercises the real

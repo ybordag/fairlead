@@ -396,14 +396,6 @@ Retention, pruning, and maintenance cases:
 
 Idempotency and restart cases:
 
-- submit a job with `idempotency_key`, retry the same body before and after
-  restart, and verify all responses return the same job ID
-- reuse the same key with a different payload, callback URL, priority, or job
-  type and verify rejection without queue mutation
-- submit overlong or blank `idempotency_key` values through the process API and
-  verify rejection without queue mutation
-- complete, fail, or cancel the original job, then retry the original submit and
-  verify it returns the retained terminal job until pruning removes it
 - retry `DELETE /v1/jobs/{id}` for an already-cancelled job before and after
   restart without duplicate callback delivery
 - retry exact terminal complete/fail reports with `attempt` before and after
@@ -411,8 +403,6 @@ Idempotency and restart cases:
 - retry contradictory terminal complete/fail reports and verify conflict
 - report complete/fail with a mismatched running lease attempt and verify
   rejection
-- prune a retained terminal job, reuse the same idempotency key, and verify a
-  new job is created
 - simulate crash after accepting a terminal result but before the worker
   receives the HTTP response; retry after restart and verify terminal-attempt
   metadata makes the retry idempotent
