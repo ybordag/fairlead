@@ -375,8 +375,6 @@ Retention, pruning, and maintenance cases:
 - verify manual prune works while background pruning is enabled
 - run manual prune concurrently with background pruning and verify pruning is
   idempotent, bounded, and does not double-count metrics
-- verify background pruning respects the per-run prune limit and makes progress
-  across multiple intervals
 - verify omitting `JOB_PRUNE_INTERVAL_SECS` disables background pruning while
   leaving manual pruning enabled
 - verify shutdown does not interrupt SQLite writes in a way that corrupts job

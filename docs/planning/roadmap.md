@@ -917,6 +917,8 @@ workload protocols.
   - [x] Add process-level background prune coverage for SQLite-backed terminal
     retention, delivered callbacks, pending callbacks, queued jobs, running
     jobs, prune metrics, and manual prune behavior after a background sweep.
+  - [x] Add process-level background prune limit coverage showing bounded
+    per-sweep pruning and continued progress across later intervals.
   - Add process-level restart e2e harnesses for jobs, leases, callbacks, and
     metrics.
 - Keep Temporal deferred unless application workflows need durable multi-step

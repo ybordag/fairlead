@@ -468,6 +468,21 @@ async fn wait_for_job_not_found(fairlead: &FairleadProcess, job_id: &str) -> Val
     }
 }
 
+async fn wait_for_metrics_contains(fairlead: &FairleadProcess, expected: &str) -> String {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let (status, metrics) = fairlead.get_text("/metrics").await;
+        assert_eq!(status, StatusCode::OK);
+        if metrics.contains(expected) {
+            return metrics;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            panic!("metrics did not contain {expected:?}; last metrics: {metrics}");
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
 #[tokio::test]
 async fn fairlead_process_starts_serves_health_and_shuts_down() {
     let mut fairlead = FairleadProcess::spawn(&[]);
@@ -1703,4 +1718,86 @@ async fn background_pruning_removes_only_eligible_terminal_jobs_over_real_http()
 
     fairlead.shutdown().await;
     fs::remove_dir_all(db_dir).expect("remove background prune SQLite process test temp dir");
+}
+
+#[tokio::test]
+async fn background_pruning_respects_limit_and_progresses_across_intervals() {
+    let db_dir = unique_temp_dir("fairlead-process-background-prune-limit-db");
+    fs::create_dir_all(&db_dir).expect("create background prune limit SQLite process test temp dir");
+    let db_path = db_dir.join("jobs.sqlite").to_string_lossy().to_string();
+    let mut fairlead = FairleadProcess::spawn(&[
+        ("JOB_STORE", "sqlite"),
+        ("JOB_DB_PATH", &db_path),
+        ("JOB_RETENTION_SECS", "1"),
+        ("JOB_PRUNE_LIMIT", "1"),
+        ("JOB_PRUNE_INTERVAL_SECS", "1"),
+    ]);
+    fairlead.wait_for_health().await;
+
+    let (status, _) = fairlead
+        .register_worker(json!({
+            "id": "prune-limit-worker",
+            "endpoint_url": "http://prune-limit-worker.local",
+            "node_id": "spark-a",
+            "pool": "default",
+            "job_types": ["vision_analysis"],
+            "max_concurrent_jobs": 1,
+            "available_vram_mb": 4096
+        }))
+        .await;
+    assert_eq!(status, StatusCode::OK);
+
+    for expected_id in ["job-1", "job-2", "job-3"] {
+        let (status, submitted) = fairlead
+            .submit_job(json!({
+                "type": "vision_analysis",
+                "priority": "batch",
+                "payload": { "image": format!("{expected_id}.jpg") }
+            }))
+            .await;
+        assert_eq!(status, StatusCode::ACCEPTED);
+        assert_eq!(submitted["job"]["id"], expected_id);
+
+        let (status, claim) = fairlead.claim_worker_job("prune-limit-worker").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(claim["job"]["id"], expected_id);
+
+        let (status, completed) = fairlead
+            .complete_worker_job(
+                "prune-limit-worker",
+                expected_id,
+                json!({
+                    "attempt": 1,
+                    "result": { "classification": "healthy" }
+                }),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(completed["job"]["status"], "complete");
+    }
+
+    wait_for_metrics_contains(
+        &fairlead,
+        "fairlead_job_prunes_total{status=\"complete\"} 1",
+    )
+    .await;
+    let (status, job_2) = fairlead.get_json("/v1/jobs/job-2").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(job_2["job"]["status"], "complete");
+    let (status, job_3) = fairlead.get_json("/v1/jobs/job-3").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(job_3["job"]["status"], "complete");
+
+    for removed_id in ["job-1", "job-2", "job-3"] {
+        let body = wait_for_job_not_found(&fairlead, removed_id).await;
+        assert_eq!(body["raw"], "job not found");
+    }
+    wait_for_metrics_contains(
+        &fairlead,
+        "fairlead_job_prunes_total{status=\"complete\"} 3",
+    )
+    .await;
+
+    fairlead.shutdown().await;
+    fs::remove_dir_all(db_dir).expect("remove background prune limit SQLite process test temp dir");
 }

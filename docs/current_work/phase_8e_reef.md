@@ -76,6 +76,10 @@ behavior that in-process Rust tests cannot cover.
   loop removes only eligible terminal jobs while preserving pending-callback,
   running, and queued jobs. The test also verifies prune metrics and that a
   manual prune after the background sweep reports no remaining eligible jobs.
+- Added `background_pruning_respects_limit_and_progresses_across_intervals`,
+  which verifies background pruning honors `JOB_PRUNE_LIMIT=1` for a single
+  sweep, leaves later eligible terminal jobs in place after the first removal,
+  and continues pruning them across later intervals.
 
 ## Next Slices
 
