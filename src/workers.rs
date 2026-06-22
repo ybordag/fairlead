@@ -513,6 +513,7 @@ mod tests {
             resources: ResourceRegistry::default(),
             resource_policy: ResourceRoutingPolicy::default(),
             priority_limiter: PriorityLimiter::default(),
+            lease_duration_ms: crate::config::DEFAULT_JOB_LEASE_DURATION_MS,
             jobs: JobRegistry::default(),
             workers,
         }

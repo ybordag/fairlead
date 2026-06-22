@@ -387,6 +387,7 @@ mod tests {
             resources,
             resource_policy: ResourceRoutingPolicy::default(),
             priority_limiter: crate::priority::PriorityLimiter::default(),
+            lease_duration_ms: crate::config::DEFAULT_JOB_LEASE_DURATION_MS,
             jobs: crate::jobs::JobRegistry::default(),
             workers: crate::workers::WorkerRegistry::default(),
         }

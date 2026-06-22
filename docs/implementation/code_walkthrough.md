@@ -1525,8 +1525,9 @@ The current code does not:
 - Reserve GPU memory for a request; resource reports are cooperative control-plane
   hints, not allocator-level reservations.
 
-Push dispatch and process-level restart harnesses are future roadmap phases,
-not current behavior. Background lease recovery is current behavior: `main()`
+Push dispatch is a future roadmap phase, not current behavior. Process-level
+restart coverage exists in `tests/process_harness.rs`; it is a test harness, not
+a runtime feature. Background lease recovery is current behavior: `main()`
 spawns a maintenance loop that calls the same expired lease sweep used by worker
 claim, renew, complete, and fail handlers. Optional background pruning is also
 current behavior when `JOB_PRUNE_INTERVAL_SECS` is configured; it calls the same

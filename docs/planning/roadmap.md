@@ -884,8 +884,66 @@ workload protocols.
   - [x] Audit Phase 8D and broader Phase 8 test coverage, add immediate
     in-process edge tests, and record heavier e2e cases for Phase 8E.
 - **8E Reef: Process-Level E2E Harness**
-  - Add process-level restart e2e harnesses for jobs, leases, callbacks, and
+  - [x] Add a reusable process harness that starts a real Fairlead binary on an
+    isolated local port and verifies `/health`.
+  - [x] Add process-level startup failure coverage for invalid scheduler and
+    retention environment configuration.
+  - [x] Add process-level startup failure coverage for invalid callback retry
+    and timeout environment configuration.
+  - [x] Add JSON request helpers and a SQLite-backed job restart smoke test.
+  - [x] Add SQLite-backed process idempotency coverage for invalid keys,
+    matching duplicate submits, conflicting duplicate submits, terminal retained
+    job reuse, pruning key release, and new-job creation after prune.
+  - [x] Add SQLite-backed process cancellation idempotency coverage across
+    restart, including retained submit idempotency and no duplicate callback
+    delivery.
+  - [x] Add SQLite-backed process terminal-result replay coverage across
+    restart, including exact duplicate complete/fail reports, contradictory
+    conflict responses, and no duplicate completion callback delivery.
+  - [x] Add process-level mismatched worker-attempt rejection coverage for both
+    complete and fail result endpoints.
+  - [x] Add process-level worker registration, claim, completion, and metrics
+    smoke coverage.
+  - [x] Add process-level metrics consistency coverage across queue depth, queue
+    wait, worker capacity, lease recovery, terminal duration, callbacks, and
+    pruning.
+  - [x] Add process-level callback receiver coverage for successful terminal
+    callback delivery and callback metrics.
+  - [x] Add SQLite-backed process restart coverage for pending callback retry
+    recovery.
+  - [x] Add SQLite-backed process restart coverage for expired running-lease
+    requeue and reclaim.
+  - [x] Add configurable worker lease duration for tests/local demos while
+    preserving the 30-second production default.
+  - [x] Add process-level background maintenance-loop coverage for expired
+    lease requeue and reclaim.
+  - [x] Add process-level background maintenance-loop coverage for exhausted
+    expired leases failing, releasing worker capacity, dispatching callbacks,
+    and leaving no reclaimable work.
+  - [x] Add SQLite-backed process restart coverage for exhausted expired leases
+    failing during startup recovery and dispatching terminal callbacks.
+  - [x] Add process-level worker lifecycle coverage for drain, reactivate,
+    heartbeat while draining, re-registration while draining, busy deregister,
+    completion while draining, idle deregister, and final worker listing.
+  - [x] Add process-level worker renew and retryable failure coverage with
+    draining lease-holder behavior, requeue, worker capacity release, reclaim,
+    and completion.
+  - [x] Add process-level manual prune coverage for eligible terminal jobs,
+    delivered callbacks, pending callbacks, queued jobs, running jobs, and prune
     metrics.
+  - [x] Add process-level background prune coverage for SQLite-backed terminal
+    retention, delivered callbacks, pending callbacks, queued jobs, running
+    jobs, prune metrics, and manual prune behavior after a background sweep.
+  - [x] Add process-level background prune limit coverage showing bounded
+    per-sweep pruning and continued progress across later intervals.
+  - [x] Add process-level coverage showing omitted `JOB_PRUNE_INTERVAL_SECS`
+    disables background pruning while keeping manual pruning enabled.
+  - [x] Add process-level restart e2e harnesses for job state, idempotency,
+    leases, callbacks, exhausted-lease recovery, and metrics-sensitive scheduler
+    workflows.
+  - [x] Keep heavier crash-injection, concurrency, fake-worker-process, SQLite
+    stress, and remote DGX Spark deployment cases deferred to later
+    harness/deployment hardening phases.
 - Keep Temporal deferred unless application workflows need durable multi-step
   orchestration beyond bounded compute jobs.
 
@@ -924,6 +982,13 @@ placement is stable.
 - Add provider credential/header policy.
 - Add cost, priority, and admission policy for cloud overflow.
 - Add deployment documentation for multiple applications sharing Fairlead.
+- Add opt-in DGX Spark deployment e2e for sync routing, async workers, pool
+  placement, callback delivery, lease recovery, and metrics using the two-node
+  deployment shape.
+- Add deployment-harness support for fake workers running as separate processes
+  on local or remote nodes.
+- Add SQLite shutdown/corruption stress tests and interrupted-write recovery
+  checks for long-running single-instance deployments.
 
 ### Phase 12: Transport and SDK Hardening
 
@@ -938,3 +1003,11 @@ settled.
   surface.
 - Add parity tests so HTTP and gRPC APIs produce the same scheduling and job
   state transitions when both are supported.
+- Add crash-injection harnesses for worker result idempotency, including crash
+  after accepting a terminal result but before the worker receives the HTTP
+  response.
+- Add callback receiver crash-injection coverage for the at-least-once callback
+  contract, including receiver-side success before Fairlead records delivery.
+- Add concurrency stress tests for manual/background prune races, worker polling
+  loops, drain/reactivate/delete races, and duplicate claim prevention under
+  separate fake worker processes.

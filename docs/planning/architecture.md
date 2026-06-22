@@ -464,6 +464,8 @@ job submitted
   job duration, callback delivery outcomes, and terminal job pruning
 - Persistent callback-attempt state and pending callback recovery are
   implemented for SQLite-backed job state.
+- Worker leases default to 30 seconds and can be configured with
+  `JOB_LEASE_DURATION_MS`.
 - Background lease recovery runs on `JOB_MAINTENANCE_INTERVAL_SECS`.
 - Optional background terminal-job pruning runs when `JOB_PRUNE_INTERVAL_SECS`
   is configured. Manual `POST /v1/jobs/prune` remains available.

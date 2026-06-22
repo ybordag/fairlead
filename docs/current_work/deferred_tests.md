@@ -12,9 +12,12 @@ unit coverage; they need process lifecycle control, port allocation, fake
 backends/workers, callback receiver processes, SQLite restart checks, remote
 DGX access, or future cloud/provider features.
 
-Phase 8E should make the biggest dent. Once a reusable local process harness
-exists, we should be able to implement the local process portions of roughly 11
-groups:
+Phase 8E made the biggest dent by adding the reusable local process harness plus
+restart, SQLite, callback receiver, worker lifecycle, lease recovery,
+idempotency, pruning, and metrics process tests. As the harness grows fake-worker
+processes, crash injection, richer log assertions, and remote deployment
+helpers, later phases should be able to implement the remaining local process
+portions of roughly 11 groups:
 
 - local routing demo smoke coverage
 - Phase 7A startup/config validation
@@ -337,94 +340,67 @@ belongs with the future cloud overflow phase rather than Phase 7D.
 
 ### `phase_8e_scheduler_hardening_process_harness`
 
-Consolidated process-level e2e backlog for Phase 8A through 8D. This should be
-the first Phase 8E target because it unlocks most of the local deferred tests in
-one harness.
+Consolidated process-level e2e backlog for Phase 8A through 8D. Reef added the
+base process harness and the deterministic restart-sensitive scheduler cases;
+the remaining work is to extend it into a full scheduler-hardening harness with
+fake worker processes, crash injection, concurrency stress, log assertions, and
+remote deployment coverage.
 
-Harness requirements:
+Remaining harness requirements:
 
-- start and stop a Fairlead process with isolated ports and env vars
-- start fake async workers and callback receivers
-- use temporary SQLite job storage
+- restart Fairlead with changed environment
+- start fake async workers and richer callback receivers for retry, timeout, and
+  crash-injection cases
 - poll `/health`, `/metrics`, `/v1/jobs`, and `/v1/workers`
-- support clean shutdown and forced restart
-- capture stdout/stderr or structured logs for startup and maintenance-loop
-  assertions
+- add typed helpers for pruning and richer metrics assertions
+- assert captured stdout/stderr or structured logs for startup and
+  maintenance-loop behavior
+
+Intentionally deferred beyond Reef:
+
+- concurrent manual/background prune races and double-count protection
+- crash-after-commit terminal result simulation for worker result idempotency
+- fake worker processes that poll, claim, renew, complete, fail, and drain in
+  loops
+- SQLite shutdown/corruption stress and interrupted-write recovery
+- DGX Spark deployment e2e on the two-node setup
+- callback receiver crash-injection after receiver-side success but before
+  Fairlead records delivery
+
+These are not good final Reef slices because they need either a heavier
+multi-process harness, controlled crash injection, or remote deployment access.
+They should be grouped into later harness/deployment hardening work rather than
+mixed into the default process harness branch.
 
 Worker lifecycle cases:
 
-- register two workers for the same job type
-- drain one worker and verify preview/claim uses the other worker
-- reactivate the drained worker and verify it can claim new work again
-- delete an idle worker and verify it disappears from `GET /v1/workers`
-- delete a busy worker, verify `202 Accepted`, then renew/complete/fail the
-  held job while the worker is draining
-- verify retryable failure from a draining worker is reassigned to another
-  compatible worker
 - verify repeated drain/reactivate/delete calls are safe while fake workers poll
-- verify drained workers that heartbeat or re-register remain draining until
-  explicit reactivation
 - verify route ordering does not let `/v1/workers/{id}` shadow claim, drain,
   reactivate, heartbeat, or result routes
 
 Retention, pruning, and maintenance cases:
 
 - start with `JOB_STORE=sqlite`, low `JOB_RETENTION_SECS`, small
-  `JOB_PRUNE_LIMIT`, short `JOB_MAINTENANCE_INTERVAL_SECS`, and optional
-  `JOB_PRUNE_INTERVAL_SECS`
+  `JOB_PRUNE_LIMIT`, short `JOB_LEASE_DURATION_MS`, short
+  `JOB_MAINTENANCE_INTERVAL_SECS`, and optional `JOB_PRUNE_INTERVAL_SECS`
 - submit jobs that complete, fail, cancel, remain queued, and remain running
 - create terminal jobs with pending and delivered callbacks
-- verify manual `POST /v1/jobs/prune` removes only eligible terminal jobs
-- verify pending-callback terminal jobs are retained until delivery succeeds
-- verify delivered-callback terminal jobs become prunable
-- verify queued/running jobs survive manual and background pruning
 - verify repeated prune calls with no eligible jobs return `removed: 0` and do
   not create misleading prune metrics
 - verify manual prune works while background pruning is enabled
 - run manual prune concurrently with background pruning and verify pruning is
   idempotent, bounded, and does not double-count metrics
-- verify background pruning respects the per-run prune limit and makes progress
-  across multiple intervals
-- verify omitting `JOB_PRUNE_INTERVAL_SECS` disables background pruning while
-  leaving manual pruning enabled
-- verify expired running leases requeue or fail through the background recovery
-  loop without waiting for another worker claim
-- verify exhausted expired leases dispatch terminal callbacks through the
-  background recovery loop after process restart
 - verify shutdown does not interrupt SQLite writes in a way that corrupts job
   state
 
 Idempotency and restart cases:
 
-- submit a job with `idempotency_key`, retry the same body before and after
-  restart, and verify all responses return the same job ID
-- reuse the same key with a different payload, callback URL, priority, or job
-  type and verify rejection without queue mutation
-- submit overlong or blank `idempotency_key` values through the process API and
-  verify rejection without queue mutation
-- complete, fail, or cancel the original job, then retry the original submit and
-  verify it returns the retained terminal job until pruning removes it
-- retry `DELETE /v1/jobs/{id}` for an already-cancelled job before and after
-  restart without duplicate callback delivery
-- retry exact terminal complete/fail reports with `attempt` before and after
-  restart without duplicate callback delivery or worker-capacity mutation
-- retry contradictory terminal complete/fail reports and verify conflict
-- report complete/fail with a mismatched running lease attempt and verify
-  rejection
-- prune a retained terminal job, reuse the same idempotency key, and verify a
-  new job is created
 - simulate crash after accepting a terminal result but before the worker
   receives the HTTP response; retry after restart and verify terminal-attempt
   metadata makes the retry idempotent
 
 Metrics and config cases:
 
-- scrape `/metrics` and verify worker availability, queue depth, queue wait,
-  terminal duration, callback, prune, and maintenance-related behavior remain
-  internally consistent
-- verify invalid env configuration fails startup for `JOB_RETENTION_SECS`,
-  `JOB_PRUNE_LIMIT`, `JOB_MAINTENANCE_INTERVAL_SECS`, and
-  `JOB_PRUNE_INTERVAL_SECS`
 - verify logs or metrics distinguish lease recovery from pruning
 
 **Why deferred:** In-process tests cover registry, endpoint, SQLite, callback,
@@ -497,14 +473,12 @@ completed state, callback metadata, terminal result state, expired running lease
 startup recovery, SQLite bootstrap migration, and endpoint-level AppState
 recovery. It also covers lease renewal persistence, custom worker failure
 persistence, and claiming a recovered queued job through worker endpoints after
-an app rebuild. Remaining deferred tests:
+an app rebuild. Phase 8E adds process-level SQLite restart coverage for expired
+running lease requeue and reclaim. Remaining deferred tests:
 
 - Process-level e2e restart test with an actual Fairlead process and DB file:
   submit jobs, stop Fairlead, restart with the same `JOB_DB_PATH`, verify list,
   get, worker claim, complete/fail, and metrics behavior.
-- Process-level expired-lease restart test: claim a job with a short lease,
-  stop Fairlead until the lease expires, restart, and verify requeue/failure
-  behavior through HTTP.
 - Storage write failure tests: read-only DB path, unwritable parent directory,
   disk-full simulation if feasible, and SQLite busy/locked write behavior.
 - Corrupted or incompatible SQLite file behavior: invalid file contents,
@@ -527,13 +501,12 @@ success/failure metrics, cancellation callbacks, no callback on retryable job
 requeue, SQLite-backed pending callback delivery after registry restart, and
 SQLite-backed failed callback attempt retry after registry restart. It also
 covers recovery-loop delivery of pending SQLite callbacks and in-process
-in-flight callback de-duplication. Remaining deferred tests:
+in-flight callback de-duplication. Phase 8E adds process-level callback
+delivery and SQLite-backed callback retry recovery across a full Fairlead
+process restart. Remaining deferred tests:
 
-- Callback retry recovery across a full Fairlead OS-process restart.
 - Duplicate callback behavior when Fairlead crashes after the receiver handles
   the callback but before Fairlead records delivery success.
-- Process-level e2e callback delivery with an actual Fairlead process and
-  callback receiver.
 - Deployment-level callback delivery on Thor/Loki.
 
 **Why deferred:** These need a larger process/deployment harness or controlled

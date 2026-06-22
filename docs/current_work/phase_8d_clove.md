@@ -27,12 +27,15 @@ execution protocol.
   jobs across bounded intervals, retains queued jobs, and records prune metrics.
 - Added in-process coverage proving background pruning retains pending-callback
   terminal jobs until callback delivery succeeds.
-- Audited Phase 8 coverage. Remaining Phase 8 gaps are process-level restart,
-  concurrency, invalid-startup, SQLite durability, callback receiver, and
-  deployment smoke tests recorded in `deferred_tests.md`.
+- Audited Phase 8 coverage. Phase 8E later added process-level restart,
+  invalid-startup, SQLite durability, callback receiver, lifecycle,
+  idempotency, pruning, and metrics coverage. Remaining heavier concurrency,
+  crash-injection, SQLite stress, and deployment smoke tests stay recorded in
+  `deferred_tests.md`.
 
 ## Remaining In 8D
 
-- None for in-process coverage. Process-level timing, restart, SQLite,
-  callback receiver, concurrent manual/background pruning, and metric/log
-  behavior are deferred to the Phase 8E harness.
+- None for in-process coverage. Phase 8E covered the deterministic
+  process-level timing, restart, SQLite, callback receiver, pruning, and metrics
+  cases. Concurrent manual/background pruning and richer metric/log behavior are
+  deferred to later hardening harness work.

@@ -7,9 +7,10 @@ health, circuit state, and session affinity.
 
 The name comes from sailing: a fairlead is a fitting that guides lines in exactly the right direction without friction or fouling.
 
-**Status:** Phase 8D is underway on `clove`. Phase 8 hardens the async
-scheduler after the completed Phase 7 pool-aware placement work; 8A through 8C
-are merged, and 8D's in-process maintenance-loop work is complete.
+**Status:** Phase 8E is complete on `reef`. Phase 8 hardens the async scheduler
+after the completed Phase 7 pool-aware placement work; 8A through 8D are merged,
+and 8E adds process-level e2e coverage for restart-sensitive scheduler
+behavior.
 Fairlead currently runs as an Axum HTTP service with `/health`, `/metrics`,
 `/v1/models`, `/v1/resources`, `/v1/resources/report`, `/v1/jobs`,
 `/v1/jobs/prune`, `/v1/jobs/{id}`, `/v1/workers`, `/v1/workers/{id}`,
@@ -116,15 +117,15 @@ Implemented generalization work includes:
   retention age, per-run limit, SQLite persistence, and Prometheus counters.
 - **Background lease recovery** so expired async worker leases are requeued or
   failed on a configured maintenance interval, without waiting for the next
-  worker claim.
+  worker claim. Worker lease duration defaults to 30 seconds and is configurable
+  with `JOB_LEASE_DURATION_MS`.
 - **Optional background terminal-job pruning** using the same retention,
   per-run limit, callback-safety, SQLite, idempotency-key, and metrics behavior
   as `POST /v1/jobs/prune`.
 
-Phase 8D is underway on `clove` and adds background maintenance loops. Remaining
-Phase 8 work is the process-level e2e harness in Phase 8E. Later phases add
-adapter boundaries, richer resource policy, external scale/overflow, and
-transport/SDK hardening.
+Phase 8E is complete on `reef` and adds a process-level e2e harness for
+restart-sensitive scheduler behavior. Later phases add adapter boundaries,
+richer resource policy, external scale/overflow, and transport/SDK hardening.
 
 See [`docs/planning/roadmap.md`](docs/planning/roadmap.md) for the
 implementation plan and acceptance criteria.
@@ -276,7 +277,8 @@ Fairlead also runs a background lease recovery loop. The loop uses the same
 expiry path as worker claims: expired running leases release worker capacity,
 record `attempt timed out`, and either requeue the job or fail it when attempts
 are exhausted. The interval defaults to 30 seconds and can be changed with
-`JOB_MAINTENANCE_INTERVAL_SECS`.
+`JOB_MAINTENANCE_INTERVAL_SECS`. Worker leases default to 30 seconds and can be
+changed with `JOB_LEASE_DURATION_MS`.
 
 Terminal async jobs can be pruned explicitly with `POST /v1/jobs/prune`.
 Pruning removes only terminal jobs older than `JOB_RETENTION_SECS`, up to
@@ -299,6 +301,7 @@ Contradictory terminal reports still return a conflict.
 ```bash
 JOB_RETENTION_SECS=86400 \
 JOB_PRUNE_LIMIT=1000 \
+JOB_LEASE_DURATION_MS=30000 \
 JOB_MAINTENANCE_INTERVAL_SECS=30 \
 JOB_PRUNE_INTERVAL_SECS=3600 \
 cargo run

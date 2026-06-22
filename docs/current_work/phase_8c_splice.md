@@ -56,12 +56,19 @@ callback retries without changing workload protocols.
   failed jobs.
 - Delivered callbacks are not returned by pending callback scans and cannot
   begin another delivery attempt.
+- Phase 8E added process-level cancellation idempotency coverage across restart,
+  including no duplicate callback delivery and retained submit idempotency.
+- Phase 8E added process-level terminal completion and failure replay coverage
+  across restart, including exact duplicate acceptance, contradictory replay
+  conflict responses, and no duplicate completion callback delivery.
+- Phase 8E added process-level mismatched attempt rejection coverage for both
+  worker completion and failure endpoints.
 - Deferred process-level e2e coverage now includes concurrent duplicate submit
-  races, process API validation for invalid idempotency keys, terminal-result
-  replay races against new claims, and crash-after-terminal-result retry.
+  races, terminal-result replay races against new claims, and
+  crash-after-terminal-result retry.
 
-## Remaining 8C Scope
+## Remaining Deferred 8C Scope
 
-- Add process-level restart tests for submit idempotency, cancellation
-  idempotency, terminal result idempotency, and callback at-least-once delivery
-  in the Phase 8E e2e harness.
+- Add heavier process-level terminal result idempotency races, concurrent
+  duplicate submit races, and crash-after-terminal-result retry in a later
+  crash/concurrency harness.

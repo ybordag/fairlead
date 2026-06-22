@@ -56,6 +56,8 @@ pub struct AppState {
     pub resource_policy: ResourceRoutingPolicy,
     /// Per-priority synchronous admission limits.
     pub priority_limiter: PriorityLimiter,
+    /// Milliseconds granted to async worker leases before recovery.
+    pub lease_duration_ms: u128,
     /// Async job and lease state, optionally backed by SQLite.
     pub jobs: jobs::JobRegistry,
     /// In-memory worker registry for async worker-pull jobs.
@@ -145,6 +147,7 @@ async fn main() -> anyhow::Result<()> {
             cfg.priority_batch_limit,
             cfg.priority_background_limit,
         ),
+        lease_duration_ms: cfg.job_lease_duration_ms,
         jobs: jobs.clone(),
         workers: workers::WorkerRegistry::default(),
     };
@@ -248,6 +251,7 @@ mod tests {
             resources: ResourceRegistry::default(),
             resource_policy: ResourceRoutingPolicy::default(),
             priority_limiter: PriorityLimiter::default(),
+            lease_duration_ms: config::DEFAULT_JOB_LEASE_DURATION_MS,
             jobs: jobs::JobRegistry::default(),
             workers: workers::WorkerRegistry::default(),
         };
