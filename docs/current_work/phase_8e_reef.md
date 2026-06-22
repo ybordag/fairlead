@@ -80,6 +80,10 @@ behavior that in-process Rust tests cannot cover.
   which verifies background pruning honors `JOB_PRUNE_LIMIT=1` for a single
   sweep, leaves later eligible terminal jobs in place after the first removal,
   and continues pruning them across later intervals.
+- Added `omitted_background_prune_interval_keeps_manual_pruning_enabled`, which
+  verifies omitting `JOB_PRUNE_INTERVAL_SECS` prevents background pruning while
+  still allowing explicit `POST /v1/jobs/prune` to remove eligible terminal
+  jobs and record prune metrics.
 
 ## Next Slices
 

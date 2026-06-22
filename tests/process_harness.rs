@@ -286,7 +286,10 @@ fn assert_process_startup_fails(extra_env: &[(&str, &str)], expected_stderr: &st
     };
 
     let stderr = fs::read_to_string(&stderr_path).unwrap_or_default();
-    assert!(!status.success(), "Fairlead unexpectedly started successfully");
+    assert!(
+        !status.success(),
+        "Fairlead unexpectedly started successfully"
+    );
     assert!(
         stderr.contains(expected_stderr),
         "stderr did not contain {expected_stderr:?}; stderr: {stderr}"
@@ -465,6 +468,23 @@ async fn wait_for_job_not_found(fairlead: &FairleadProcess, job_id: &str) -> Val
             panic!("job {job_id} was not pruned; last status: {status}; last body: {fetched}");
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+async fn assert_job_remains_present_for(
+    fairlead: &FairleadProcess,
+    job_id: &str,
+    duration: Duration,
+) {
+    let deadline = tokio::time::Instant::now() + duration;
+    loop {
+        let (status, fetched) = fairlead.get_json(&format!("/v1/jobs/{job_id}")).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(fetched["job"]["id"], job_id);
+        if tokio::time::Instant::now() >= deadline {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
     }
 }
 
@@ -996,10 +1016,7 @@ async fn background_maintenance_fails_exhausted_expired_lease_and_delivers_callb
         assert_eq!(claim["job"]["id"], "job-1");
         assert_eq!(claim["job"]["status"], "running");
         assert_eq!(claim["job"]["attempts"], expected_attempt);
-        assert_eq!(
-            claim["job"]["lease"]["worker_id"],
-            "exhaustion-worker"
-        );
+        assert_eq!(claim["job"]["lease"]["worker_id"], "exhaustion-worker");
 
         let recovered = wait_for_job_status(&fairlead, "job-1", "queued").await;
         assert_eq!(recovered["job"]["attempts"], expected_attempt);
@@ -1095,9 +1112,7 @@ async fn exhausted_expired_lease_dispatches_callback_after_process_restart() {
     assert_eq!(submitted["job"]["max_attempts"], 3);
 
     for expected_attempt in 1..=2 {
-        let (status, claim) = fairlead
-            .claim_worker_job("restart-exhaustion-worker")
-            .await;
+        let (status, claim) = fairlead.claim_worker_job("restart-exhaustion-worker").await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(claim["job"]["id"], "job-1");
         assert_eq!(claim["job"]["attempts"], expected_attempt);
@@ -1107,9 +1122,7 @@ async fn exhausted_expired_lease_dispatches_callback_after_process_restart() {
         assert_eq!(recovered["job"]["error"]["retryable"], true);
     }
 
-    let (status, final_claim) = fairlead
-        .claim_worker_job("restart-exhaustion-worker")
-        .await;
+    let (status, final_claim) = fairlead.claim_worker_job("restart-exhaustion-worker").await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(final_claim["job"]["id"], "job-1");
     assert_eq!(final_claim["job"]["status"], "running");
@@ -1723,7 +1736,8 @@ async fn background_pruning_removes_only_eligible_terminal_jobs_over_real_http()
 #[tokio::test]
 async fn background_pruning_respects_limit_and_progresses_across_intervals() {
     let db_dir = unique_temp_dir("fairlead-process-background-prune-limit-db");
-    fs::create_dir_all(&db_dir).expect("create background prune limit SQLite process test temp dir");
+    fs::create_dir_all(&db_dir)
+        .expect("create background prune limit SQLite process test temp dir");
     let db_path = db_dir.join("jobs.sqlite").to_string_lossy().to_string();
     let mut fairlead = FairleadProcess::spawn(&[
         ("JOB_STORE", "sqlite"),
@@ -1800,4 +1814,82 @@ async fn background_pruning_respects_limit_and_progresses_across_intervals() {
 
     fairlead.shutdown().await;
     fs::remove_dir_all(db_dir).expect("remove background prune limit SQLite process test temp dir");
+}
+
+#[tokio::test]
+async fn omitted_background_prune_interval_keeps_manual_pruning_enabled() {
+    let db_dir = unique_temp_dir("fairlead-process-manual-only-prune-db");
+    fs::create_dir_all(&db_dir).expect("create manual-only prune SQLite process test temp dir");
+    let db_path = db_dir.join("jobs.sqlite").to_string_lossy().to_string();
+    let mut fairlead = FairleadProcess::spawn(&[
+        ("JOB_STORE", "sqlite"),
+        ("JOB_DB_PATH", &db_path),
+        ("JOB_RETENTION_SECS", "1"),
+        ("JOB_PRUNE_LIMIT", "10"),
+    ]);
+    fairlead.wait_for_health().await;
+
+    let (status, _) = fairlead
+        .register_worker(json!({
+            "id": "manual-only-prune-worker",
+            "endpoint_url": "http://manual-only-prune-worker.local",
+            "node_id": "spark-a",
+            "pool": "default",
+            "job_types": ["vision_analysis"],
+            "max_concurrent_jobs": 1,
+            "available_vram_mb": 4096
+        }))
+        .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, submitted) = fairlead
+        .submit_job(json!({
+            "type": "vision_analysis",
+            "priority": "batch",
+            "payload": { "image": "manual-only.jpg" }
+        }))
+        .await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+    assert_eq!(submitted["job"]["id"], "job-1");
+
+    let (status, claim) = fairlead.claim_worker_job("manual-only-prune-worker").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(claim["job"]["id"], "job-1");
+
+    let (status, completed) = fairlead
+        .complete_worker_job(
+            "manual-only-prune-worker",
+            "job-1",
+            json!({
+                "attempt": 1,
+                "result": { "classification": "healthy" }
+            }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(completed["job"]["status"], "complete");
+
+    tokio::time::sleep(Duration::from_millis(1_200)).await;
+    assert_job_remains_present_for(&fairlead, "job-1", Duration::from_millis(1_300)).await;
+
+    let (status, metrics) = fairlead.get_text("/metrics").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(!metrics.contains("fairlead_job_prunes_total{"));
+
+    let (status, pruned) = fairlead.prune_jobs().await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(pruned["pruned"]["removed"], 1);
+    assert_eq!(pruned["pruned"]["by_status"][0]["status"], "complete");
+    assert_eq!(pruned["pruned"]["by_status"][0]["removed"], 1);
+
+    let body = wait_for_job_not_found(&fairlead, "job-1").await;
+    assert_eq!(body["raw"], "job not found");
+    wait_for_metrics_contains(
+        &fairlead,
+        "fairlead_job_prunes_total{status=\"complete\"} 1",
+    )
+    .await;
+
+    fairlead.shutdown().await;
+    fs::remove_dir_all(db_dir).expect("remove manual-only prune SQLite process test temp dir");
 }

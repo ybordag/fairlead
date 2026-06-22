@@ -919,6 +919,8 @@ workload protocols.
     jobs, prune metrics, and manual prune behavior after a background sweep.
   - [x] Add process-level background prune limit coverage showing bounded
     per-sweep pruning and continued progress across later intervals.
+  - [x] Add process-level coverage showing omitted `JOB_PRUNE_INTERVAL_SECS`
+    disables background pruning while keeping manual pruning enabled.
   - Add process-level restart e2e harnesses for jobs, leases, callbacks, and
     metrics.
 - Keep Temporal deferred unless application workflows need durable multi-step
