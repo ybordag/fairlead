@@ -959,6 +959,13 @@ placement is stable.
 - Add provider credential/header policy.
 - Add cost, priority, and admission policy for cloud overflow.
 - Add deployment documentation for multiple applications sharing Fairlead.
+- Add opt-in DGX Spark deployment e2e for sync routing, async workers, pool
+  placement, callback delivery, lease recovery, and metrics using the two-node
+  deployment shape.
+- Add deployment-harness support for fake workers running as separate processes
+  on local or remote nodes.
+- Add SQLite shutdown/corruption stress tests and interrupted-write recovery
+  checks for long-running single-instance deployments.
 
 ### Phase 12: Transport and SDK Hardening
 
@@ -973,3 +980,11 @@ settled.
   surface.
 - Add parity tests so HTTP and gRPC APIs produce the same scheduling and job
   state transitions when both are supported.
+- Add crash-injection harnesses for worker result idempotency, including crash
+  after accepting a terminal result but before the worker receives the HTTP
+  response.
+- Add callback receiver crash-injection coverage for the at-least-once callback
+  contract, including receiver-side success before Fairlead records delivery.
+- Add concurrency stress tests for manual/background prune races, worker polling
+  loops, drain/reactivate/delete races, and duplicate claim prevention under
+  separate fake worker processes.

@@ -352,6 +352,22 @@ Remaining harness requirements:
 - assert captured stdout/stderr or structured logs for startup and
   maintenance-loop behavior
 
+Intentionally deferred beyond Reef:
+
+- concurrent manual/background prune races and double-count protection
+- crash-after-commit terminal result simulation for worker result idempotency
+- fake worker processes that poll, claim, renew, complete, fail, and drain in
+  loops
+- SQLite shutdown/corruption stress and interrupted-write recovery
+- DGX Spark deployment e2e on the two-node setup
+- callback receiver crash-injection after receiver-side success but before
+  Fairlead records delivery
+
+These are not good final Reef slices because they need either a heavier
+multi-process harness, controlled crash injection, or remote deployment access.
+They should be grouped into later harness/deployment hardening work rather than
+mixed into the default process harness branch.
+
 Worker lifecycle cases:
 
 - verify retryable failure from a draining worker is reassigned to another
