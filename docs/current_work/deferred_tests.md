@@ -379,8 +379,6 @@ Retention, pruning, and maintenance cases:
   across multiple intervals
 - verify omitting `JOB_PRUNE_INTERVAL_SECS` disables background pruning while
   leaving manual pruning enabled
-- verify exhausted expired leases fail through the background recovery loop
-  without waiting for another worker claim
 - verify exhausted expired leases dispatch terminal callbacks through the
   background recovery loop after process restart
 - verify shutdown does not interrupt SQLite writes in a way that corrupts job

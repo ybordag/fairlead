@@ -939,6 +939,105 @@ async fn background_maintenance_requeues_expired_lease() {
 }
 
 #[tokio::test]
+async fn background_maintenance_fails_exhausted_expired_lease_and_delivers_callback() {
+    let (callback_url, mut callbacks) = start_callback_target(StatusCode::OK).await;
+    let mut fairlead = FairleadProcess::spawn(&[
+        ("JOB_LEASE_DURATION_MS", "50"),
+        ("JOB_MAINTENANCE_INTERVAL_SECS", "1"),
+        ("CALLBACK_MAX_ATTEMPTS", "1"),
+        ("CALLBACK_RETRY_DELAY_MS", "25"),
+        ("CALLBACK_TIMEOUT_SECS", "1"),
+    ]);
+    fairlead.wait_for_health().await;
+
+    let (status, _) = fairlead
+        .register_worker(json!({
+            "id": "exhaustion-worker",
+            "endpoint_url": "http://exhaustion-worker.local",
+            "node_id": "spark-a",
+            "pool": "default",
+            "job_types": ["vision_analysis"],
+            "max_concurrent_jobs": 1,
+            "available_vram_mb": 4096
+        }))
+        .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, submitted) = fairlead
+        .submit_job(json!({
+            "type": "vision_analysis",
+            "priority": "batch",
+            "payload": { "image": "rose.jpg" },
+            "callback_url": callback_url
+        }))
+        .await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+    assert_eq!(submitted["job"]["id"], "job-1");
+    assert_eq!(submitted["job"]["max_attempts"], 3);
+
+    for expected_attempt in 1..=2 {
+        let (status, claim) = fairlead.claim_worker_job("exhaustion-worker").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(claim["job"]["id"], "job-1");
+        assert_eq!(claim["job"]["status"], "running");
+        assert_eq!(claim["job"]["attempts"], expected_attempt);
+        assert_eq!(
+            claim["job"]["lease"]["worker_id"],
+            "exhaustion-worker"
+        );
+
+        let recovered = wait_for_job_status(&fairlead, "job-1", "queued").await;
+        assert_eq!(recovered["job"]["attempts"], expected_attempt);
+        assert_eq!(recovered["job"]["error"]["message"], "attempt timed out");
+        assert_eq!(recovered["job"]["error"]["retryable"], true);
+        assert!(recovered["job"]["lease"].is_null());
+    }
+
+    let (status, final_claim) = fairlead.claim_worker_job("exhaustion-worker").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(final_claim["job"]["id"], "job-1");
+    assert_eq!(final_claim["job"]["status"], "running");
+    assert_eq!(final_claim["job"]["attempts"], 3);
+    assert_eq!(
+        final_claim["job"]["lease"]["worker_id"],
+        "exhaustion-worker"
+    );
+
+    let failed = wait_for_job_status(&fairlead, "job-1", "failed").await;
+    assert_eq!(failed["job"]["attempts"], 3);
+    assert_eq!(failed["job"]["error"]["message"], "attempt timed out");
+    assert_eq!(failed["job"]["error"]["retryable"], false);
+    assert!(failed["job"]["lease"].is_null());
+    assert!(matches!(
+        failed["job"]["callback"]["status"].as_str(),
+        Some("pending" | "delivered")
+    ));
+
+    let callback = tokio::time::timeout(Duration::from_secs(2), callbacks.recv())
+        .await
+        .expect("failure callback was delivered")
+        .expect("callback receiver stayed open");
+    assert_eq!(callback["job"]["id"], "job-1");
+    assert_eq!(callback["job"]["status"], "failed");
+    assert_eq!(callback["job"]["error"]["message"], "attempt timed out");
+
+    let delivered = wait_for_callback_status(&fairlead, "job-1", "delivered").await;
+    assert_eq!(delivered["job"]["status"], "failed");
+    assert_eq!(delivered["job"]["callback"]["last_http_status"], 200);
+
+    let (status, workers) = fairlead.get_json("/v1/workers").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(workers["workers"][0]["id"], "exhaustion-worker");
+    assert_eq!(workers["workers"][0]["in_flight_jobs"], 0);
+
+    let (status, no_work) = fairlead.claim_worker_job("exhaustion-worker").await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    assert_eq!(no_work["raw"], "");
+
+    fairlead.shutdown().await;
+}
+
+#[tokio::test]
 async fn worker_lifecycle_controls_work_over_real_http() {
     let mut fairlead = FairleadProcess::spawn(&[]);
     fairlead.wait_for_health().await;
