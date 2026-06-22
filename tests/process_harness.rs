@@ -503,6 +503,15 @@ async fn wait_for_metrics_contains(fairlead: &FairleadProcess, expected: &str) -
     }
 }
 
+fn assert_metrics_contain(metrics: &str, expected: &[&str]) {
+    for sample in expected {
+        assert!(
+            metrics.contains(sample),
+            "metrics did not contain {sample:?}; metrics: {metrics}"
+        );
+    }
+}
+
 #[tokio::test]
 async fn fairlead_process_starts_serves_health_and_shuts_down() {
     let mut fairlead = FairleadProcess::spawn(&[]);
@@ -788,6 +797,146 @@ async fn worker_can_claim_and_complete_job_over_http() {
     assert!(metrics
         .contains("fairlead_worker_in_flight_jobs{worker=\"vision-worker\",node=\"spark-a\"} 0"));
     assert!(metrics.contains("fairlead_job_duration_seconds_count{priority=\"batch\",type=\"vision_analysis\",status=\"complete\"} 1"));
+
+    fairlead.shutdown().await;
+}
+
+#[tokio::test]
+async fn metrics_stay_consistent_across_process_scheduler_workflow() {
+    let (callback_url, mut callbacks) = start_callback_target(StatusCode::OK).await;
+    let mut fairlead = FairleadProcess::spawn(&[
+        ("JOB_LEASE_DURATION_MS", "50"),
+        ("JOB_MAINTENANCE_INTERVAL_SECS", "1"),
+        ("JOB_RETENTION_SECS", "1"),
+        ("JOB_PRUNE_LIMIT", "10"),
+        ("CALLBACK_MAX_ATTEMPTS", "1"),
+        ("CALLBACK_RETRY_DELAY_MS", "25"),
+        ("CALLBACK_TIMEOUT_SECS", "1"),
+    ]);
+    fairlead.wait_for_health().await;
+
+    let (status, _) = fairlead
+        .register_worker(json!({
+            "id": "metrics-worker",
+            "endpoint_url": "http://metrics-worker.local",
+            "node_id": "spark-a",
+            "pool": "default",
+            "job_types": ["vision_analysis"],
+            "max_concurrent_jobs": 1,
+            "available_vram_mb": 4096
+        }))
+        .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, submitted) = fairlead
+        .submit_job(json!({
+            "type": "vision_analysis",
+            "priority": "batch",
+            "payload": { "image": "metrics.jpg" },
+            "callback_url": callback_url
+        }))
+        .await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+    assert_eq!(submitted["job"]["id"], "job-1");
+
+    let (status, metrics) = fairlead.get_text("/metrics").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_metrics_contain(
+        &metrics,
+        &[
+            "fairlead_workers{type=\"vision_analysis\",status=\"available\"} 1",
+            "fairlead_worker_in_flight_jobs{worker=\"metrics-worker\",node=\"spark-a\"} 0",
+            "fairlead_worker_available_job_slots{worker=\"metrics-worker\",node=\"spark-a\"} 1",
+            "fairlead_job_queue_depth{priority=\"batch\",type=\"vision_analysis\"} 1",
+            "fairlead_job_queue_wait_seconds_sum{priority=\"batch\",type=\"vision_analysis\"}",
+            "fairlead_job_queue_wait_seconds_max{priority=\"batch\",type=\"vision_analysis\"}",
+        ],
+    );
+
+    let (status, claim) = fairlead.claim_worker_job("metrics-worker").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(claim["job"]["id"], "job-1");
+    assert_eq!(claim["job"]["status"], "running");
+
+    let (status, metrics) = fairlead.get_text("/metrics").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_metrics_contain(
+        &metrics,
+        &[
+            "fairlead_worker_in_flight_jobs{worker=\"metrics-worker\",node=\"spark-a\"} 1",
+            "fairlead_worker_available_job_slots{worker=\"metrics-worker\",node=\"spark-a\"} 0",
+        ],
+    );
+    assert!(!metrics
+        .contains("fairlead_job_queue_depth{priority=\"batch\",type=\"vision_analysis\"} 1"));
+
+    let recovered = wait_for_job_status(&fairlead, "job-1", "queued").await;
+    assert_eq!(recovered["job"]["error"]["message"], "attempt timed out");
+    assert_eq!(recovered["job"]["error"]["retryable"], true);
+    let (status, metrics) = fairlead.get_text("/metrics").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_metrics_contain(
+        &metrics,
+        &[
+            "fairlead_worker_in_flight_jobs{worker=\"metrics-worker\",node=\"spark-a\"} 0",
+            "fairlead_worker_available_job_slots{worker=\"metrics-worker\",node=\"spark-a\"} 1",
+            "fairlead_job_queue_depth{priority=\"batch\",type=\"vision_analysis\"} 1",
+        ],
+    );
+
+    let (status, reclaimed) = fairlead.claim_worker_job("metrics-worker").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(reclaimed["job"]["id"], "job-1");
+    assert_eq!(reclaimed["job"]["attempts"], 2);
+
+    let (status, completed) = fairlead
+        .complete_worker_job(
+            "metrics-worker",
+            "job-1",
+            json!({
+                "attempt": 2,
+                "result": { "classification": "healthy" }
+            }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(completed["job"]["status"], "complete");
+
+    tokio::time::timeout(Duration::from_secs(2), callbacks.recv())
+        .await
+        .expect("metrics callback was delivered")
+        .expect("callback receiver stayed open");
+    wait_for_callback_status(&fairlead, "job-1", "delivered").await;
+
+    let (status, metrics) = fairlead.get_text("/metrics").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_metrics_contain(
+        &metrics,
+        &[
+            "fairlead_worker_in_flight_jobs{worker=\"metrics-worker\",node=\"spark-a\"} 0",
+            "fairlead_worker_available_job_slots{worker=\"metrics-worker\",node=\"spark-a\"} 1",
+            "fairlead_job_duration_seconds_count{priority=\"batch\",type=\"vision_analysis\",status=\"complete\"} 1",
+            "fairlead_job_callbacks_total{type=\"vision_analysis\",status=\"complete\",outcome=\"success\",http_status=\"200\"} 1",
+        ],
+    );
+
+    tokio::time::sleep(Duration::from_millis(1_200)).await;
+    let (status, pruned) = fairlead.prune_jobs().await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(pruned["pruned"]["removed"], 1);
+
+    let body = wait_for_job_not_found(&fairlead, "job-1").await;
+    assert_eq!(body["raw"], "job not found");
+    let (status, metrics) = fairlead.get_text("/metrics").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_metrics_contain(
+        &metrics,
+        &[
+            "fairlead_job_prunes_total{status=\"complete\"} 1",
+            "fairlead_workers{type=\"vision_analysis\",status=\"available\"} 1",
+            "fairlead_worker_in_flight_jobs{worker=\"metrics-worker\",node=\"spark-a\"} 0",
+        ],
+    );
 
     fairlead.shutdown().await;
 }

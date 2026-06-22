@@ -894,6 +894,9 @@ workload protocols.
     job reuse, pruning key release, and new-job creation after prune.
   - [x] Add process-level worker registration, claim, completion, and metrics
     smoke coverage.
+  - [x] Add process-level metrics consistency coverage across queue depth, queue
+    wait, worker capacity, lease recovery, terminal duration, callbacks, and
+    pruning.
   - [x] Add process-level callback receiver coverage for successful terminal
     callback delivery and callback metrics.
   - [x] Add SQLite-backed process restart coverage for pending callback retry

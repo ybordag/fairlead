@@ -37,6 +37,10 @@ behavior that in-process Rust tests cannot cover.
 - Added `worker_can_claim_and_complete_job_over_http`, which exercises the real
   process HTTP flow for submit -> register worker -> claim -> complete -> fetch
   final job -> scrape metrics.
+- Added `metrics_stay_consistent_across_process_scheduler_workflow`, which
+  verifies `/metrics` remains internally consistent across queued work, worker
+  capacity use, background lease recovery, completion, callback delivery, and
+  manual pruning.
 - Added an in-test callback receiver and
   `complete_job_delivers_callback_over_real_http`, which exercises submit with
   `callback_url` -> worker claim -> completion -> callback delivery -> callback

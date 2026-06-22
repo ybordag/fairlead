@@ -409,9 +409,6 @@ Idempotency and restart cases:
 
 Metrics and config cases:
 
-- scrape `/metrics` and verify worker availability, queue depth, queue wait,
-  terminal duration, callback, prune, and maintenance-related behavior remain
-  internally consistent
 - verify invalid env configuration fails startup for callback-specific keys such
   as `CALLBACK_MAX_ATTEMPTS`, `CALLBACK_TIMEOUT_SECS`, and
   `CALLBACK_RETRY_DELAY_MS`
