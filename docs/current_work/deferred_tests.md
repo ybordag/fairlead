@@ -409,9 +409,6 @@ Idempotency and restart cases:
 
 Metrics and config cases:
 
-- verify invalid env configuration fails startup for callback-specific keys such
-  as `CALLBACK_MAX_ATTEMPTS`, `CALLBACK_TIMEOUT_SECS`, and
-  `CALLBACK_RETRY_DELAY_MS`
 - verify logs or metrics distinguish lease recovery from pruning
 
 **Why deferred:** In-process tests cover registry, endpoint, SQLite, callback,

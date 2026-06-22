@@ -538,6 +538,17 @@ async fn invalid_scheduler_env_exits_before_serving_health() {
 }
 
 #[tokio::test]
+async fn invalid_callback_env_exits_before_serving_health() {
+    for (key, value) in [
+        ("CALLBACK_MAX_ATTEMPTS", "0"),
+        ("CALLBACK_TIMEOUT_SECS", "0"),
+        ("CALLBACK_RETRY_DELAY_MS", "abc"),
+    ] {
+        assert_process_startup_fails(&[(key, value)], key);
+    }
+}
+
+#[tokio::test]
 async fn sqlite_job_state_survives_process_restart() {
     let db_dir = unique_temp_dir("fairlead-process-db");
     fs::create_dir_all(&db_dir).expect("create SQLite process test temp dir");

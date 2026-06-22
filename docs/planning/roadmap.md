@@ -888,6 +888,8 @@ workload protocols.
     isolated local port and verifies `/health`.
   - [x] Add process-level startup failure coverage for invalid scheduler and
     retention environment configuration.
+  - [x] Add process-level startup failure coverage for invalid callback retry
+    and timeout environment configuration.
   - [x] Add JSON request helpers and a SQLite-backed job restart smoke test.
   - [x] Add SQLite-backed process idempotency coverage for invalid keys,
     matching duplicate submits, conflicting duplicate submits, terminal retained

@@ -20,6 +20,9 @@ behavior that in-process Rust tests cannot cover.
 - Added `invalid_scheduler_env_exits_before_serving_health`, which verifies the
   real process exits nonzero for invalid scheduler/retention configuration
   before serving health.
+- Added `invalid_callback_env_exits_before_serving_health`, which verifies the
+  real process exits nonzero for invalid callback retry/timeout configuration
+  before serving health.
 - Added JSON request helpers for process-level `GET` and `POST` calls.
 - Added restart support that stops and starts Fairlead again with the same
   port, temp directory, and environment.
