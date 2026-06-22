@@ -894,6 +894,14 @@ workload protocols.
   - [x] Add SQLite-backed process idempotency coverage for invalid keys,
     matching duplicate submits, conflicting duplicate submits, terminal retained
     job reuse, pruning key release, and new-job creation after prune.
+  - [x] Add SQLite-backed process cancellation idempotency coverage across
+    restart, including retained submit idempotency and no duplicate callback
+    delivery.
+  - [x] Add SQLite-backed process terminal-result replay coverage across
+    restart, including exact duplicate complete/fail reports, contradictory
+    conflict responses, and no duplicate completion callback delivery.
+  - [x] Add process-level mismatched worker-attempt rejection coverage for both
+    complete and fail result endpoints.
   - [x] Add process-level worker registration, claim, completion, and metrics
     smoke coverage.
   - [x] Add process-level metrics consistency coverage across queue depth, queue
@@ -915,10 +923,11 @@ workload protocols.
   - [x] Add SQLite-backed process restart coverage for exhausted expired leases
     failing during startup recovery and dispatching terminal callbacks.
   - [x] Add process-level worker lifecycle coverage for drain, reactivate,
-    busy deregister, completion while draining, idle deregister, and final
-    worker listing.
+    heartbeat while draining, re-registration while draining, busy deregister,
+    completion while draining, idle deregister, and final worker listing.
   - [x] Add process-level worker renew and retryable failure coverage with
-    requeue, worker capacity release, reclaim, and completion.
+    draining lease-holder behavior, requeue, worker capacity release, reclaim,
+    and completion.
   - [x] Add process-level manual prune coverage for eligible terminal jobs,
     delivered callbacks, pending callbacks, queued jobs, running jobs, and prune
     metrics.

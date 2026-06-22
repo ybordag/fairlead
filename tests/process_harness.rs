@@ -155,6 +155,11 @@ impl FairleadProcess {
             .await
     }
 
+    async fn heartbeat_worker(&self, worker_id: &str) -> (StatusCode, Value) {
+        self.post_json(&format!("/v1/workers/{worker_id}/heartbeat"), json!({}))
+            .await
+    }
+
     async fn deregister_worker(&self, worker_id: &str) -> (StatusCode, Value) {
         self.delete_json(&format!("/v1/workers/{worker_id}")).await
     }
@@ -733,6 +738,334 @@ async fn sqlite_idempotency_keys_survive_restart_and_release_after_prune() {
 
     fairlead.shutdown().await;
     fs::remove_dir_all(db_dir).expect("remove idempotency SQLite process test temp dir");
+}
+
+#[tokio::test]
+async fn sqlite_cancelled_job_stays_idempotent_after_process_restart() {
+    let db_dir = unique_temp_dir("fairlead-process-cancel-idempotency-db");
+    fs::create_dir_all(&db_dir).expect("create cancellation SQLite process test temp dir");
+    let db_path = db_dir.join("jobs.sqlite3");
+    let db_path = db_path.to_string_lossy().to_string();
+    let mut fairlead = FairleadProcess::spawn(&[
+        ("JOB_STORE", "sqlite"),
+        ("JOB_DB_PATH", &db_path),
+        ("CALLBACK_RETRY_DELAY_MS", "50"),
+    ]);
+    fairlead.wait_for_health().await;
+    let (callback_url, mut callbacks) = start_callback_target(StatusCode::OK).await;
+
+    let body = json!({
+        "type": "vision_analysis",
+        "priority": "batch",
+        "payload": { "image": "cancel-me.jpg" },
+        "callback_url": callback_url,
+        "idempotency_key": "cancel-image"
+    });
+    let (status, submitted) = fairlead.submit_job(body.clone()).await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+    assert_eq!(submitted["job"]["id"], "job-1");
+    assert_eq!(submitted["job"]["status"], "queued");
+
+    let (status, cancelled) = fairlead.delete_json("/v1/jobs/job-1").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(cancelled["job"]["status"], "cancelled");
+    let callback = callbacks
+        .recv()
+        .await
+        .expect("cancellation callback was delivered");
+    assert_eq!(callback["job"]["id"], "job-1");
+    assert_eq!(callback["job"]["status"], "cancelled");
+    let delivered = wait_for_callback_status(&fairlead, "job-1", "delivered").await;
+    assert_eq!(delivered["job"]["callback"]["attempts"], 1);
+
+    fairlead.restart().await;
+    fairlead.wait_for_health().await;
+
+    let (status, duplicate_cancel) = fairlead.delete_json("/v1/jobs/job-1").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(duplicate_cancel["job"]["status"], "cancelled");
+    assert_eq!(duplicate_cancel["job"]["callback"]["status"], "delivered");
+    assert_eq!(duplicate_cancel["job"]["callback"]["attempts"], 1);
+
+    let (status, duplicate_submit) = fairlead.submit_job(body).await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+    assert_eq!(duplicate_submit["job"]["id"], "job-1");
+    assert_eq!(duplicate_submit["job"]["status"], "cancelled");
+    assert_eq!(duplicate_submit["job"]["callback"]["attempts"], 1);
+
+    let duplicate_callback =
+        tokio::time::timeout(Duration::from_millis(150), callbacks.recv()).await;
+    assert!(
+        duplicate_callback.is_err(),
+        "duplicate cancellation retry delivered another callback"
+    );
+
+    fairlead.shutdown().await;
+    fs::remove_dir_all(db_dir).expect("remove cancellation SQLite process test temp dir");
+}
+
+#[tokio::test]
+async fn sqlite_terminal_worker_results_stay_idempotent_after_process_restart() {
+    let db_dir = unique_temp_dir("fairlead-process-terminal-idempotency-db");
+    fs::create_dir_all(&db_dir).expect("create terminal idempotency SQLite process test temp dir");
+    let db_path = db_dir.join("jobs.sqlite3");
+    let db_path = db_path.to_string_lossy().to_string();
+    let mut fairlead = FairleadProcess::spawn(&[
+        ("JOB_STORE", "sqlite"),
+        ("JOB_DB_PATH", &db_path),
+        ("CALLBACK_RETRY_DELAY_MS", "50"),
+    ]);
+    fairlead.wait_for_health().await;
+    let (callback_url, mut callbacks) = start_callback_target(StatusCode::OK).await;
+
+    let (status, _) = fairlead
+        .register_worker(json!({
+            "id": "terminal-worker",
+            "endpoint_url": "http://terminal-worker.local",
+            "node_id": "spark-a",
+            "pool": "default",
+            "job_types": ["vision_analysis", "embed_batch"],
+            "max_concurrent_jobs": 1,
+            "available_vram_mb": 4096
+        }))
+        .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, complete_job) = fairlead
+        .submit_job(json!({
+            "type": "vision_analysis",
+            "priority": "batch",
+            "payload": { "image": "complete-me.jpg" },
+            "callback_url": callback_url
+        }))
+        .await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+    assert_eq!(complete_job["job"]["id"], "job-1");
+
+    let (status, claim) = fairlead.claim_worker_job("terminal-worker").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(claim["job"]["id"], "job-1");
+
+    let completion_body = json!({
+        "attempt": 1,
+        "result": { "classification": "healthy" }
+    });
+    let (status, completed) = fairlead
+        .complete_worker_job("terminal-worker", "job-1", completion_body.clone())
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(completed["job"]["status"], "complete");
+    let callback = callbacks
+        .recv()
+        .await
+        .expect("completion callback was delivered");
+    assert_eq!(callback["job"]["id"], "job-1");
+    let delivered = wait_for_callback_status(&fairlead, "job-1", "delivered").await;
+    assert_eq!(delivered["job"]["callback"]["attempts"], 1);
+
+    let (status, failed_job) = fairlead
+        .submit_job(json!({
+            "type": "embed_batch",
+            "priority": "batch",
+            "payload": { "texts": ["bad"] }
+        }))
+        .await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+    assert_eq!(failed_job["job"]["id"], "job-2");
+
+    let (status, claim) = fairlead.claim_worker_job("terminal-worker").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(claim["job"]["id"], "job-2");
+
+    let failure_body = json!({
+        "attempt": 1,
+        "error": "model rejected input",
+        "retryable": false
+    });
+    let (status, failed) = fairlead
+        .fail_worker_job("terminal-worker", "job-2", failure_body.clone())
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(failed["job"]["status"], "failed");
+
+    fairlead.restart().await;
+    fairlead.wait_for_health().await;
+
+    let (status, _) = fairlead
+        .register_worker(json!({
+            "id": "terminal-worker",
+            "endpoint_url": "http://terminal-worker.local",
+            "node_id": "spark-a",
+            "pool": "default",
+            "job_types": ["vision_analysis", "embed_batch"],
+            "max_concurrent_jobs": 1,
+            "available_vram_mb": 4096
+        }))
+        .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, duplicate_complete) = fairlead
+        .complete_worker_job("terminal-worker", "job-1", completion_body)
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(duplicate_complete["job"]["status"], "complete");
+    assert_eq!(duplicate_complete["job"]["callback"]["attempts"], 1);
+
+    let (status, conflicting_complete) = fairlead
+        .complete_worker_job(
+            "terminal-worker",
+            "job-1",
+            json!({
+                "attempt": 1,
+                "result": { "classification": "diseased" }
+            }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(conflicting_complete["job"]["status"], "complete");
+    assert_eq!(
+        conflicting_complete["job"]["result"],
+        json!({ "classification": "healthy" })
+    );
+
+    let (status, duplicate_fail) = fairlead
+        .fail_worker_job("terminal-worker", "job-2", failure_body)
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(duplicate_fail["job"]["status"], "failed");
+
+    let (status, conflicting_fail) = fairlead
+        .fail_worker_job(
+            "terminal-worker",
+            "job-2",
+            json!({
+                "attempt": 1,
+                "error": "different error",
+                "retryable": false
+            }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(conflicting_fail["job"]["status"], "failed");
+    assert_eq!(
+        conflicting_fail["job"]["error"]["message"],
+        "model rejected input"
+    );
+
+    let duplicate_callback =
+        tokio::time::timeout(Duration::from_millis(150), callbacks.recv()).await;
+    assert!(
+        duplicate_callback.is_err(),
+        "duplicate terminal completion replay delivered another callback"
+    );
+
+    fairlead.shutdown().await;
+    fs::remove_dir_all(db_dir).expect("remove terminal idempotency SQLite process test temp dir");
+}
+
+#[tokio::test]
+async fn worker_result_endpoints_reject_mismatched_attempts_over_real_http() {
+    let mut fairlead = FairleadProcess::spawn(&[]);
+    fairlead.wait_for_health().await;
+
+    let (status, _) = fairlead
+        .register_worker(json!({
+            "id": "attempt-worker",
+            "endpoint_url": "http://attempt-worker.local",
+            "node_id": "spark-a",
+            "pool": "default",
+            "job_types": ["vision_analysis", "embed_batch"],
+            "max_concurrent_jobs": 1,
+            "available_vram_mb": 4096
+        }))
+        .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, complete_job) = fairlead
+        .submit_job(json!({
+            "type": "vision_analysis",
+            "priority": "batch",
+            "payload": { "image": "attempt-complete.jpg" }
+        }))
+        .await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+    assert_eq!(complete_job["job"]["id"], "job-1");
+
+    let (status, claim) = fairlead.claim_worker_job("attempt-worker").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(claim["job"]["lease"]["attempt"], 1);
+
+    let (status, rejected_complete) = fairlead
+        .complete_worker_job(
+            "attempt-worker",
+            "job-1",
+            json!({
+                "attempt": 2,
+                "result": { "ok": true }
+            }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(rejected_complete["job"]["status"], "running");
+    assert_eq!(rejected_complete["job"]["lease"]["attempt"], 1);
+
+    let (status, completed) = fairlead
+        .complete_worker_job(
+            "attempt-worker",
+            "job-1",
+            json!({
+                "attempt": 1,
+                "result": { "ok": true }
+            }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(completed["job"]["status"], "complete");
+
+    let (status, fail_job) = fairlead
+        .submit_job(json!({
+            "type": "embed_batch",
+            "priority": "batch",
+            "payload": { "texts": ["attempt-fail"] }
+        }))
+        .await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+    assert_eq!(fail_job["job"]["id"], "job-2");
+
+    let (status, claim) = fairlead.claim_worker_job("attempt-worker").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(claim["job"]["lease"]["attempt"], 1);
+
+    let (status, rejected_fail) = fairlead
+        .fail_worker_job(
+            "attempt-worker",
+            "job-2",
+            json!({
+                "attempt": 2,
+                "error": "wrong attempt",
+                "retryable": false
+            }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(rejected_fail["job"]["status"], "running");
+    assert_eq!(rejected_fail["job"]["lease"]["attempt"], 1);
+
+    let (status, failed) = fairlead
+        .fail_worker_job(
+            "attempt-worker",
+            "job-2",
+            json!({
+                "attempt": 1,
+                "error": "right attempt",
+                "retryable": false
+            }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(failed["job"]["status"], "failed");
+
+    fairlead.shutdown().await;
 }
 
 #[tokio::test]
@@ -1496,6 +1829,28 @@ async fn worker_lifecycle_controls_work_over_real_http() {
     assert_eq!(drained["worker"]["draining"], true);
     assert_eq!(drained["worker"]["available_job_slots"], 0);
 
+    let (status, heartbeat) = fairlead.heartbeat_worker("worker-a").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(heartbeat["worker"]["draining"], true);
+
+    let (status, re_registered) = fairlead
+        .register_worker(json!({
+            "id": "worker-a",
+            "endpoint_url": "http://worker-a-restarted.local",
+            "node_id": "spark-a",
+            "pool": "default",
+            "job_types": ["vision_analysis"],
+            "max_concurrent_jobs": 1,
+            "available_vram_mb": 4096
+        }))
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        re_registered["worker"]["endpoint_url"],
+        "http://worker-a-restarted.local"
+    );
+    assert_eq!(re_registered["worker"]["draining"], true);
+
     let (status, submitted) = fairlead
         .submit_job(json!({
             "type": "vision_analysis",
@@ -1626,6 +1981,11 @@ async fn worker_renew_and_retryable_fail_requeues_over_real_http() {
         .as_u64()
         .expect("lease expiry is a u64");
 
+    let (status, drained) = fairlead.drain_worker("primary-worker").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(drained["worker"]["draining"], true);
+    assert_eq!(drained["worker"]["in_flight_jobs"], 1);
+
     let (status, renewed) = fairlead.renew_worker_job("primary-worker", "job-1").await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(renewed["job"]["id"], "job-1");
@@ -1665,7 +2025,9 @@ async fn worker_renew_and_retryable_fail_requeues_over_real_http() {
         .iter()
         .find(|worker| worker["id"] == "primary-worker")
         .expect("primary worker is listed");
+    assert_eq!(primary["draining"], true);
     assert_eq!(primary["in_flight_jobs"], 0);
+    assert_eq!(primary["available_job_slots"], 0);
 
     let (status, reclaimed) = fairlead.claim_worker_job("backup-worker").await;
     assert_eq!(status, StatusCode::OK);

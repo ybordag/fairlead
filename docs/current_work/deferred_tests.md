@@ -370,12 +370,7 @@ mixed into the default process harness branch.
 
 Worker lifecycle cases:
 
-- verify retryable failure from a draining worker is reassigned to another
-  compatible worker
-- verify renewal from a draining worker is still accepted for a held job
 - verify repeated drain/reactivate/delete calls are safe while fake workers poll
-- verify drained workers that heartbeat or re-register remain draining until
-  explicit reactivation
 - verify route ordering does not let `/v1/workers/{id}` shadow claim, drain,
   reactivate, heartbeat, or result routes
 
@@ -396,13 +391,6 @@ Retention, pruning, and maintenance cases:
 
 Idempotency and restart cases:
 
-- retry `DELETE /v1/jobs/{id}` for an already-cancelled job before and after
-  restart without duplicate callback delivery
-- retry exact terminal complete/fail reports with `attempt` before and after
-  restart without duplicate callback delivery or worker-capacity mutation
-- retry contradictory terminal complete/fail reports and verify conflict
-- report complete/fail with a mismatched running lease attempt and verify
-  rejection
 - simulate crash after accepting a terminal result but before the worker
   receives the HTTP response; retry after restart and verify terminal-attempt
   metadata makes the retry idempotent

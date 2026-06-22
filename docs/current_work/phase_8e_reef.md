@@ -42,6 +42,19 @@ harness/deployment hardening phases and tracked in
   the same job before and after restart, conflicting reuse is rejected without
   queue mutation, retained terminal jobs are reused, and pruning releases the
   key for a new job.
+- Added `sqlite_cancelled_job_stays_idempotent_after_process_restart`, which
+  verifies a queued job cancelled with a callback stays cancelled after process
+  restart, duplicate cancellation remains idempotent, submit idempotency still
+  returns the cancelled job, and no duplicate callback is delivered.
+- Added `sqlite_terminal_worker_results_stay_idempotent_after_process_restart`,
+  which verifies exact duplicate completion and failure reports remain
+  idempotent after SQLite restart and worker re-registration, contradictory
+  reports remain conflicts, and duplicate completion replay does not redeliver
+  a callback.
+- Added `worker_result_endpoints_reject_mismatched_attempts_over_real_http`,
+  which verifies real HTTP complete/fail endpoints reject mismatched attempt
+  numbers without moving the job out of `running`, then accept the correct
+  attempt.
 - Added harness helpers for worker registration, worker claim, worker
   completion, and text responses such as `/metrics`.
 - Added `worker_can_claim_and_complete_job_over_http`, which exercises the real
@@ -80,12 +93,15 @@ harness/deployment hardening phases and tracked in
 - Added harness helpers for worker drain, reactivate, deregister, and DELETE
   requests.
 - Added `worker_lifecycle_controls_work_over_real_http`, which verifies
-  drain/reactivate/deregister behavior through the real process API, including
-  busy deregistration leaving a draining worker able to complete its held job.
+  drain/reactivate/deregister behavior through the real process API, heartbeat
+  and re-registration preserving draining state until explicit reactivation,
+  and busy deregistration leaving a draining worker able to complete its held
+  job.
 - Added harness helpers for worker lease renewal and worker-reported failure.
 - Added `worker_renew_and_retryable_fail_requeues_over_real_http`, which
-  verifies renewal extends a running lease and retryable worker failure requeues
-  the job for another worker to reclaim and complete.
+  verifies a draining worker holding a lease can still renew it, a retryable
+  worker failure requeues the job while keeping that worker draining, and
+  another worker can reclaim and complete the job.
 - Added a process harness helper for `POST /v1/jobs/prune`.
 - Added `prune_endpoint_removes_only_eligible_terminal_jobs_over_real_http`,
   which verifies manual pruning removes eligible terminal jobs and delivered
