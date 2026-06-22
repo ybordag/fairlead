@@ -1038,6 +1038,108 @@ async fn background_maintenance_fails_exhausted_expired_lease_and_delivers_callb
 }
 
 #[tokio::test]
+async fn exhausted_expired_lease_dispatches_callback_after_process_restart() {
+    let (callback_url, mut callbacks) = start_callback_target(StatusCode::OK).await;
+    let db_dir = unique_temp_dir("fairlead-process-exhausted-restart-db");
+    fs::create_dir_all(&db_dir).expect("create exhausted restart SQLite process test temp dir");
+    let db_path = db_dir.join("jobs.sqlite").to_string_lossy().to_string();
+    let mut fairlead = FairleadProcess::spawn(&[
+        ("JOB_STORE", "sqlite"),
+        ("JOB_DB_PATH", &db_path),
+        ("JOB_LEASE_DURATION_MS", "50"),
+        ("JOB_MAINTENANCE_INTERVAL_SECS", "1"),
+        ("CALLBACK_MAX_ATTEMPTS", "1"),
+        ("CALLBACK_RETRY_DELAY_MS", "25"),
+        ("CALLBACK_TIMEOUT_SECS", "1"),
+    ]);
+    fairlead.wait_for_health().await;
+
+    let (status, _) = fairlead
+        .register_worker(json!({
+            "id": "restart-exhaustion-worker",
+            "endpoint_url": "http://restart-exhaustion-worker.local",
+            "node_id": "spark-a",
+            "pool": "default",
+            "job_types": ["vision_analysis"],
+            "max_concurrent_jobs": 1,
+            "available_vram_mb": 4096
+        }))
+        .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, submitted) = fairlead
+        .submit_job(json!({
+            "type": "vision_analysis",
+            "priority": "batch",
+            "payload": { "image": "rose.jpg" },
+            "callback_url": callback_url
+        }))
+        .await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+    assert_eq!(submitted["job"]["id"], "job-1");
+    assert_eq!(submitted["job"]["max_attempts"], 3);
+
+    for expected_attempt in 1..=2 {
+        let (status, claim) = fairlead
+            .claim_worker_job("restart-exhaustion-worker")
+            .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(claim["job"]["id"], "job-1");
+        assert_eq!(claim["job"]["attempts"], expected_attempt);
+
+        let recovered = wait_for_job_status(&fairlead, "job-1", "queued").await;
+        assert_eq!(recovered["job"]["attempts"], expected_attempt);
+        assert_eq!(recovered["job"]["error"]["retryable"], true);
+    }
+
+    let (status, final_claim) = fairlead
+        .claim_worker_job("restart-exhaustion-worker")
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(final_claim["job"]["id"], "job-1");
+    assert_eq!(final_claim["job"]["status"], "running");
+    assert_eq!(final_claim["job"]["attempts"], 3);
+    assert_eq!(
+        final_claim["job"]["lease"]["worker_id"],
+        "restart-exhaustion-worker"
+    );
+
+    fairlead.shutdown().await;
+    expire_sqlite_job_lease(&db_path, "job-1");
+
+    fairlead.restart().await;
+    fairlead.wait_for_health().await;
+
+    let failed = wait_for_job_status(&fairlead, "job-1", "failed").await;
+    assert_eq!(failed["job"]["attempts"], 3);
+    assert_eq!(failed["job"]["error"]["message"], "attempt timed out");
+    assert_eq!(failed["job"]["error"]["retryable"], false);
+    assert!(failed["job"]["lease"].is_null());
+
+    let callback = tokio::time::timeout(Duration::from_secs(2), callbacks.recv())
+        .await
+        .expect("restart failure callback was delivered")
+        .expect("callback receiver stayed open");
+    assert_eq!(callback["job"]["id"], "job-1");
+    assert_eq!(callback["job"]["status"], "failed");
+    assert_eq!(callback["job"]["error"]["message"], "attempt timed out");
+
+    let delivered = wait_for_callback_status(&fairlead, "job-1", "delivered").await;
+    assert_eq!(delivered["job"]["status"], "failed");
+    assert_eq!(delivered["job"]["callback"]["last_http_status"], 200);
+
+    let (status, workers) = fairlead.get_json("/v1/workers").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(workers["workers"]
+        .as_array()
+        .expect("workers response is an array")
+        .is_empty());
+
+    fairlead.shutdown().await;
+    fs::remove_dir_all(db_dir).expect("remove exhausted restart SQLite process test temp dir");
+}
+
+#[tokio::test]
 async fn worker_lifecycle_controls_work_over_real_http() {
     let mut fairlead = FairleadProcess::spawn(&[]);
     fairlead.wait_for_health().await;

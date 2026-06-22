@@ -54,6 +54,10 @@ behavior that in-process Rust tests cannot cover.
   which verifies the background maintenance loop fails an expired lease once the
   job exhausts its attempts, releases worker capacity, dispatches the terminal
   failure callback, and leaves no reclaimable work.
+- Added `exhausted_expired_lease_dispatches_callback_after_process_restart`,
+  which uses SQLite storage to verify an exhausted expired lease is failed
+  during Fairlead startup recovery and its terminal failure callback is
+  delivered after restart.
 - Added harness helpers for worker drain, reactivate, deregister, and DELETE
   requests.
 - Added `worker_lifecycle_controls_work_over_real_http`, which verifies

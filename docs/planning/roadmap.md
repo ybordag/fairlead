@@ -904,6 +904,8 @@ workload protocols.
   - [x] Add process-level background maintenance-loop coverage for exhausted
     expired leases failing, releasing worker capacity, dispatching callbacks,
     and leaving no reclaimable work.
+  - [x] Add SQLite-backed process restart coverage for exhausted expired leases
+    failing during startup recovery and dispatching terminal callbacks.
   - [x] Add process-level worker lifecycle coverage for drain, reactivate,
     busy deregister, completion while draining, idle deregister, and final
     worker listing.
