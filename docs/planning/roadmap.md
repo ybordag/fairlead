@@ -956,9 +956,15 @@ polluting the router core with protocol-specific logic.
 - Add one simple synchronous adapter first, such as rerank.
 - Add one concrete async adapter next, such as vision analysis.
 - Define adapter payload/result conventions and validation boundaries.
+- Add an initial optional gRPC/protobuf adapter contract where it improves typed
+  workload integration, starting with the narrowest useful surface rather than
+  replacing HTTP.
+- Support HTTP and gRPC side by side for the selected adapter so the scheduler
+  core stays transport-independent.
 - Add adapter-specific tests and demos.
-- Keep HTTP as the first transport unless the adapter contract proves it needs
-  typed RPC.
+- Keep HTTP/OpenAI-compatible endpoints as the canonical LLM compatibility
+  surface; Phase 9 gRPC should target adapter workloads, worker APIs, or typed
+  application integration, not vLLM compatibility.
 
 ### Phase 10: Rich Resource Policy
 
@@ -992,13 +998,14 @@ placement is stable.
 
 ### Phase 12: Transport and SDK Hardening
 
-Goal: stabilize client and worker ergonomics after the HTTP contracts have
-settled.
+Goal: stabilize client and worker ergonomics after the HTTP and initial gRPC
+adapter contracts have settled.
 
-- Add optional gRPC service definitions for stable job, worker, and callback
-  contracts if HTTP/JSON starts limiting typed client development.
+- Refine the initial Phase 9 gRPC/protobuf contracts into stable job, worker,
+  and callback service definitions if typed client development proves useful.
 - Generate Rust and Python clients for Fairlead's stable APIs.
-- Support gRPC worker/backend adapters where workers expose typed RPC services.
+- Expand gRPC worker/backend adapter support where workers expose typed RPC
+  services.
 - Keep HTTP/OpenAI-compatible endpoints as the canonical LLM compatibility
   surface.
 - Add parity tests so HTTP and gRPC APIs produce the same scheduling and job

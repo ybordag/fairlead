@@ -83,5 +83,5 @@ The following are not implemented yet:
 - typed async adapters for specific worker protocols
 - push dispatch from Fairlead to workers
 - cloud-provider overflow pools
-- gRPC transport or generated SDKs
+- gRPC transport, protobuf contracts, or generated SDKs
 - multi-instance job coordination through Postgres or another shared store

@@ -542,15 +542,18 @@ to OpenAI-compatible HTTP backends such as vLLM. That should remain the default
 compatibility surface because it works with existing OpenAI clients, vLLM, demos,
 and simple service-to-service calls.
 
-gRPC can still be useful later as an optional transport layer once the job and
-worker contracts stabilize. The important split is:
+gRPC is useful as an optional typed transport when an adapter or application
+contract benefits from protobuf schemas. Phase 9 should introduce the narrowest
+useful gRPC/protobuf surface alongside HTTP for adapter work; later transport
+hardening can stabilize generated clients and parity guarantees. The important
+split is:
 
 - inbound client transport: Rhizome or another caller talks to Fairlead
 - scheduling core: Fairlead validates, queues, leases, retries, and records jobs
 - outbound backend adapter: Fairlead talks to vLLM, a vision worker, or another
   compute service
 
-Possible later shapes:
+Possible shapes:
 
 ```text
 Rhizome --gRPC--> Fairlead --HTTP/OpenAI--> vLLM
@@ -558,10 +561,11 @@ worker  --gRPC--> Fairlead claim/heartbeat/complete APIs
 Fairlead --gRPC--> worker service, if that worker exposes typed RPCs
 ```
 
-This is not Phase 6C scope. Adding gRPC well means defining protobuf contracts,
-generating Rust/Python clients, testing HTTP/gRPC parity, deciding streaming
-semantics, and preserving OpenAI-compatible HTTP behavior for LLM endpoints.
-It fits better in Phase 9 adapter work or Phase 12 transport/SDK hardening.
+This is not Phase 6C scope, and it should not replace OpenAI-compatible HTTP
+for LLM endpoints. Phase 9 can define the first protobuf contract where adapter
+work makes the typed boundary useful. Phase 12 should then harden that surface:
+generated Rust/Python clients, HTTP/gRPC parity tests, streaming semantics, and
+long-term compatibility policy.
 
 ### Scheduler boundaries
 
@@ -762,10 +766,10 @@ work.
 | 6F | Callback delivery and async finalization | Callers can receive terminal job updates without polling forever |
 | 7 | Pool-aware placement | Workloads can target named local, peer, or future overflow pools consistently |
 | 8 | Scheduler hardening | Async workers can drain, deregister, prune completed jobs, and survive process-level restart tests |
-| 9 | Adapter boundaries and new workloads | Non-OpenAI-compatible workloads can plug into Fairlead without polluting router core |
+| 9 | Adapter boundaries and new workloads | Non-OpenAI-compatible workloads and initial optional gRPC adapter contracts can plug into Fairlead without polluting router core |
 | 10 | Rich resource policy | Scheduling can account for CPU slots, GPU slots, model residency, and custom capacity |
 | 11 | External scale and overflow | Multiple Fairlead instances and optional cloud overflow can be evaluated with explicit policy |
-| 12 | Transport and SDK hardening | Stable clients and optional gRPC can be added after HTTP contracts settle |
+| 12 | Transport and SDK hardening | Stable clients, parity tests, and hardened gRPC support can be added after adapter contracts settle |
 
 Phases 1–3 give you a working proxy in a few days. Phases 4–5 give you
 production resilience. Phase 6 completes the core sync/async control-plane
