@@ -6,6 +6,13 @@ Add a reusable process-level test harness that can start a real Fairlead
 process, drive HTTP calls against it, and verify restart-sensitive scheduler
 behavior that in-process Rust tests cannot cover.
 
+## Status
+
+Complete for the scoped Reef branch. Remaining heavier process, crash-injection,
+concurrency, and remote deployment cases are intentionally deferred to later
+harness/deployment hardening phases and tracked in
+`docs/current_work/deferred_tests.md`.
+
 ## Implemented
 
 - Created `tests/process_harness.rs`.
@@ -97,6 +104,13 @@ behavior that in-process Rust tests cannot cover.
   still allowing explicit `POST /v1/jobs/prune` to remove eligible terminal
   jobs and record prune metrics.
 
-## Next Slices
+## Deferred Beyond Reef
 
-- Move deferred Phase 8 local-process cases into concrete tests incrementally.
+- Concurrent manual/background prune races and double-count protection.
+- Crash-after-commit terminal result simulation for worker result idempotency.
+- Fake worker processes that poll, claim, renew, complete, fail, and drain in
+  loops.
+- SQLite shutdown/corruption stress and interrupted-write recovery.
+- DGX Spark deployment e2e on the two-node setup.
+- Callback receiver crash-injection after receiver-side success but before
+  Fairlead records delivery.

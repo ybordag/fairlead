@@ -929,8 +929,12 @@ workload protocols.
     per-sweep pruning and continued progress across later intervals.
   - [x] Add process-level coverage showing omitted `JOB_PRUNE_INTERVAL_SECS`
     disables background pruning while keeping manual pruning enabled.
-  - Add process-level restart e2e harnesses for jobs, leases, callbacks, and
-    metrics.
+  - [x] Add process-level restart e2e harnesses for job state, idempotency,
+    leases, callbacks, exhausted-lease recovery, and metrics-sensitive scheduler
+    workflows.
+  - [x] Keep heavier crash-injection, concurrency, fake-worker-process, SQLite
+    stress, and remote DGX Spark deployment cases deferred to later
+    harness/deployment hardening phases.
 - Keep Temporal deferred unless application workflows need durable multi-step
   orchestration beyond bounded compute jobs.
 
